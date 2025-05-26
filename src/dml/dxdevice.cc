@@ -1,4 +1,4 @@
-#include "device.h"
+#include "dxdevice.h"
 #include <spdlog/spdlog.h>
 #include "common.h"
 

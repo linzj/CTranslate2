@@ -233,8 +233,8 @@ if(WITH_DIRECTML)
     src/dml/backend_dml.cc
     src/dml/backend_dml.h
     src/dml/common.h
-    src/dml/device.cc
-    src/dml/device.h
+    src/dml/dxdevice.cc
+    src/dml/dxdevice.h
     src/dml/dxmodule.cc
     src/dml/dxmodule.h
     src/dml/module_info.h
