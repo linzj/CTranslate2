@@ -12,29 +12,42 @@
 namespace ctranslate2 {
 
   Device str_to_device(const std::string& device) {
-    if (device == "cuda" || device == "CUDA")
+    if (device == "cuda" || device == "CUDA") {
 #ifdef CT2_WITH_CUDA
       return Device::CUDA;
 #else
       throw std::invalid_argument("This CTranslate2 package was not compiled with CUDA support");
 #endif
-    if (device == "cpu" || device == "CPU")
+    }
+    if (device == "cpu" || device == "CPU") {
       return Device::CPU;
-    if (device == "auto" || device == "AUTO")
-#ifdef CT2_WITH_CUDA
-      return cuda::has_gpu() ? Device::CUDA : Device::CPU;
+    }
+    if (device == "directml" || device == "DIRECTML" || device == "dml" || device == "DML") {
+#ifdef CT2_WITH_DIRECTML
+      return Device::DirectML;
 #else
-      return Device::CPU;
+      throw std::invalid_argument("This CTranslate2 package was not compiled with DirectML support");
 #endif
+    }
+    if (device == "auto" || device == "AUTO") {
+#ifdef CT2_WITH_CUDA
+      if (cuda::has_gpu())
+        return Device::CUDA;
+#endif
+      // TODO: Add DirectML availability check for "auto" mode once dml::has_device() or similar exists.
+      return Device::CPU;
+    }
     throw std::invalid_argument("unsupported device " + device);
   }
 
   std::string device_to_str(Device device) {
     switch (device) {
-    case Device::CUDA:
-      return "cuda";
     case Device::CPU:
       return "cpu";
+    case Device::CUDA:
+      return "cuda";
+    case Device::DirectML:
+      return "directml";
     }
     return "";
   }
@@ -45,14 +58,21 @@ namespace ctranslate2 {
 
   int get_device_count(Device device) {
     switch (device) {
+    case Device::CPU:
+      return 1;
     case Device::CUDA:
 #ifdef CT2_WITH_CUDA
       return cuda::get_gpu_count();
 #else
       return 0;
 #endif
-    case Device::CPU:
+    case Device::DirectML:
+#ifdef CT2_WITH_DIRECTML
+      // Placeholder: Actual DirectML device count should be retrieved here.
       return 1;
+#else
+      return 0;
+#endif
     }
     return 0;
   }
@@ -87,6 +107,21 @@ namespace ctranslate2 {
   }
 #endif
 
+#ifdef CT2_WITH_DIRECTML
+  template<>
+  int get_device_index<Device::DirectML>() {
+    // Placeholder: Actual DirectML current device index should be retrieved here.
+    return 0;
+  }
+
+  template<>
+  void set_device_index<Device::DirectML>(int index) {
+    // Placeholder: Actual DirectML set device logic should be implemented here.
+    if (index != 0)
+      throw std::invalid_argument("Invalid DirectML device index: " + std::to_string(index) + " (placeholder check)");
+  }
+#endif
+
   int get_device_index(Device device) {
     int index = 0;
     DEVICE_DISPATCH(device, index = get_device_index<D>());
@@ -103,6 +138,11 @@ namespace ctranslate2 {
       const ScopedDeviceSetter scoped_device_setter(device, index);
       cudaDeviceSynchronize();
     }
+#elif defined(CT2_WITH_DIRECTML)
+    else if (device == Device::DirectML) {
+      // Placeholder: Actual DirectML device synchronization logic.
+      (void)index; // Suppress unused variable warning for now.
+    }
 #else
     (void)device;
     (void)index;
@@ -113,6 +153,10 @@ namespace ctranslate2 {
 #ifdef CT2_WITH_CUDA
     if (device == Device::CUDA) {
       cudaStreamSynchronize(cuda::get_cuda_stream());
+    }
+#elif defined(CT2_WITH_DIRECTML)
+    else if (device == Device::DirectML) {
+      // Placeholder: Actual DirectML stream synchronization logic.
     }
 #else
     (void)device;

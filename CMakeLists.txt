@@ -14,6 +14,7 @@ option(WITH_OPENBLAS "Compile with OpenBLAS backend" OFF)
 option(WITH_RUY "Compile with Ruy backend" OFF)
 option(WITH_CUDA "Compile with CUDA backend" OFF)
 option(WITH_CUDNN "Compile with cuDNN backend" OFF)
+option(WITH_DIRECTML "Compile with DirectML backend" OFF)
 option(CUDA_DYNAMIC_LOADING "Dynamically load CUDA libraries at runtime" OFF)
 option(ENABLE_CPU_DISPATCH "Compile CPU kernels for multiple ISA and dispatch at runtime" ON)
 option(ENABLE_PROFILING "Compile with profiling support" OFF)
@@ -26,6 +27,14 @@ option(WITH_FLASH_ATTN "Compile with Flash Attention 2" OFF)
 if(ENABLE_PROFILING)
   message(STATUS "Enable profiling support")
   add_definitions(-DCT2_ENABLE_PROFILING)
+endif()
+
+if(WITH_DIRECTML)
+  message(STATUS "Compiling with DirectML backend")
+  add_definitions(-DCT2_WITH_DIRECTML)
+  # Placeholder for finding DirectML SDK and adding includes/libraries
+  # find_package(DirectML REQUIRED)
+  # target_link_libraries(ctranslate2 PRIVATE DirectML::DirectML)
 endif()
 
 if(DEFINED ENV{INTELROOT})
@@ -219,6 +228,14 @@ set(SOURCES
   src/vocabulary.cc
   src/vocabulary_map.cc
 )
+
+if(WITH_DIRECTML)
+  list(APPEND SOURCES src/dml/backend_dml.cc)
+  list(APPEND SOURCES src/dml/allocator_dml.cc)
+  # list(APPEND PRIVATE_INCLUDE_DIRECTORIES ${DirectML_INCLUDE_DIRS}) # When DirectML SDK is found
+  # list(APPEND LIBRARIES ${DirectML_LIBRARIES}) # When DirectML SDK is found
+endif()
+
 set(LIBRARIES
   ${CMAKE_THREAD_LIBS_INIT}
   spdlog::spdlog_header_only
