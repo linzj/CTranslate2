@@ -1,15 +1,33 @@
 #include "ctranslate2/devices.h"
 
+#include <mutex> // Required for std::once_flag and std::call_once
+
+// CUDA specific includes (guarded by CT2_WITH_CUDA)
 #ifdef CT2_WITH_CUDA
 #  include "cuda/utils.h"
+#  include <cuda_runtime.h>
 #endif
+
+// DirectML specific forward declarations and uses (guarded by CT2_WITH_DIRECTML)
+#ifdef CT2_WITH_DIRECTML
+namespace ctranslate2 { namespace dml {
+  bool has_directml_device();
+  void initialize_directml();
+  // We'll define dml::synchronize_device and dml::synchronize_stream here in the next step
+  // or inside dml/backend_dml.cc once core DML context/queue objects are accessible.
+} }
+#endif
+
 #ifdef CT2_WITH_TENSOR_PARALLEL
 #  include <unistd.h>
 #endif
 
-#include "device_dispatch.h"
+#include "device_dispatch.h" // Assuming this contains DEVICE_DISPATCH macro
 
 namespace ctranslate2 {
+
+  // Global flag for one-time DirectML initialization
+  static std::once_flag directml_init_flag;
 
   Device str_to_device(const std::string& device) {
     if (device == "cuda" || device == "CUDA") {
@@ -24,6 +42,7 @@ namespace ctranslate2 {
     }
     if (device == "directml" || device == "DIRECTML" || device == "dml" || device == "DML") {
 #ifdef CT2_WITH_DIRECTML
+      std::call_once(directml_init_flag, dml::initialize_directml);
       return Device::DirectML;
 #else
       throw std::invalid_argument("This CTranslate2 package was not compiled with DirectML support");
@@ -34,7 +53,12 @@ namespace ctranslate2 {
       if (cuda::has_gpu())
         return Device::CUDA;
 #endif
-      // TODO: Add DirectML availability check for "auto" mode once dml::has_device() or similar exists.
+#ifdef CT2_WITH_DIRECTML
+      if (dml::has_directml_device()) {
+          std::call_once(directml_init_flag, dml::initialize_directml);
+          return Device::DirectML;
+      }
+#endif
       return Device::CPU;
     }
     throw std::invalid_argument("unsupported device " + device);
@@ -68,8 +92,7 @@ namespace ctranslate2 {
 #endif
     case Device::DirectML:
 #ifdef CT2_WITH_DIRECTML
-      // Placeholder: Actual DirectML device count should be retrieved here.
-      return 1;
+      return dml::has_directml_device() ? 1 : 0;
 #else
       return 0;
 #endif
@@ -110,15 +133,18 @@ namespace ctranslate2 {
 #ifdef CT2_WITH_DIRECTML
   template<>
   int get_device_index<Device::DirectML>() {
-    // Placeholder: Actual DirectML current device index should be retrieved here.
+    // DirectML does not have a concept of "current device" in the same way CUDA does.
+    // For now, we'll return 0 as DirectML typically uses a single default device per adapter.
     return 0;
   }
 
   template<>
   void set_device_index<Device::DirectML>(int index) {
-    // Placeholder: Actual DirectML set device logic should be implemented here.
-    if (index != 0)
-      throw std::invalid_argument("Invalid DirectML device index: " + std::to_string(index) + " (placeholder check)");
+    // DirectML doesn't have a "set device" equivalent like CUDA.
+    // Device selection usually happens during creation based on adapter enumeration.
+    if (index != 0) {
+      THROW_INVALID_ARGUMENT("DirectML backend does not support setting device index " + std::to_string(index) + ". Only index 0 is supported (default adapter).");
+    }
   }
 #endif
 
@@ -140,7 +166,8 @@ namespace ctranslate2 {
     }
 #elif defined(CT2_WITH_DIRECTML)
     else if (device == Device::DirectML) {
-      // Placeholder: Actual DirectML device synchronization logic.
+      // DirectML synchronization: This is usually done by ensuring the command list is executed
+      // and GPU work is flushed. This will be implemented in dml/backend_dml.cc once CommandListExecutor is ready.
       (void)index; // Suppress unused variable warning for now.
     }
 #else
@@ -156,13 +183,15 @@ namespace ctranslate2 {
     }
 #elif defined(CT2_WITH_DIRECTML)
     else if (device == Device::DirectML) {
-      // Placeholder: Actual DirectML stream synchronization logic.
+      // DirectML does not have a "stream" concept directly analogous to CUDA streams.
+      // Synchronization for DML operations would happen at the command list submission level,
+      // handled by a dedicated executor, which is not yet implemented.
     }
 #else
     (void)device;
 #endif
   }
-  // Initialize the static member variable
+
 #ifdef CT2_WITH_TENSOR_PARALLEL
     std::vector<ncclComm_t*> ScopedMPISetter::_nccl_comms;
 #endif
