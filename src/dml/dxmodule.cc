@@ -19,6 +19,8 @@ __declspec(dllexport) extern const char* D3D12SDKPath = u8"./D3D12/";
 }
 #endif
 
+namespace ctranslate2 {
+namespace dml {
 Module::Module(const char* moduleName) {
   if (!moduleName) {
     return;
@@ -40,7 +42,8 @@ Module::Module(const char* moduleName) {
     return;
   }
   std::wstring wideFullPath(len - 1, L'\0');
-  MultiByteToWideChar(CP_UTF8, 0, fullPath.c_str(), -1, &wideFullPath[0], len - 1);
+  MultiByteToWideChar(CP_UTF8, 0, fullPath.c_str(), -1, &wideFullPath[0],
+                      len - 1);
 
   m_module = LoadLibraryW(wideFullPath.c_str());
 #else
@@ -135,3 +138,6 @@ DmlModule::DmlModule(const char* moduleName) : Module(moduleName) {
     InitSymbol(&m_dmlCreateDevice1, "DMLCreateDevice1");
   }
 }
+
+}  // namespace dml
+}  // namespace ctranslate2

@@ -7,6 +7,8 @@
 #include <wrl/client.h>
 #include "module_info.h"
 
+namespace ctranslate2 {
+namespace dml {
 class Module {
  public:
   explicit Module(const char* moduleName);
@@ -119,3 +121,6 @@ class DmlModule : public Module {
  private:
   decltype(&DMLCreateDevice1) m_dmlCreateDevice1 = nullptr;
 };
+
+}  // namespace dml
+}  // namespace ctranslate2

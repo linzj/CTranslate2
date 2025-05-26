@@ -1,20 +1,19 @@
 #pragma once
 #ifdef CT2_WITH_DIRECTML
-#include <DirectML.h>
-#include <d3d12.h>
+#include <memory>      // Added for std::unique_ptr
+#include "dxdevice.h"  // Added
 
 namespace ctranslate2 {
 namespace dml {
+
+class Device;  // Forward declaration
+
 bool has_directml_device();
 void initialize_directml();
-ID3D12Device* get_d3d12_device();
+void release_directml();  // Added
 
-IDMLDevice* get_dml_device();
-
-ID3D12CommandQueue* get_command_queue();
-// We'll define dml::synchronize_device and dml::synchronize_stream here in the
-// next step or inside dml/backend_dml.cc once core DML context/queue objects
-// are accessible.
+Device* get_device();
+IDMLDevice1* get_dml_device();
 }  // namespace dml
 }  // namespace ctranslate2
 

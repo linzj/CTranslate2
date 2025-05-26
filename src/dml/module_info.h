@@ -26,7 +26,3 @@ struct ModuleInfo {
   std::wstring path;
   std::wstring version;
 };
-
-std::optional<ModuleInfo> GetModuleInfo(std::string_view moduleName);
-
-void PrintDependencies();

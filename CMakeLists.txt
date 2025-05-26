@@ -230,6 +230,7 @@ set(SOURCES
 if(WITH_DIRECTML)
   list(APPEND SOURCES
     src/dml/allocator_dml.cc
+    src/dml/allocator_dml.h
     src/dml/backend_dml.cc
     src/dml/backend_dml.h
     src/dml/common.h

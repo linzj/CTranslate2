@@ -6,12 +6,9 @@
 #include <d3d12.h>
 #include <wrl/client.h>
 #include <algorithm>
-#include <cmath>
-#include <memory>
 #include <vector>
 #include "dml/backend_dml.h"
 #include "type_dispatch.h"
-
 
 using Microsoft::WRL::ComPtr;
 
@@ -63,18 +60,9 @@ void execute_dml_operator(
     IDMLCompiledOperator* compiled_op,
     const std::vector<DML_BINDING_DESC>& input_bindings,
     const std::vector<DML_BINDING_DESC>& output_bindings) {
-  auto device = get_d3d12_device();
-  auto command_queue = get_command_queue();
-
-  // Create command allocator and list
-  ComPtr<ID3D12CommandAllocator> command_allocator;
-  ComPtr<ID3D12GraphicsCommandList> command_list;
-
-  device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                 IID_PPV_ARGS(&command_allocator));
-  device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
-                            command_allocator.Get(), nullptr,
-                            IID_PPV_ARGS(&command_list));
+  auto dxdevice = get_device();
+  auto d3ddevice = dxdevice->D3D();
+  auto command_list = dxdevice->GetCommandList();
 
   // Create binding table
   DML_BINDING_TABLE_DESC binding_table_desc = {};
@@ -84,27 +72,7 @@ void execute_dml_operator(
   binding_table_desc.SizeInDescriptors =
       static_cast<UINT>(input_bindings.size() + output_bindings.size());
 
-  // This is a simplified version - real implementation would need proper
-  // descriptor heap management and resource binding
-
-  command_list->Close();
-
-  ID3D12CommandList* command_lists[] = {command_list.Get()};
-  command_queue->ExecuteCommandLists(1, command_lists);
-
-  // Wait for completion
-  ComPtr<ID3D12Fence> fence;
-  device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
-
-  const UINT64 fence_value = 1;
-  command_queue->Signal(fence.Get(), fence_value);
-
-  if (fence->GetCompletedValue() < fence_value) {
-    HANDLE event_handle = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-    fence->SetEventOnCompletion(fence_value, event_handle);
-    WaitForSingleObject(event_handle, INFINITE);
-    CloseHandle(event_handle);
-  }
+  dxdevice->ExecuteCommandList();
 }
 
 }  // namespace dml
@@ -177,27 +145,7 @@ void primitives<Device::DirectML>::indexed_fill(T* x,
 template <>
 template <typename T>
 void primitives<Device::DirectML>::copy(const T* x, T* y, dim_t size) {
-  auto device = dml::get_d3d12_device();
-  auto command_queue = dml::get_command_queue();
-
-  // Use D3D12 copy operation for simple buffer copy
-  ComPtr<ID3D12CommandAllocator> command_allocator;
-  ComPtr<ID3D12GraphicsCommandList> command_list;
-
-  device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                 IID_PPV_ARGS(&command_allocator));
-  device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
-                            command_allocator.Get(), nullptr,
-                            IID_PPV_ARGS(&command_list));
-
-  // This would need proper resource handling
-  // command_list->CopyBufferRegion(dst_resource, 0, src_resource, 0, size *
-  // sizeof(T));
-
-  command_list->Close();
-
-  ID3D12CommandList* command_lists[] = {command_list.Get()};
-  command_queue->ExecuteCommandLists(1, command_lists);
+  throw std::runtime_error("unimplemented copy for DirectML primitives");
 }
 
 template <>
@@ -1154,9 +1102,8 @@ template <typename T>
 void cross_device_primitives<Device::CPU, Device::DirectML>::copy(const T* x,
                                                                   T* y,
                                                                   dim_t size) {
-  // Copy from CPU to DML (D3D12) buffer
-  auto device = dml::get_d3d12_device();
-  // Would need proper D3D12 upload heap and copy operation
+  throw std::runtime_error(
+      "Cross-device copy from CPU to DirectML not implemented yet.");
 }
 
 template <>
@@ -1164,9 +1111,8 @@ template <typename T>
 void cross_device_primitives<Device::DirectML, Device::CPU>::copy(const T* x,
                                                                   T* y,
                                                                   dim_t size) {
-  // Copy from DML (D3D12) buffer to CPU
-  auto device = dml::get_d3d12_device();
-  // Would need proper D3D12 readback heap and copy operation
+  throw std::runtime_error(
+      "Cross-device copy from DirectML to CPU not implemented yet.");
 }
 
 // Explicit template instantiations

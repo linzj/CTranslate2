@@ -34,6 +34,9 @@ static void __stdcall DebugMessageCallback(D3D12_MESSAGE_CATEGORY cat,
   }
 }
 
+namespace ctranslate2 {
+namespace dml {
+
 Device::Device(IAdapter* adapter,
                D3D_FEATURE_LEVEL featureLevel,
                DML_FEATURE_LEVEL dmlFeatureLevel,
@@ -889,3 +892,6 @@ void Device::DummyPresent() {
   }
 #endif
 }
+
+}  // namespace dml
+}  // namespace ctranslate2

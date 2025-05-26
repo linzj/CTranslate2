@@ -10,6 +10,7 @@
 #define IGraphicsUnknown IUnknown
 #define IID_GRAPHICS_PPV_ARGS IID_PPV_ARGS
 typedef interface IDXGIAdapter1 IDXGIAdapter1;
+#define DXCOMPILER_NONE
 
 using IAdapter = IDXGIAdapter1;
 
@@ -21,9 +22,13 @@ using IAdapter = IDXGIAdapter1;
 // Simplified abstraction for submitting work to a device with a single command
 // queue. Not thread safe. This "device" includes a single command list that is
 // always open for recording work.
+
+namespace ctranslate2 {
+namespace dml {
+
 class Device {
  public:
-  Device(IAdapter* adapter,
+  Device(IAdapter* adapter, // IAdapter is ::IDXGIAdapter1, should be fine
          D3D_FEATURE_LEVEL featureLevel,
          DML_FEATURE_LEVEL dmlFeatureLevel,
          bool debugLayersEnabled,
@@ -214,3 +219,6 @@ class Device {
   Microsoft::WRL::ComPtr<IDXGISwapChain1> m_dummySwapChain;
 #endif
 };
+
+} // namespace dml     // Added closing namespace
+} // namespace ctranslate2 // Added closing namespace

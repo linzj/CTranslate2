@@ -1,194 +1,218 @@
 #ifdef CT2_WITH_DIRECTML
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+
+// Moved dxmodule.h and dxdevice.h to be before backend_dml.h
+#include "common.h"
+#include "dxdevice.h"  // Defines ctranslate2::dml::Device
+#include "dxmodule.h"  // For D3d12Module and DmlModule
+
 
 #include <spdlog/spdlog.h>
-#include <windows.h>  // Required for LoadLibraryW and GetProcAddress
+#include "backend_dml.h"  // Self header
 #include "ctranslate2/utils.h"
 
-
-// DirectML specific headers
+// DirectX/DirectML headers
 #include <DirectML.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
-#include <wrl/client.h>  // For Microsoft::WRL::ComPtr
+#include <windows.h>
+#include <wrl/client.h>
 
-// Helper for COM error checking
-#define DML_CHECK(expr)                                    \
-  do {                                                     \
-    HRESULT hr = (expr);                                   \
-    if (FAILED(hr))                                        \
-      THROW_RUNTIME_ERROR(#expr " failed with HRESULT: " + \
-                          std::to_string(hr));             \
-  } while (0)
+#include <memory>
+#include <string>
 
 using Microsoft::WRL::ComPtr;
 
 namespace ctranslate2 {
 namespace dml {
 
-// Function pointers for dynamic loading
+// Global Device object and Modules
+static std::unique_ptr<Device> g_device;
+static std::shared_ptr<D3d12Module> g_d3d12_module;
+static std::shared_ptr<DmlModule> g_dml_module;
+
+// For DXGI functions loaded dynamically
+static HMODULE g_h_dxgi_dll = nullptr;
 typedef HRESULT(WINAPI* PFN_CREATE_DXGI_FACTORY2)(
     UINT Flags,
     REFIID riid,
     _COM_Outptr_ void** ppFactory);
-typedef HRESULT(WINAPI* PFN_D3D12_CREATE_DEVICE)(
-    _In_opt_ IUnknown* pAdapter,
-    D3D_FEATURE_LEVEL MinimumFeatureLevel,
-    REFIID riid,
-    _COM_Outptr_ void** ppDevice);
-typedef HRESULT(WINAPI* PFN_DML_CREATE_DEVICE)(
-    _In_ ID3D12Device* d3d12Device,
-    DML_CREATE_DEVICE_FLAGS flags,
-    REFIID riid,
-    _COM_Outptr_ IDMLDevice** ppvDevice);
-
-// Global DML resources
-static HMODULE g_h_dxgi_dll = nullptr;
-static HMODULE g_h_d3d12_dll = nullptr;
-static HMODULE g_h_directml_dll = nullptr;
-
 static PFN_CREATE_DXGI_FACTORY2 g_pfn_CreateDXGIFactory2 = nullptr;
-static PFN_D3D12_CREATE_DEVICE g_pfn_D3D12CreateDevice = nullptr;
-static PFN_DML_CREATE_DEVICE g_pfn_DMLCreateDevice = nullptr;
 
-static ComPtr<ID3D12Device> g_d3d12_device;
-static ComPtr<IDMLDevice> g_dml_device;
-static ComPtr<ID3D12CommandQueue> g_command_queue;
+// Helper to convert WCHAR array to std::string
+std::string to_string(const WCHAR* wstr) {
+  if (!wstr)
+    return "";
+  int size_needed =
+      WideCharToMultiByte(CP_UTF8, 0, wstr, -1, NULL, 0, NULL, NULL);
+  if (size_needed == 0)
+    return "";
+  std::string strTo(size_needed, 0);
+  WideCharToMultiByte(CP_UTF8, 0, wstr, -1, &strTo[0], size_needed, NULL, NULL);
+  // Remove null terminator if WideCharToMultiByte includes it
+  if (!strTo.empty() && strTo.back() == '\0') {
+    strTo.pop_back();
+  }
+  return strTo;
+}
 
 bool has_directml_device() {
-  // Load DLLs and get function pointers
-  g_h_dxgi_dll = LoadLibraryW(L"dxgi.dll");
-  if (!g_h_dxgi_dll) {
-    SPDLOG_WARN("Failed to load dxgi.dll");
-    return false;
-  }
-  g_pfn_CreateDXGIFactory2 =
-      reinterpret_cast<PFN_CREATE_DXGI_FACTORY2>(reinterpret_cast<void*>(
-          GetProcAddress(g_h_dxgi_dll, "CreateDXGIFactory2")));
-  if (!g_pfn_CreateDXGIFactory2) {
-    SPDLOG_WARN("Failed to get CreateDXGIFactory2 address");
-    return false;
+  if (g_device) {
+    return true;
   }
 
-  g_h_d3d12_dll = LoadLibraryW(L"d3d12.dll");
-  if (!g_h_d3d12_dll) {
-    SPDLOG_WARN("Failed to load d3d12.dll");
-    return false;
-  }
-  g_pfn_D3D12CreateDevice =
-      reinterpret_cast<PFN_D3D12_CREATE_DEVICE>(reinterpret_cast<void*>(
-          GetProcAddress(g_h_d3d12_dll, "D3D12CreateDevice")));
-  if (!g_pfn_D3D12CreateDevice) {
-    SPDLOG_WARN("Failed to get D3D12CreateDevice address");
-    return false;
-  }
+  try {
+    // 1. Instantiate D3D12 and DML modules
+    g_d3d12_module =
+        std::make_shared<D3d12Module>(false);  // false = disableAgilitySDK
+    g_dml_module = std::make_shared<DmlModule>();
 
-  g_h_directml_dll = LoadLibraryW(L"directml.dll");
-  if (!g_h_directml_dll) {
-    SPDLOG_WARN("Failed to load directml.dll");
-    return false;
-  }
-  g_pfn_DMLCreateDevice =
-      reinterpret_cast<PFN_DML_CREATE_DEVICE>(reinterpret_cast<void*>(
-          GetProcAddress(g_h_directml_dll, "DMLCreateDevice")));
-  if (!g_pfn_DMLCreateDevice) {
-    SPDLOG_WARN("Failed to get DMLCreateDevice address");
-    return false;
-  }
-
-  // Try to create a DXGI factory
-  ComPtr<IDXGIFactory4> factory;
-  if (FAILED(g_pfn_CreateDXGIFactory2(0, __uuidof(IDXGIFactory4),
-                                      (void**)(factory.GetAddressOf())))) {
-    return false;
-  }
-
-  // Try to find a compatible adapter
-  ComPtr<IDXGIAdapter1> adapter;
-  for (UINT adapter_idx = 0;
-       DXGI_ERROR_NOT_FOUND != factory->EnumAdapters1(adapter_idx, &adapter);
-       ++adapter_idx) {
-    DXGI_ADAPTER_DESC1 desc;
-    adapter->GetDesc1(&desc);
-
-    if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) {
-      // Don't use the software adapter
-      continue;
+    if (!g_d3d12_module->GetHandle() || !g_dml_module->GetHandle()) {
+      SPDLOG_WARN("Failed to load D3D12 or DML module.");
+      return false;
     }
 
-    // Check if D3D12 device can be created on this adapter
-    if (SUCCEEDED(g_pfn_D3D12CreateDevice(
-            adapter.Get(), D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device),
-            (void**)(g_d3d12_device.GetAddressOf())))) {
-      // Check if DML device can be created on this D3D12 device
-      if (SUCCEEDED(g_pfn_DMLCreateDevice(
-              g_d3d12_device.Get(), DML_CREATE_DEVICE_FLAG_NONE,
-              __uuidof(IDMLDevice), g_dml_device.GetAddressOf()))) {
-        // Found a valid DirectML device
-        return true;
+    // 2. Load DXGI library and GetProcAddress for CreateDXGIFactory2
+    if (!g_pfn_CreateDXGIFactory2) {
+      g_h_dxgi_dll = LoadLibraryW(L"dxgi.dll");
+      if (!g_h_dxgi_dll) {
+        SPDLOG_WARN("Failed to load dxgi.dll");
+        return false;
+      }
+      g_pfn_CreateDXGIFactory2 =
+          reinterpret_cast<PFN_CREATE_DXGI_FACTORY2>(reinterpret_cast<void*>(
+              GetProcAddress(g_h_dxgi_dll, "CreateDXGIFactory2")));
+      if (!g_pfn_CreateDXGIFactory2) {
+        SPDLOG_WARN("Failed to get CreateDXGIFactory2 address from dxgi.dll");
+        FreeLibrary(g_h_dxgi_dll);
+        g_h_dxgi_dll = nullptr;
+        return false;
       }
     }
+
+    // 3. Create DXGI Factory
+    ComPtr<IDXGIFactory4> factory;
+    THROW_IF_FAILED(
+        g_pfn_CreateDXGIFactory2(0, IID_PPV_ARGS(factory.GetAddressOf())));
+
+    // 4. Enumerate Adapters
+    ComPtr<IDXGIAdapter1> selected_adapter;
+    for (UINT adapter_idx = 0;
+         factory->EnumAdapters1(adapter_idx,
+                                selected_adapter.ReleaseAndGetAddressOf()) !=
+         DXGI_ERROR_NOT_FOUND;
+         ++adapter_idx) {
+      DXGI_ADAPTER_DESC1 desc;
+      THROW_IF_FAILED(selected_adapter->GetDesc1(&desc));
+
+      if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) {
+        continue;  // Skip software adapter
+      }
+
+      // Basic check: Can a D3D12 device be tentatively created on this adapter?
+      // The Device constructor will do the actual full D3D and DML device
+      // creation. Here we're just checking adapter viability before
+      // constructing the main Device object.
+      ComPtr<ID3D12Device> temp_d3d_device;
+      HRESULT hr_check_d3d = g_d3d12_module->CreateDevice(
+          selected_adapter.Get(), D3D_FEATURE_LEVEL_11_0,
+          __uuidof(ID3D12Device),
+          nullptr);  // Pass nullptr for ppDevice to just check support
+
+      if (SUCCEEDED(hr_check_d3d)) {
+        // Found a suitable hardware adapter, break and use this one
+        break;
+      }
+      selected_adapter.Reset();  // Try next adapter
+    }
+
+    if (!selected_adapter) {
+      SPDLOG_WARN("No suitable D3D12 capable hardware adapter found.");
+      return false;
+    }
+
+    // 5. Create the main Device object
+    // Sensible defaults for Device constructor parameters.
+    D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_11_0;
+    DML_FEATURE_LEVEL dmlFeatureLevel = DML_FEATURE_LEVEL_2_0;
+
+    g_device = std::make_unique<Device>(
+        selected_adapter.Get(),  // The chosen hardware adapter
+        featureLevel, dmlFeatureLevel,
+        false,                           // debugLayersEnabled
+        D3D12_COMMAND_LIST_TYPE_DIRECT,  // commandListType
+        1,                               // dispatchRepeat
+        true,                            // uavBarrierAfterDispatch
+        false,                           // aliasingBarrierAfterDispatch
+        false,                           // clearShaderCaches
+        false,                           // disableGpuTimeout
+        false,                           // enableDred
+        false,                           // disableBackgroundProcessing
+        false,                           // setStablePowerState
+        false,  // preferCustomHeaps (false means use default behavior which
+                // might use custom if available and preferred by device.h
+                // logic)
+        false,  // usePresentSeparator
+        0,      // maxGpuTimeMeasurements
+        g_d3d12_module, g_dml_module);
+
+    // 6. Check if device construction and internal D3D/DML objects are valid
+    if (!g_device || !g_device->D3D() || !g_device->DML()) {
+      SPDLOG_WARN(
+          "Failed to create Device wrapper or internal D3D/DML objects.");
+      g_device.reset();  // Ensure it's cleaned up if partially formed
+      return false;
+    }
+
+    return true;
+
+  } catch (const std::exception& e) {
+    SPDLOG_WARN("Exception during DirectML device initialization: {}",
+                e.what());
+    g_device.reset();
+    // Modules and dxgi.dll are cleaned up in release_directml or by shared_ptr
+    return false;
   }
-  return false;  // No DirectML capable device found
+  // Should not be reached if all paths return explicitly
+  return false;
 }
 
 void initialize_directml() {
-  if (!has_directml_device()) {
+  if (!g_device && !has_directml_device()) {
     THROW_RUNTIME_ERROR("DirectML device not found or initialization failed.");
   }
-
-  SPDLOG_INFO("DirectML backend initialized on device: {}",
-              static_cast<void*>(g_d3d12_device.Get()));
-
-  // Create command queue for D3D12 device
-  D3D12_COMMAND_QUEUE_DESC queue_desc = {};
-  queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-  queue_desc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
-  DML_CHECK(g_d3d12_device->CreateCommandQueue(&queue_desc,
-                                               IID_PPV_ARGS(&g_command_queue)));
+  SPDLOG_INFO("DirectML backend initialized using Device wrapper.");
 }
 
 void release_directml() {
-  // Release DirectML and D3D12 resources
-  if (g_command_queue)
-    g_command_queue->Release();
-  if (g_dml_device)
-    g_dml_device->Release();
-  if (g_d3d12_device)
-    g_d3d12_device->Release();
-
-  g_command_queue.Reset();
-  g_dml_device.Reset();
-  g_d3d12_device.Reset();
-
-  // Free loaded DLLs
-  if (g_h_directml_dll) {
-    FreeLibrary(g_h_directml_dll);
-    g_h_directml_dll = nullptr;
+  if (g_device) {
+    g_device.reset();  // Device destructor handles its D3D/DML resources.
   }
-  if (g_h_d3d12_dll) {
-    FreeLibrary(g_h_d3d12_dll);
-    g_h_d3d12_dll = nullptr;
-  }
+
+  g_dml_module
+      .reset();  // Release shared_ptr, actual module unloads if ref count is 0.
+  g_d3d12_module.reset();
+
   if (g_h_dxgi_dll) {
     FreeLibrary(g_h_dxgi_dll);
     g_h_dxgi_dll = nullptr;
+    g_pfn_CreateDXGIFactory2 = nullptr;
   }
 
   SPDLOG_INFO("DirectML backend released.");
 }
 
-ID3D12Device* get_d3d12_device() {
-  return g_d3d12_device.Get();
+Device* get_device() {
+  if (!g_device) {  // Attempt to initialize if not already
+    has_directml_device();
+  }
+  return g_device.get();
 }
 
-IDMLDevice* get_dml_device() {
-  return g_dml_device.Get();
+IDMLDevice1* get_dml_device() {
+  return g_device->DML();
 }
-
-ID3D12CommandQueue* get_command_queue() {
-  return g_command_queue.Get();
-}
-
 }  // namespace dml
 }  // namespace ctranslate2
 
