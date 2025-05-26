@@ -10,12 +10,7 @@
 
 // DirectML specific forward declarations and uses (guarded by CT2_WITH_DIRECTML)
 #ifdef CT2_WITH_DIRECTML
-namespace ctranslate2 { namespace dml {
-  bool has_directml_device();
-  void initialize_directml();
-  // We'll define dml::synchronize_device and dml::synchronize_stream here in the next step
-  // or inside dml/backend_dml.cc once core DML context/queue objects are accessible.
-} }
+#  include "dml/backend_dml.h"
 #endif
 
 #ifdef CT2_WITH_TENSOR_PARALLEL

@@ -228,8 +228,18 @@ set(SOURCES
 )
 
 if(WITH_DIRECTML)
-  list(APPEND SOURCES src/dml/backend_dml.cc)
-  list(APPEND SOURCES src/dml/allocator_dml.cc)
+  list(APPEND SOURCES
+    src/dml/allocator_dml.cc
+    src/dml/backend_dml.cc
+    src/dml/backend_dml.h
+    src/dml/common.h
+    src/dml/device.cc
+    src/dml/device.h
+    src/dml/dxmodule.cc
+    src/dml/dxmodule.h
+    src/dml/module_info.h
+    src/dml/primitives_dml.cc
+  )
   # list(APPEND PRIVATE_INCLUDE_DIRECTORIES ${DirectML_INCLUDE_DIRS}) # When DirectML SDK is found
   # list(APPEND LIBRARIES ${DirectML_LIBRARIES}) # When DirectML SDK is found
 endif()

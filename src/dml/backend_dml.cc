@@ -1,22 +1,23 @@
 #ifdef CT2_WITH_DIRECTML
 
-#include "ctranslate2/utils.h"
 #include <spdlog/spdlog.h>
-#include <windows.h> // Required for LoadLibraryW and GetProcAddress
+#include <windows.h>  // Required for LoadLibraryW and GetProcAddress
+#include "ctranslate2/utils.h"
+
 
 // DirectML specific headers
 #include <DirectML.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
-#include <wrl/client.h> // For Microsoft::WRL::ComPtr
+#include <wrl/client.h>  // For Microsoft::WRL::ComPtr
 
 // Helper for COM error checking
-#define DML_CHECK(expr)                                                        \
-  do {                                                                         \
-    HRESULT hr = (expr);                                                       \
-    if (FAILED(hr))                                                            \
-      THROW_RUNTIME_ERROR(#expr " failed with HRESULT: " +                     \
-                          std::to_string(hr));                                 \
+#define DML_CHECK(expr)                                    \
+  do {                                                     \
+    HRESULT hr = (expr);                                   \
+    if (FAILED(hr))                                        \
+      THROW_RUNTIME_ERROR(#expr " failed with HRESULT: " + \
+                          std::to_string(hr));             \
   } while (0)
 
 using Microsoft::WRL::ComPtr;
@@ -25,14 +26,20 @@ namespace ctranslate2 {
 namespace dml {
 
 // Function pointers for dynamic loading
-typedef HRESULT(WINAPI *PFN_CREATE_DXGI_FACTORY2)(
-    UINT Flags, REFIID riid, _COM_Outptr_ void **ppFactory);
-typedef HRESULT(WINAPI *PFN_D3D12_CREATE_DEVICE)(
-    _In_opt_ IUnknown *pAdapter, D3D_FEATURE_LEVEL MinimumFeatureLevel,
-    REFIID riid, _COM_Outptr_ void **ppDevice);
-typedef HRESULT(WINAPI *PFN_DML_CREATE_DEVICE)(
-    _In_ ID3D12Device *d3d12Device, DML_CREATE_DEVICE_FLAGS flags, REFIID riid,
-    _COM_Outptr_ IDMLDevice **ppvDevice);
+typedef HRESULT(WINAPI* PFN_CREATE_DXGI_FACTORY2)(
+    UINT Flags,
+    REFIID riid,
+    _COM_Outptr_ void** ppFactory);
+typedef HRESULT(WINAPI* PFN_D3D12_CREATE_DEVICE)(
+    _In_opt_ IUnknown* pAdapter,
+    D3D_FEATURE_LEVEL MinimumFeatureLevel,
+    REFIID riid,
+    _COM_Outptr_ void** ppDevice);
+typedef HRESULT(WINAPI* PFN_DML_CREATE_DEVICE)(
+    _In_ ID3D12Device* d3d12Device,
+    DML_CREATE_DEVICE_FLAGS flags,
+    REFIID riid,
+    _COM_Outptr_ IDMLDevice** ppvDevice);
 
 // Global DML resources
 static HMODULE g_h_dxgi_dll = nullptr;
@@ -55,7 +62,7 @@ bool has_directml_device() {
     return false;
   }
   g_pfn_CreateDXGIFactory2 =
-      reinterpret_cast<PFN_CREATE_DXGI_FACTORY2>(reinterpret_cast<void *>(
+      reinterpret_cast<PFN_CREATE_DXGI_FACTORY2>(reinterpret_cast<void*>(
           GetProcAddress(g_h_dxgi_dll, "CreateDXGIFactory2")));
   if (!g_pfn_CreateDXGIFactory2) {
     SPDLOG_WARN("Failed to get CreateDXGIFactory2 address");
@@ -68,7 +75,7 @@ bool has_directml_device() {
     return false;
   }
   g_pfn_D3D12CreateDevice =
-      reinterpret_cast<PFN_D3D12_CREATE_DEVICE>(reinterpret_cast<void *>(
+      reinterpret_cast<PFN_D3D12_CREATE_DEVICE>(reinterpret_cast<void*>(
           GetProcAddress(g_h_d3d12_dll, "D3D12CreateDevice")));
   if (!g_pfn_D3D12CreateDevice) {
     SPDLOG_WARN("Failed to get D3D12CreateDevice address");
@@ -81,7 +88,7 @@ bool has_directml_device() {
     return false;
   }
   g_pfn_DMLCreateDevice =
-      reinterpret_cast<PFN_DML_CREATE_DEVICE>(reinterpret_cast<void *>(
+      reinterpret_cast<PFN_DML_CREATE_DEVICE>(reinterpret_cast<void*>(
           GetProcAddress(g_h_directml_dll, "DMLCreateDevice")));
   if (!g_pfn_DMLCreateDevice) {
     SPDLOG_WARN("Failed to get DMLCreateDevice address");
@@ -91,7 +98,7 @@ bool has_directml_device() {
   // Try to create a DXGI factory
   ComPtr<IDXGIFactory4> factory;
   if (FAILED(g_pfn_CreateDXGIFactory2(0, __uuidof(IDXGIFactory4),
-                                      (void **)(factory.GetAddressOf())))) {
+                                      (void**)(factory.GetAddressOf())))) {
     return false;
   }
 
@@ -111,7 +118,7 @@ bool has_directml_device() {
     // Check if D3D12 device can be created on this adapter
     if (SUCCEEDED(g_pfn_D3D12CreateDevice(
             adapter.Get(), D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device),
-            (void **)(g_d3d12_device.GetAddressOf())))) {
+            (void**)(g_d3d12_device.GetAddressOf())))) {
       // Check if DML device can be created on this D3D12 device
       if (SUCCEEDED(g_pfn_DMLCreateDevice(
               g_d3d12_device.Get(), DML_CREATE_DEVICE_FLAG_NONE,
@@ -121,7 +128,7 @@ bool has_directml_device() {
       }
     }
   }
-  return false; // No DirectML capable device found
+  return false;  // No DirectML capable device found
 }
 
 void initialize_directml() {
@@ -130,7 +137,7 @@ void initialize_directml() {
   }
 
   SPDLOG_INFO("DirectML backend initialized on device: {}",
-              static_cast<void *>(g_d3d12_device.Get()));
+              static_cast<void*>(g_d3d12_device.Get()));
 
   // Create command queue for D3D12 device
   D3D12_COMMAND_QUEUE_DESC queue_desc = {};
@@ -170,13 +177,19 @@ void release_directml() {
   SPDLOG_INFO("DirectML backend released.");
 }
 
-ID3D12Device *get_d3d12_device() { return g_d3d12_device.Get(); }
+ID3D12Device* get_d3d12_device() {
+  return g_d3d12_device.Get();
+}
 
-IDMLDevice *get_dml_device() { return g_dml_device.Get(); }
+IDMLDevice* get_dml_device() {
+  return g_dml_device.Get();
+}
 
-ID3D12CommandQueue *get_command_queue() { return g_command_queue.Get(); }
+ID3D12CommandQueue* get_command_queue() {
+  return g_command_queue.Get();
+}
 
-} // namespace dml
-} // namespace ctranslate2
+}  // namespace dml
+}  // namespace ctranslate2
 
-#endif // CT2_WITH_DIRECTML
+#endif  // CT2_WITH_DIRECTML

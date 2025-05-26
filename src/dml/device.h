@@ -1,0 +1,216 @@
+#pragma once
+
+#include "dxmodule.h"
+#include <memory>
+
+#ifdef INCLUDE_DXGI
+#include <dxgi1_6.h>
+#endif
+
+#define IGraphicsUnknown IUnknown
+#define IID_GRAPHICS_PPV_ARGS IID_PPV_ARGS
+typedef interface IDXGIAdapter1 IDXGIAdapter1;
+
+using IAdapter = IDXGIAdapter1;
+
+#include <DirectML.h>
+
+#include <string_view>
+#include <vector>
+
+// Simplified abstraction for submitting work to a device with a single command
+// queue. Not thread safe. This "device" includes a single command list that is
+// always open for recording work.
+class Device {
+ public:
+  Device(IAdapter* adapter,
+         D3D_FEATURE_LEVEL featureLevel,
+         DML_FEATURE_LEVEL dmlFeatureLevel,
+         bool debugLayersEnabled,
+         D3D12_COMMAND_LIST_TYPE commandListType,
+         uint32_t dispatchRepeat,
+         bool uavBarrierAfterDispatch,
+         bool aliasingBarrierAfterDispatch,
+         bool clearShaderCaches,
+         bool disableGpuTimeout,
+         bool enableDred,
+         bool disableBackgroundProcessing,
+         bool setStablePowerState,
+         bool preferCustomHeaps,
+         bool usePresentSeparator,
+         uint32_t maxGpuTimeMeasurements,
+         std::shared_ptr<D3d12Module> d3dModule,
+         std::shared_ptr<DmlModule> dmlModule);
+
+  Device(ID3D12Device* d3ddevice,
+         ID3D12CommandQueue* command_queue,
+         DML_FEATURE_LEVEL dmlFeatureLevel,
+         D3D12_COMMAND_LIST_TYPE commandListType,
+         uint32_t dispatchRepeat,
+         bool uavBarrierAfterDispatch,
+         bool aliasingBarrierAfterDispatch,
+         bool clearShaderCaches,
+         bool disableGpuTimeout,
+         bool preferCustomHeaps,
+         bool usePresentSeparator,
+         uint32_t maxGpuTimeMeasurements,
+         std::shared_ptr<D3d12Module> d3dModule,
+         std::shared_ptr<DmlModule> dmlModule);
+  ~Device();
+
+  D3d12Module* D3DModule() { return m_d3dModule.get(); }
+
+  ID3D12Device9* D3D() { return m_d3d.Get(); }
+  IDMLDevice1* DML() { return m_dml.Get(); }
+  ID3D12CommandQueue* GetCommandQueue() { return m_queue.Get(); }
+  ID3D12QueryHeap* GetTimestampHeap() { return m_timestampHeap.Get(); }
+  D3D12_COMMAND_LIST_TYPE GetCommandListType() const {
+    return m_commandListType;
+  }
+  ID3D12GraphicsCommandList* GetCommandList() { return m_commandList.Get(); }
+
+#ifndef DXCOMPILER_NONE
+  IDxcUtils* GetDxcUtils();
+  IDxcIncludeHandler* GetDxcIncludeHandler();
+  IDxcCompiler3* GetDxcCompiler();
+  IDxcValidator* GetDxcValidator();
+  IDxcLibrary* GetDxcLibrary();
+#endif
+
+  // Creates either a default buffer or custom buffer based on support for
+  // custom heaps and whether or not they are allowed.
+  Microsoft::WRL::ComPtr<ID3D12Resource> CreatePreferredDeviceMemoryBuffer(
+      uint64_t sizeInBytes,
+      D3D12_RESOURCE_FLAGS resourceFlags =
+          D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+      uint64_t alignment = 0,
+      D3D12_HEAP_FLAGS heapFlags = D3D12_HEAP_FLAG_NONE);
+
+  Microsoft::WRL::ComPtr<ID3D12Resource> CreateCustomBuffer(
+      uint64_t sizeInBytes,
+      D3D12_RESOURCE_FLAGS resourceFlags =
+          D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+      uint64_t alignment = 0,
+      D3D12_HEAP_FLAGS heapFlags = D3D12_HEAP_FLAG_NONE);
+
+  Microsoft::WRL::ComPtr<ID3D12Resource> CreateDefaultBuffer(
+      uint64_t sizeInBytes,
+      D3D12_RESOURCE_FLAGS resourceFlags =
+          D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+      uint64_t alignment = 0,
+      D3D12_HEAP_FLAGS heapFlags = D3D12_HEAP_FLAG_NONE);
+
+  Microsoft::WRL::ComPtr<ID3D12Resource> CreateUploadBuffer(
+      uint64_t sizeInBytes,
+      D3D12_RESOURCE_FLAGS resourceFlags = D3D12_RESOURCE_FLAG_NONE,
+      uint64_t alignment = 0,
+      D3D12_HEAP_FLAGS heapFlags = D3D12_HEAP_FLAG_NONE);
+
+  Microsoft::WRL::ComPtr<ID3D12Resource> CreateReadbackBuffer(
+      uint64_t sizeInBytes,
+      D3D12_RESOURCE_FLAGS resourceFlags = D3D12_RESOURCE_FLAG_NONE,
+      uint64_t alignment = 0,
+      D3D12_HEAP_FLAGS heapFlags = D3D12_HEAP_FLAG_NONE);
+
+  // Waits for all work submitted to this device's queue to complete.
+  void WaitForGpuWorkToComplete();
+
+  // Submits all commands recorded into the device's command list for execution.
+  void ExecuteCommandList();
+
+  // Submits the device command list for execution and blocks the CPU thread
+  // until the commands have finished on the GPU.
+  void ExecuteCommandListAndWait();
+
+  void ResetCommandList();
+
+  // Records the dispatch of an IDMLDispatchable into the device command list.
+  void RecordInitialize(IDMLDispatchable* dispatchable,
+                        IDMLBindingTable* bindingTable);
+  void RecordDispatch(IDMLDispatchable* dispatchable,
+                      IDMLBindingTable* bindingTable);
+
+  // Records the dispatch of an HLSL shader.
+  void RecordDispatch(const char* name,
+                      uint32_t threadGroupX,
+                      uint32_t threadGroupY,
+                      uint32_t threadGroupZ);
+
+  // Records a GPU timestamp in the device's command list. The device has a
+  // limit on the number of unresolved timestamps; if this capacity is exceeded,
+  // the oldest timestamps are dropped.
+  void RecordTimestamp();
+
+  // Resolves and returns all timestamp values recorded since the last call to
+  // ResolveTimestamps. This is a blocking call that forces the CPU and GPU to
+  // sync.
+  std::vector<uint64_t> ResolveTimestamps();
+
+  // Calls ResolveTimestamps() and converts timestamp pairs into timing samples.
+  std::vector<double> ResolveTimingSamples();
+
+  bool GpuTimingEnabled() const { return m_timestampCapacity > 0; }
+
+  void KeepAliveUntilNextCommandListDispatch(
+      Microsoft::WRL::ComPtr<IGraphicsUnknown>&& object) {
+    m_temporaryResources.emplace_back(std::move(object));
+  }
+
+  Microsoft::WRL::ComPtr<ID3D12Resource> Upload(uint64_t totalSize,
+                                                std::string_view data,
+                                                std::wstring_view name = {});
+
+  std::vector<std::byte> Download(Microsoft::WRL::ComPtr<ID3D12Resource>);
+
+  void ClearShaderCaches();
+
+  static uint32_t GetSizeInBytes(DML_TENSOR_DATA_TYPE dataType);
+  static DXGI_FORMAT GetDxgiFormatFromDmlTensorDataType(
+      DML_TENSOR_DATA_TYPE dataType);
+
+  void DummyPresent();
+
+ private:
+  void EnsureDxcInterfaces();
+
+ private:
+  std::shared_ptr<D3d12Module> m_d3dModule;
+  std::shared_ptr<DmlModule> m_dmlModule;
+  Microsoft::WRL::ComPtr<ID3D12Device9> m_d3d;
+#ifndef _GAMING_XBOX
+  Microsoft::WRL::ComPtr<ID3D12InfoQueue1> m_infoQueue;
+#endif
+  Microsoft::WRL::ComPtr<IDMLDevice1> m_dml;
+  Microsoft::WRL::ComPtr<IDMLCommandRecorder> m_commandRecorder;
+  Microsoft::WRL::ComPtr<ID3D12CommandQueue> m_queue;
+  Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_timestampHeap;
+  uint32_t m_timestampCapacity = 0;
+  uint32_t m_timestampHeadIndex = 0;
+  uint32_t m_timestampCount = 0;
+  Microsoft::WRL::ComPtr<ID3D12Fence> m_fence;
+  D3D12_COMMAND_LIST_TYPE m_commandListType = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+  Microsoft::WRL::ComPtr<ID3D12CommandAllocator> m_commandAllocator;
+  Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> m_commandList;
+  std::vector<Microsoft::WRL::ComPtr<IGraphicsUnknown>> m_temporaryResources;
+  uint32_t m_dispatchRepeat = 1;
+  std::vector<D3D12_RESOURCE_BARRIER> m_postDispatchBarriers;
+  std::optional<D3D12_FEATURE_DATA_ARCHITECTURE1> m_architectureSupport;
+
+  DWORD m_callbackCookie = 0;
+  bool m_restoreBackgroundProcessing = false;
+  bool m_restoreStablePowerState = false;
+  bool m_useCustomHeaps = false;
+  bool m_needResetAllocator = false;
+
+#ifndef DXCOMPILER_NONE
+  Microsoft::WRL::ComPtr<IDxcUtils> m_dxcUtils;
+  Microsoft::WRL::ComPtr<IDxcIncludeHandler> m_dxcIncludeHandler;
+  Microsoft::WRL::ComPtr<IDxcCompiler3> m_dxcCompiler;
+  Microsoft::WRL::ComPtr<IDxcValidator> m_dxcValidator;
+  Microsoft::WRL::ComPtr<IDxcLibrary> m_dxcLibrary;
+#endif
+
+#if defined(INCLUDE_DXGI)
+  Microsoft::WRL::ComPtr<IDXGISwapChain1> m_dummySwapChain;
+#endif
+};
