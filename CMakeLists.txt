@@ -239,10 +239,10 @@ if(WITH_DIRECTML)
     src/dml/dxmodule.cc
     src/dml/dxmodule.h
     src/dml/module_info.h
+    src/dml/operator_cache.cc
+    src/dml/operator_cache.h
     src/dml/primitives_dml.cc
   )
-  # list(APPEND PRIVATE_INCLUDE_DIRECTORIES ${DirectML_INCLUDE_DIRS}) # When DirectML SDK is found
-  # list(APPEND LIBRARIES ${DirectML_LIBRARIES}) # When DirectML SDK is found
 endif()
 
 set(LIBRARIES

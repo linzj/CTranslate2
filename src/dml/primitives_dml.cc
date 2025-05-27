@@ -7,8 +7,9 @@
 #include <wrl/client.h>
 #include <algorithm>
 #include <vector>
+#include "backend_dml.h"
 #include "common.h"
-#include "dml/backend_dml.h"
+#include "operator_cache.h"
 #include "type_dispatch.h"
 
 using Microsoft::WRL::ComPtr;
@@ -321,39 +322,48 @@ void primitives<Device::DirectML>::fill(T* x, T a, dim_t size) {
   op_desc.Type = DML_OPERATOR_FILL_VALUE_CONSTANT;
   op_desc.Desc = &fill_constant_desc;
 
-  ComPtr<IDMLOperator> op;
-  HRESULT hr = dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op));
-
-  // If FILL_VALUE_CONSTANT is not available, fall back to alternative approach
-  if (FAILED(hr)) {
-    // Create a small constant buffer and use element-wise add with broadcast
+  ComPtr<IDMLCompiledOperator> compiled_op;
+  try {
+    // Attempt to create/compile DML_OPERATOR_FILL_VALUE_CONSTANT
+    compiled_op =
+        dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  } catch (const std::runtime_error& e) {
+    // If FILL_VALUE_CONSTANT failed, fall back to ELEMENT_WISE_IDENTITY
+    // Create a small constant buffer for the identity operation input
     DML_BUFFER_TENSOR_DESC constant_buffer_desc = {};
     DML_TENSOR_DESC constant_desc =
         dml::create_tensor_desc<T>(1, constant_buffer_desc);
 
-    DML_ELEMENT_WISE_ADD_OPERATOR_DESC add_desc = {};
-    add_desc.ATensor = &constant_desc;  // Single element tensor with value 'a'
-    add_desc.BTensor =
-        &constant_desc;  // Same tensor (a + a = 2a, but we'll handle this)
-    add_desc.OutputTensor = &output_desc;
+    // (Assuming the constant buffer resource for 'a' still needs to be handled
+    // for IDENTITY for fill: This part is tricky as FILL_VALUE_CONSTANT takes
+    // value directly. Identity would need input buffer. For identity to fill
+    // with 'a', 'constant_desc' would need to point to a resource containing
+    // 'a'. The original code for this fallback case within the 'if
+    // (FAILED(hr))' block in fill had issues, it created constant_desc of size
+    // 1, but didn't bind a resource to it for identity op. The logic of using
+    // identity for fill implies 'a' is broadcasted, DML needs input resource
+    // for it. The simplest fallback for fill might be different, or assume the
+    // caller handles 'a' with identity. For now, mirror the op_desc
+    // re-assignment as in the original conditional block. The original fallback
+    // prepared an identity op with a single element constant tensor (which
+    // wasn't filled). For a true 'fill' via identity, that constant tensor
+    // resource would need 'a' in it. However, let's stick to refactoring
+    // existing op creation calls first. The problem description is about
+    // caching, not fixing underlying logic bugs if any.
 
-    // Actually, better to use ELEMENT_WISE_IDENTITY with a constant input
-    // Or use DML_OPERATOR_ELEMENT_WISE_ADD with zero tensor and constant
-
-    // Let's use a different approach - create constant tensor and broadcast
     DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC identity_desc = {};
-    identity_desc.InputTensor = &constant_desc;
-    identity_desc.OutputTensor = &output_desc;
+    identity_desc.InputTensor =
+        &constant_desc;  // This constant_desc is for a buffer of size 1
+    identity_desc.OutputTensor =
+        &output_desc;  // This output_desc is for the target buffer of 'size'
 
     op_desc.Type = DML_OPERATOR_ELEMENT_WISE_IDENTITY;
     op_desc.Desc = &identity_desc;
 
-    THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
+    // Attempt to create/compile the fallback DML_OPERATOR_ELEMENT_WISE_IDENTITY
+    compiled_op =
+        dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
   }
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
@@ -422,19 +432,16 @@ void primitives<Device::DirectML>::strided_fill(T* x,
   op_desc.Type = DML_OPERATOR_FILL_VALUE_CONSTANT;
   op_desc.Desc = &fill_desc;
 
-  ComPtr<IDMLOperator> op;
-  HRESULT hr = dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op));
-
-  if (FAILED(hr)) {
+  ComPtr<IDMLCompiledOperator> compiled_op;
+  try {
+    compiled_op =
+        dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  } catch (const std::runtime_error& e) {
     // Fallback: fill entire buffer then use gather to select strided elements
     // This is less efficient but works
     fill(x, a, size * inc_x);
     return;
   }
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
@@ -491,20 +498,17 @@ void primitives<Device::DirectML>::indexed_fill(T* x,
   op_desc.Type = DML_OPERATOR_SCATTER;
   op_desc.Desc = &scatter_desc;
 
-  ComPtr<IDMLOperator> op;
-  HRESULT hr = dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op));
-
-  if (FAILED(hr)) {
+  ComPtr<IDMLCompiledOperator> compiled_op;
+  try {
+    compiled_op =
+        dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  } catch (const std::runtime_error& e) {
     // Fallback: manually fill each index
     // This would require CPU-GPU synchronization and is very inefficient
     // For now, just fill the entire array as a placeholder
     fill(x, a, num_indices);
     return;
   }
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
@@ -542,12 +546,8 @@ void primitives<Device::DirectML>::copy(const T* x, T* y, dim_t size) {
   op_desc.Type = DML_OPERATOR_ELEMENT_WISE_IDENTITY;
   op_desc.Desc = &identity_desc;
 
-  ComPtr<IDMLOperator> op;
-  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
+  ComPtr<IDMLCompiledOperator> compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
@@ -582,12 +582,8 @@ void primitives<Device::DirectML>::convert(const U* x, V* y, dim_t size) {
   op_desc.Type = DML_OPERATOR_CAST;
   op_desc.Desc = &cast_desc;
 
-  ComPtr<IDMLOperator> op;
-  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
+  ComPtr<IDMLCompiledOperator> compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
@@ -627,12 +623,8 @@ T primitives<Device::DirectML>::sum(const T* array, dim_t size) {
   op_desc.Type = DML_OPERATOR_REDUCE;
   op_desc.Desc = &reduce_desc;
 
-  ComPtr<IDMLOperator> op;
-  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
+  ComPtr<IDMLCompiledOperator> compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
@@ -679,12 +671,8 @@ dim_t primitives<Device::DirectML>::max_element(const T* array, dim_t size) {
   op_desc.Type = DML_OPERATOR_ARGMAX;
   op_desc.Desc = &argmax_desc;
 
-  ComPtr<IDMLOperator> op;
-  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
+  ComPtr<IDMLCompiledOperator> compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
@@ -729,12 +717,8 @@ T primitives<Device::DirectML>::max(const T* array, dim_t size) {
   op_desc.Type = DML_OPERATOR_REDUCE;
   op_desc.Desc = &reduce_desc;
 
-  ComPtr<IDMLOperator> op;
-  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
+  ComPtr<IDMLCompiledOperator> compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
@@ -780,12 +764,8 @@ void primitives<Device::DirectML>::add(T a, const T* x, T* y, dim_t size) {
   op_desc.Type = DML_OPERATOR_ELEMENT_WISE_ADD;
   op_desc.Desc = &add_desc;
 
-  ComPtr<IDMLOperator> op;
-  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
+  ComPtr<IDMLCompiledOperator> compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
@@ -830,12 +810,8 @@ void primitives<Device::DirectML>::add(const T* a,
   op_desc.Type = DML_OPERATOR_ELEMENT_WISE_ADD;
   op_desc.Desc = &add_desc;
 
-  ComPtr<IDMLOperator> op;
-  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
+  ComPtr<IDMLCompiledOperator> compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
@@ -875,12 +851,8 @@ void primitives<Device::DirectML>::sub(const T* a,
   op_desc.Type = DML_OPERATOR_ELEMENT_WISE_SUBTRACT;
   op_desc.Desc = &sub_desc;
 
-  ComPtr<IDMLOperator> op;
-  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
+  ComPtr<IDMLCompiledOperator> compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
@@ -918,12 +890,8 @@ void primitives<Device::DirectML>::mul(T a, const T* x, T* y, dim_t size) {
   op_desc.Type = DML_OPERATOR_ELEMENT_WISE_MULTIPLY;
   op_desc.Desc = &mul_desc;
 
-  ComPtr<IDMLOperator> op;
-  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
+  ComPtr<IDMLCompiledOperator> compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
@@ -968,12 +936,8 @@ void primitives<Device::DirectML>::mul(const T* a,
   op_desc.Type = DML_OPERATOR_ELEMENT_WISE_MULTIPLY;
   op_desc.Desc = &mul_desc;
 
-  ComPtr<IDMLOperator> op;
-  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
+  ComPtr<IDMLCompiledOperator> compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
@@ -1009,12 +973,8 @@ void primitives<Device::DirectML>::relu(const T* x, T* y, dim_t size) {
   op_desc.Type = DML_OPERATOR_ACTIVATION_RELU;
   op_desc.Desc = &relu_desc;
 
-  ComPtr<IDMLOperator> op;
-  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
+  ComPtr<IDMLCompiledOperator> compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
@@ -1048,12 +1008,8 @@ void primitives<Device::DirectML>::sigmoid(const T* x, T* y, dim_t size) {
   op_desc.Type = DML_OPERATOR_ACTIVATION_SIGMOID;
   op_desc.Desc = &sigmoid_desc;
 
-  ComPtr<IDMLOperator> op;
-  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
+  ComPtr<IDMLCompiledOperator> compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
@@ -1087,12 +1043,8 @@ void primitives<Device::DirectML>::tanh(const T* x, T* y, dim_t size) {
   op_desc.Type = DML_OPERATOR_ACTIVATION_TANH;
   op_desc.Desc = &tanh_desc;
 
-  ComPtr<IDMLOperator> op;
-  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
+  ComPtr<IDMLCompiledOperator> compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
@@ -1219,12 +1171,8 @@ void primitives<Device::DirectML>::gemm(bool a_is_packed,
     op_desc.Type = DML_OPERATOR_GEMM;
     op_desc.Desc = &gemm_desc;
 
-    ComPtr<IDMLOperator> op;
-    THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
-
-    ComPtr<IDMLCompiledOperator> compiled_op;
-    THROW_IF_FAILED(dml_device->CompileOperator(
-        op.Get(), DML_EXECUTION_FLAG_NONE, IID_PPV_ARGS(&compiled_op)));
+    ComPtr<IDMLCompiledOperator> compiled_op =
+        dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
     DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
     ComPtr<ID3D12Resource> temp_resource =
@@ -1269,13 +1217,9 @@ void primitives<Device::DirectML>::gemm(bool a_is_packed,
     add_op_desc.Type = DML_OPERATOR_ELEMENT_WISE_ADD;
     add_op_desc.Desc = &add_desc;
 
-    ComPtr<IDMLOperator> add_op;
-    THROW_IF_FAILED(
-        dml_device->CreateOperator(&add_op_desc, IID_PPV_ARGS(&add_op)));
-
-    ComPtr<IDMLCompiledOperator> compiled_add_op;
-    THROW_IF_FAILED(dml_device->CompileOperator(
-        add_op.Get(), DML_EXECUTION_FLAG_NONE, IID_PPV_ARGS(&compiled_add_op)));
+    ComPtr<IDMLCompiledOperator> compiled_add_op =
+        dml::GetOrCreateCompiledOperatorApi(&add_op_desc,
+                                            DML_EXECUTION_FLAG_NONE);
 
     DML_BINDING_PROPERTIES add_binding_props =
         compiled_add_op->GetBindingProperties();
@@ -1309,12 +1253,8 @@ void primitives<Device::DirectML>::gemm(bool a_is_packed,
     op_desc.Type = DML_OPERATOR_GEMM;
     op_desc.Desc = &gemm_desc;
 
-    ComPtr<IDMLOperator> op;
-    THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
-
-    ComPtr<IDMLCompiledOperator> compiled_op;
-    THROW_IF_FAILED(dml_device->CompileOperator(
-        op.Get(), DML_EXECUTION_FLAG_NONE, IID_PPV_ARGS(&compiled_op)));
+    ComPtr<IDMLCompiledOperator> compiled_op =
+        dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
     DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
     ComPtr<ID3D12Resource> temp_resource =
@@ -1392,12 +1332,8 @@ void primitives<Device::DirectML>::max(T a, const T* x, T* y, dim_t size) {
   op_desc.Type = DML_OPERATOR_ELEMENT_WISE_MAX;
   op_desc.Desc = &max_desc;
 
-  ComPtr<IDMLOperator> op;
-  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
+  ComPtr<IDMLCompiledOperator> compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
@@ -1441,12 +1377,8 @@ void primitives<Device::DirectML>::max(const T* a,
   op_desc.Type = DML_OPERATOR_ELEMENT_WISE_MAX;
   op_desc.Desc = &max_desc;
 
-  ComPtr<IDMLOperator> op;
-  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
+  ComPtr<IDMLCompiledOperator> compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
@@ -1483,12 +1415,8 @@ void primitives<Device::DirectML>::min(T a, const T* x, T* y, dim_t size) {
   op_desc.Type = DML_OPERATOR_ELEMENT_WISE_MIN;
   op_desc.Desc = &min_desc;
 
-  ComPtr<IDMLOperator> op;
-  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
+  ComPtr<IDMLCompiledOperator> compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
@@ -1532,12 +1460,8 @@ void primitives<Device::DirectML>::min(const T* a,
   op_desc.Type = DML_OPERATOR_ELEMENT_WISE_MIN;
   op_desc.Desc = &min_desc;
 
-  ComPtr<IDMLOperator> op;
-  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
+  ComPtr<IDMLCompiledOperator> compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
@@ -1600,12 +1524,8 @@ void primitives<Device::DirectML>::exp(const T* x, T* y, dim_t size) {
   op_desc.Type = DML_OPERATOR_ELEMENT_WISE_EXP;
   op_desc.Desc = &exp_desc;
 
-  ComPtr<IDMLOperator> op;
-  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
+  ComPtr<IDMLCompiledOperator> compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
@@ -1639,12 +1559,8 @@ void primitives<Device::DirectML>::log(const T* x, T* y, dim_t size) {
   op_desc.Type = DML_OPERATOR_ELEMENT_WISE_LOG;
   op_desc.Desc = &log_desc;
 
-  ComPtr<IDMLOperator> op;
-  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
+  ComPtr<IDMLCompiledOperator> compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
@@ -1678,12 +1594,8 @@ void primitives<Device::DirectML>::sin(const T* x, T* y, dim_t size) {
   op_desc.Type = DML_OPERATOR_ELEMENT_WISE_SIN;
   op_desc.Desc = &sin_desc;
 
-  ComPtr<IDMLOperator> op;
-  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
+  ComPtr<IDMLCompiledOperator> compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
@@ -1717,12 +1629,8 @@ void primitives<Device::DirectML>::cos(const T* x, T* y, dim_t size) {
   op_desc.Type = DML_OPERATOR_ELEMENT_WISE_COS;
   op_desc.Desc = &cos_desc;
 
-  ComPtr<IDMLOperator> op;
-  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
+  ComPtr<IDMLCompiledOperator> compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
@@ -1849,12 +1757,8 @@ void primitives<Device::DirectML>::transpose_2d(const T* a,
   op_desc.Type = DML_OPERATOR_ELEMENT_WISE_IDENTITY;
   op_desc.Desc = &identity_desc;
 
-  ComPtr<IDMLOperator> op;
-  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
+  ComPtr<IDMLCompiledOperator> compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
@@ -1943,12 +1847,8 @@ void primitives<Device::DirectML>::transpose_3d(const T* a,
   op_desc.Type = DML_OPERATOR_ELEMENT_WISE_IDENTITY;
   op_desc.Desc = &identity_desc;
 
-  ComPtr<IDMLOperator> op;
-  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
+  ComPtr<IDMLCompiledOperator> compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
@@ -2034,12 +1934,8 @@ void primitives<Device::DirectML>::transpose_4d(const T* a,
   op_desc.Type = DML_OPERATOR_ELEMENT_WISE_IDENTITY;
   op_desc.Desc = &identity_desc;
 
-  ComPtr<IDMLOperator> op;
-  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
+  ComPtr<IDMLCompiledOperator> compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
@@ -2166,14 +2062,9 @@ dim_t primitives<Device::DirectML>::gemm_pack_b(const T* b,
     transpose_op_desc.Type = DML_OPERATOR_ELEMENT_WISE_IDENTITY;
     transpose_op_desc.Desc = &transpose_desc;
 
-    ComPtr<IDMLOperator> transpose_op;
-    THROW_IF_FAILED(dml_device->CreateOperator(&transpose_op_desc,
-                                               IID_PPV_ARGS(&transpose_op)));
-
-    ComPtr<IDMLCompiledOperator> compiled_transpose_op;
-    THROW_IF_FAILED(
-        dml_device->CompileOperator(transpose_op.Get(), DML_EXECUTION_FLAG_NONE,
-                                    IID_PPV_ARGS(&compiled_transpose_op)));
+    ComPtr<IDMLCompiledOperator> compiled_transpose_op =
+        dml::GetOrCreateCompiledOperatorApi(&transpose_op_desc,
+                                            DML_EXECUTION_FLAG_NONE);
 
     DML_BINDING_PROPERTIES transpose_binding_props =
         compiled_transpose_op->GetBindingProperties();
@@ -2280,12 +2171,8 @@ dim_t primitives<Device::DirectML>::gemm_pack_b(const T* b,
     op_desc.Type = DML_OPERATOR_ELEMENT_WISE_MULTIPLY;
     op_desc.Desc = &mul_desc;
 
-    ComPtr<IDMLOperator> op;
-    THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
-
-    ComPtr<IDMLCompiledOperator> compiled_op;
-    THROW_IF_FAILED(dml_device->CompileOperator(
-        op.Get(), DML_EXECUTION_FLAG_NONE, IID_PPV_ARGS(&compiled_op)));
+    ComPtr<IDMLCompiledOperator> compiled_op =
+        dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
     DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
     ComPtr<ID3D12Resource> temp_resource =
@@ -2427,11 +2314,13 @@ void primitives<Device::DirectML>::gemm_batch_strided(bool transpose_a,
   op_desc.Type = DML_OPERATOR_GEMM;
   op_desc.Desc = &gemm_desc;
 
-  ComPtr<IDMLOperator> op;
-  HRESULT hr = dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op));
-
-  if (FAILED(hr)) {
+  ComPtr<IDMLCompiledOperator> compiled_op;
+  try {
+    compiled_op =
+        dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  } catch (const std::runtime_error& e) {
     // If DirectML doesn't support batched GEMM with custom strides,
+    // or if operator creation/compilation failed for other reasons,
     // fall back to loop-based implementation
     for (dim_t batch = 0; batch < batch_size; ++batch) {
       const In* a_batch = a + batch * stridea;
@@ -2443,10 +2332,6 @@ void primitives<Device::DirectML>::gemm_batch_strided(bool transpose_a,
     }
     return;
   }
-
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
 
   DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
   ComPtr<ID3D12Resource> temp_resource =
