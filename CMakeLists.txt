@@ -251,6 +251,7 @@ if(WITH_DIRECTML)
     src/dml/ops/bias_add_dml.cc
     src/dml/ops/tile_dml.cc
     src/dml/ops/layer_norm_dml.cc
+    src/dml/ops/mean_dml.cc
   )
 endif()
 
