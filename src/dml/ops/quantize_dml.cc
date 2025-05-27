@@ -1,3 +1,4 @@
+#ifdef CT2_WITH_DIRECTML
 #include "ctranslate2/ops/quantize.h"
 #include "dml/backend_dml.h"
 #include "dml/operator_cache.h"
@@ -471,3 +472,4 @@ template void Quantize::quantize<Device::DirectML, float, int8_t>(
 
 }  // namespace ops
 }  // namespace ctranslate2
+#endif

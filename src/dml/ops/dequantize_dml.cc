@@ -1,3 +1,5 @@
+#ifdef CT2_WITH_DIRECTML
+
 #include "ctranslate2/ops/dequantize.h"
 #include "dml/backend_dml.h"
 #include "dml/common.h"
@@ -618,3 +620,4 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
 
 }  // namespace ops
 }  // namespace ctranslate2
+#endif

@@ -1,6 +1,6 @@
-#include "ctranslate2/ops/softmax.h"
-
 #ifdef CT2_WITH_DIRECTML
+
+#include "ctranslate2/ops/softmax.h"
 
 #include "dml/backend_dml.h"
 #include "dml/operator_cache.h"

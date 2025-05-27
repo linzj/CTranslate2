@@ -196,11 +196,11 @@ void Gather::compute(const StorageView& data,
 
   // Record and execute the dispatch
   device->RecordDispatch(compiled_operator.Get(), binding_table.Get());
-  device->ExecuteCommandListAndWait();
+  device->ExecuteCommandList();
 }
 
 #define DECLARE_IMPL(T)                                                    \
-  template void Gather::compute<Device::DirectML, T>(                           \
+  template void Gather::compute<Device::DirectML, T>(                      \
       const StorageView& data, const StorageView& input, const dim_t axis, \
       const dim_t batch_dims, StorageView& output) const;
 

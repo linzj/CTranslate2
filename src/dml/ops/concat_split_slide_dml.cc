@@ -1,8 +1,7 @@
+#ifdef CT2_WITH_DIRECTML
 #include "ctranslate2/ops/concat.h"
 #include "ctranslate2/ops/slide.h"
 #include "ctranslate2/ops/split.h"
-
-#ifdef CT2_WITH_DIRECTML
 
 #include "dml/backend_dml.h"
 #include "dml/operator_cache.h"
