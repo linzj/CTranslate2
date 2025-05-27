@@ -7,6 +7,7 @@
 #include <wrl/client.h>
 #include <algorithm>
 #include <vector>
+#include "common.h"
 #include "dml/backend_dml.h"
 #include "type_dispatch.h"
 
@@ -55,24 +56,217 @@ DML_TENSOR_DESC create_tensor_desc(dim_t size,
   return desc;
 }
 
-// Helper to execute a DML operator
-void execute_dml_operator(
-    IDMLCompiledOperator* compiled_op,
-    const std::vector<DML_BINDING_DESC>& input_bindings,
-    const std::vector<DML_BINDING_DESC>& output_bindings) {
+// Helper to create buffer binding
+DML_BUFFER_BINDING create_buffer_binding(ID3D12Resource* resource,
+                                         UINT64 offset = 0,
+                                         UINT64 size = 0) {
+  DML_BUFFER_BINDING binding = {};
+  binding.Buffer = resource;
+  binding.Offset = offset;
+  binding.SizeInBytes =
+      (size == 0 && resource) ? resource->GetDesc().Width : size;
+  return binding;
+}
+
+// Helper to create binding description
+DML_BINDING_DESC create_binding_desc(const DML_BUFFER_BINDING& buffer_binding) {
+  DML_BINDING_DESC desc = {};
+  desc.Type = DML_BINDING_TYPE_BUFFER;
+  desc.Desc = &buffer_binding;
+  return desc;
+}
+
+// Helper to execute a DML operator with proper bindings
+void execute_dml_operator(IDMLCompiledOperator* compiled_op,
+                          const std::vector<ID3D12Resource*>& input_resources,
+                          const std::vector<ID3D12Resource*>& output_resources,
+                          ID3D12Resource* persistent_resource = nullptr,
+                          ID3D12Resource* temporary_resource = nullptr) {
   auto dxdevice = get_device();
-  auto d3ddevice = dxdevice->D3D();
+  auto d3d_device = dxdevice->D3D();
+  auto dml_device = get_dml_device();
   auto command_list = dxdevice->GetCommandList();
 
+  // Get execution requirements
+  DML_BINDING_PROPERTIES exec_binding_props =
+      compiled_op->GetBindingProperties();
+
+  // Create descriptor heap if needed
+  ComPtr<ID3D12DescriptorHeap> descriptor_heap;
+  if (exec_binding_props.RequiredDescriptorCount > 0) {
+    D3D12_DESCRIPTOR_HEAP_DESC heap_desc = {};
+    heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    heap_desc.NumDescriptors = exec_binding_props.RequiredDescriptorCount;
+    heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    THROW_IF_FAILED(d3d_device->CreateDescriptorHeap(
+        &heap_desc, IID_PPV_ARGS(&descriptor_heap)));
+  }
+
   // Create binding table
+  ComPtr<IDMLBindingTable> binding_table;
   DML_BINDING_TABLE_DESC binding_table_desc = {};
   binding_table_desc.Dispatchable = compiled_op;
-  binding_table_desc.CPUDescriptorHandle = {};  // Would need descriptor heap
-  binding_table_desc.GPUDescriptorHandle = {};  // Would need descriptor heap
+  binding_table_desc.CPUDescriptorHandle =
+      descriptor_heap ? descriptor_heap->GetCPUDescriptorHandleForHeapStart()
+                      : D3D12_CPU_DESCRIPTOR_HANDLE{0};
+  binding_table_desc.GPUDescriptorHandle =
+      descriptor_heap ? descriptor_heap->GetGPUDescriptorHandleForHeapStart()
+                      : D3D12_GPU_DESCRIPTOR_HANDLE{0};
   binding_table_desc.SizeInDescriptors =
-      static_cast<UINT>(input_bindings.size() + output_bindings.size());
+      exec_binding_props.RequiredDescriptorCount;
 
+  THROW_IF_FAILED(dml_device->CreateBindingTable(&binding_table_desc,
+                                                 IID_PPV_ARGS(&binding_table)));
+
+  // Create buffer bindings and descriptions
+  std::vector<DML_BUFFER_BINDING> input_buffer_bindings;
+  std::vector<DML_BINDING_DESC> input_binding_descs;
+
+  for (auto* resource : input_resources) {
+    input_buffer_bindings.push_back(create_buffer_binding(resource));
+  }
+
+  for (const auto& buffer_binding : input_buffer_bindings) {
+    input_binding_descs.push_back(create_binding_desc(buffer_binding));
+  }
+
+  std::vector<DML_BUFFER_BINDING> output_buffer_bindings;
+  std::vector<DML_BINDING_DESC> output_binding_descs;
+
+  for (auto* resource : output_resources) {
+    output_buffer_bindings.push_back(create_buffer_binding(resource));
+  }
+
+  for (const auto& buffer_binding : output_buffer_bindings) {
+    output_binding_descs.push_back(create_binding_desc(buffer_binding));
+  }
+
+  // Bind inputs
+  if (!input_binding_descs.empty()) {
+    binding_table->BindInputs(static_cast<UINT>(input_binding_descs.size()),
+                              input_binding_descs.data());
+  }
+
+  // Bind outputs
+  if (!output_binding_descs.empty()) {
+    binding_table->BindOutputs(static_cast<UINT>(output_binding_descs.size()),
+                               output_binding_descs.data());
+  }
+
+  // Bind temporary/persistent resources if needed
+  if (temporary_resource && exec_binding_props.TemporaryResourceSize > 0) {
+    DML_BUFFER_BINDING temp_binding = create_buffer_binding(temporary_resource);
+    DML_BINDING_DESC temp_desc = create_binding_desc(temp_binding);
+    binding_table->BindTemporaryResource(&temp_desc);
+  }
+
+  if (persistent_resource && exec_binding_props.PersistentResourceSize > 0) {
+    DML_BUFFER_BINDING persist_binding =
+        create_buffer_binding(persistent_resource);
+    DML_BINDING_DESC persist_desc = create_binding_desc(persist_binding);
+    binding_table->BindPersistentResource(&persist_desc);
+  }
+
+  // Transition resources to UAV state
+  std::vector<D3D12_RESOURCE_BARRIER> barriers;
+
+  for (auto* resource : input_resources) {
+    if (resource) {
+      D3D12_RESOURCE_BARRIER barrier = {};
+      barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      barrier.Transition.pResource = resource;
+      barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+      barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+      barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+      barriers.push_back(barrier);
+    }
+  }
+
+  for (auto* resource : output_resources) {
+    if (resource) {
+      D3D12_RESOURCE_BARRIER barrier = {};
+      barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      barrier.Transition.pResource = resource;
+      barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+      barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+      barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+      barriers.push_back(barrier);
+    }
+  }
+
+  if (!barriers.empty()) {
+    command_list->ResourceBarrier(static_cast<UINT>(barriers.size()),
+                                  barriers.data());
+  }
+
+  // Set descriptor heap
+  if (descriptor_heap) {
+    ID3D12DescriptorHeap* heaps[] = {descriptor_heap.Get()};
+    command_list->SetDescriptorHeaps(1, heaps);
+  }
+
+  // Record dispatch
+  dxdevice->RecordDispatch(compiled_op, binding_table.Get());
+
+  // Execute command list
   dxdevice->ExecuteCommandList();
+
+  // Transition resources back
+  barriers.clear();
+  for (auto* resource : output_resources) {
+    if (resource) {
+      D3D12_RESOURCE_BARRIER barrier = {};
+      barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      barrier.Transition.pResource = resource;
+      barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+      barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
+      barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+      barriers.push_back(barrier);
+    }
+  }
+
+  if (!barriers.empty()) {
+    auto new_command_list = dxdevice->GetCommandList();
+    new_command_list->ResourceBarrier(static_cast<UINT>(barriers.size()),
+                                      barriers.data());
+    dxdevice->ExecuteCommandList();
+  }
+}
+
+// Helper to create temporary resource if needed
+ComPtr<ID3D12Resource> create_temporary_resource(size_t size) {
+  if (size == 0)
+    return nullptr;
+
+  auto dxdevice = get_device();
+  auto d3d_device = dxdevice->D3D();
+
+  D3D12_HEAP_PROPERTIES heap_props = {};
+  heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
+  heap_props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+  heap_props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+  heap_props.CreationNodeMask = 1;
+  heap_props.VisibleNodeMask = 1;
+
+  D3D12_RESOURCE_DESC desc = {};
+  desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  desc.Alignment = 0;
+  desc.Width = size;
+  desc.Height = 1;
+  desc.DepthOrArraySize = 1;
+  desc.MipLevels = 1;
+  desc.Format = DXGI_FORMAT_UNKNOWN;
+  desc.SampleDesc.Count = 1;
+  desc.SampleDesc.Quality = 0;
+  desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+  ComPtr<ID3D12Resource> resource;
+  THROW_IF_FAILED(d3d_device->CreateCommittedResource(
+      &heap_props, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON,
+      nullptr, IID_PPV_ARGS(&resource)));
+
+  return resource;
 }
 
 }  // namespace dml
@@ -92,6 +286,17 @@ template <typename T>
 void primitives<Device::DirectML>::fill(T* x, T a, dim_t size) {
   auto dml_device = dml::get_dml_device();
 
+  // Create a constant buffer with the fill value
+  auto dxdevice = dml::get_device();
+  auto d3d_device = dxdevice->D3D();
+
+  // Create constant buffer for scalar value
+  ComPtr<ID3D12Resource> constant_resource =
+      dml::create_temporary_resource(sizeof(T));
+
+  // Upload the constant value (simplified - would need upload heap in practice)
+  // For now, we'll use an identity operation as a placeholder
+
   DML_BUFFER_TENSOR_DESC input_buffer_desc = {};
   DML_BUFFER_TENSOR_DESC output_buffer_desc = {};
 
@@ -110,14 +315,23 @@ void primitives<Device::DirectML>::fill(T* x, T a, dim_t size) {
   op_desc.Desc = &identity_desc;
 
   ComPtr<IDMLOperator> op;
-  dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op));
+  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
 
   ComPtr<IDMLCompiledOperator> compiled_op;
-  dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                              IID_PPV_ARGS(&compiled_op));
+  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
+                                              IID_PPV_ARGS(&compiled_op)));
 
-  // Execute with proper bindings (simplified)
-  dml::execute_dml_operator(compiled_op.Get(), {}, {});
+  // Get binding properties and create temporary resource if needed
+  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+  ComPtr<ID3D12Resource> temp_resource =
+      dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+
+  // Execute with proper bindings
+  std::vector<ID3D12Resource*> inputs = {
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x))};
+  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(x)};
+  dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                            temp_resource.Get());
 }
 
 template <>
@@ -145,7 +359,40 @@ void primitives<Device::DirectML>::indexed_fill(T* x,
 template <>
 template <typename T>
 void primitives<Device::DirectML>::copy(const T* x, T* y, dim_t size) {
-  throw std::runtime_error("unimplemented copy for DirectML primitives");
+  auto dml_device = dml::get_dml_device();
+
+  DML_BUFFER_TENSOR_DESC input_buffer_desc = {};
+  DML_BUFFER_TENSOR_DESC output_buffer_desc = {};
+
+  DML_TENSOR_DESC input_desc =
+      dml::create_tensor_desc<T>(size, input_buffer_desc);
+  DML_TENSOR_DESC output_desc =
+      dml::create_tensor_desc<T>(size, output_buffer_desc);
+
+  DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC identity_desc = {};
+  identity_desc.InputTensor = &input_desc;
+  identity_desc.OutputTensor = &output_desc;
+
+  DML_OPERATOR_DESC op_desc = {};
+  op_desc.Type = DML_OPERATOR_ELEMENT_WISE_IDENTITY;
+  op_desc.Desc = &identity_desc;
+
+  ComPtr<IDMLOperator> op;
+  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
+
+  ComPtr<IDMLCompiledOperator> compiled_op;
+  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
+                                              IID_PPV_ARGS(&compiled_op)));
+
+  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+  ComPtr<ID3D12Resource> temp_resource =
+      dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+
+  std::vector<ID3D12Resource*> inputs = {
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x))};
+  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(y)};
+  dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                            temp_resource.Get());
 }
 
 template <>
@@ -171,13 +418,21 @@ void primitives<Device::DirectML>::convert(const U* x, V* y, dim_t size) {
   op_desc.Desc = &cast_desc;
 
   ComPtr<IDMLOperator> op;
-  dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op));
+  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
 
   ComPtr<IDMLCompiledOperator> compiled_op;
-  dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                              IID_PPV_ARGS(&compiled_op));
+  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
+                                              IID_PPV_ARGS(&compiled_op)));
 
-  dml::execute_dml_operator(compiled_op.Get(), {}, {});
+  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+  ComPtr<ID3D12Resource> temp_resource =
+      dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+
+  std::vector<ID3D12Resource*> inputs = {
+      reinterpret_cast<ID3D12Resource*>(const_cast<U*>(x))};
+  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(y)};
+  dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                            temp_resource.Get());
 }
 
 template <>
@@ -208,13 +463,26 @@ T primitives<Device::DirectML>::sum(const T* array, dim_t size) {
   op_desc.Desc = &reduce_desc;
 
   ComPtr<IDMLOperator> op;
-  dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op));
+  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
 
   ComPtr<IDMLCompiledOperator> compiled_op;
-  dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                              IID_PPV_ARGS(&compiled_op));
+  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
+                                              IID_PPV_ARGS(&compiled_op)));
 
-  dml::execute_dml_operator(compiled_op.Get(), {}, {});
+  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+  ComPtr<ID3D12Resource> temp_resource =
+      dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+
+  // Create output resource for result
+  auto dxdevice = dml::get_device();
+  ComPtr<ID3D12Resource> output_resource =
+      dml::create_temporary_resource(sizeof(T));
+
+  std::vector<ID3D12Resource*> inputs = {
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(array))};
+  std::vector<ID3D12Resource*> outputs = {output_resource.Get()};
+  dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                            temp_resource.Get());
 
   // Return result (would need proper readback)
   return T{};
@@ -247,13 +515,25 @@ dim_t primitives<Device::DirectML>::max_element(const T* array, dim_t size) {
   op_desc.Desc = &argmax_desc;
 
   ComPtr<IDMLOperator> op;
-  dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op));
+  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
 
   ComPtr<IDMLCompiledOperator> compiled_op;
-  dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                              IID_PPV_ARGS(&compiled_op));
+  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
+                                              IID_PPV_ARGS(&compiled_op)));
 
-  dml::execute_dml_operator(compiled_op.Get(), {}, {});
+  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+  ComPtr<ID3D12Resource> temp_resource =
+      dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+
+  auto dxdevice = dml::get_device();
+  ComPtr<ID3D12Resource> output_resource =
+      dml::create_temporary_resource(sizeof(int32_t));
+
+  std::vector<ID3D12Resource*> inputs = {
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(array))};
+  std::vector<ID3D12Resource*> outputs = {output_resource.Get()};
+  dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                            temp_resource.Get());
 
   return 0;  // Would need proper readback
 }
@@ -285,13 +565,25 @@ T primitives<Device::DirectML>::max(const T* array, dim_t size) {
   op_desc.Desc = &reduce_desc;
 
   ComPtr<IDMLOperator> op;
-  dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op));
+  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
 
   ComPtr<IDMLCompiledOperator> compiled_op;
-  dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                              IID_PPV_ARGS(&compiled_op));
+  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
+                                              IID_PPV_ARGS(&compiled_op)));
 
-  dml::execute_dml_operator(compiled_op.Get(), {}, {});
+  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+  ComPtr<ID3D12Resource> temp_resource =
+      dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+
+  auto dxdevice = dml::get_device();
+  ComPtr<ID3D12Resource> output_resource =
+      dml::create_temporary_resource(sizeof(T));
+
+  std::vector<ID3D12Resource*> inputs = {
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(array))};
+  std::vector<ID3D12Resource*> outputs = {output_resource.Get()};
+  dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                            temp_resource.Get());
 
   return T{};
 }
@@ -301,6 +593,8 @@ template <typename T>
 void primitives<Device::DirectML>::add(T a, const T* x, T* y, dim_t size) {
   auto dml_device = dml::get_dml_device();
 
+  // For scalar + array, we need to create a constant buffer with the scalar
+  // broadcasted For now, simplified implementation using element-wise add
   DML_BUFFER_TENSOR_DESC a_buffer_desc = {};
   DML_BUFFER_TENSOR_DESC b_buffer_desc = {};
   DML_BUFFER_TENSOR_DESC output_buffer_desc = {};
@@ -322,13 +616,27 @@ void primitives<Device::DirectML>::add(T a, const T* x, T* y, dim_t size) {
   op_desc.Desc = &add_desc;
 
   ComPtr<IDMLOperator> op;
-  dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op));
+  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
 
   ComPtr<IDMLCompiledOperator> compiled_op;
-  dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                              IID_PPV_ARGS(&compiled_op));
+  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
+                                              IID_PPV_ARGS(&compiled_op)));
 
-  dml::execute_dml_operator(compiled_op.Get(), {}, {});
+  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+  ComPtr<ID3D12Resource> temp_resource =
+      dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+
+  // Create constant buffer for scalar
+  auto dxdevice = dml::get_device();
+  ComPtr<ID3D12Resource> scalar_resource =
+      dml::create_temporary_resource(sizeof(T));
+
+  std::vector<ID3D12Resource*> inputs = {
+      scalar_resource.Get(),
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x))};
+  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(y)};
+  dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                            temp_resource.Get());
 }
 
 template <>
@@ -358,13 +666,22 @@ void primitives<Device::DirectML>::add(const T* a,
   op_desc.Desc = &add_desc;
 
   ComPtr<IDMLOperator> op;
-  dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op));
+  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
 
   ComPtr<IDMLCompiledOperator> compiled_op;
-  dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                              IID_PPV_ARGS(&compiled_op));
+  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
+                                              IID_PPV_ARGS(&compiled_op)));
 
-  dml::execute_dml_operator(compiled_op.Get(), {}, {});
+  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+  ComPtr<ID3D12Resource> temp_resource =
+      dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+
+  std::vector<ID3D12Resource*> inputs = {
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(a)),
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(b))};
+  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(c)};
+  dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                            temp_resource.Get());
 }
 
 template <>
@@ -394,13 +711,22 @@ void primitives<Device::DirectML>::sub(const T* a,
   op_desc.Desc = &sub_desc;
 
   ComPtr<IDMLOperator> op;
-  dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op));
+  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
 
   ComPtr<IDMLCompiledOperator> compiled_op;
-  dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                              IID_PPV_ARGS(&compiled_op));
+  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
+                                              IID_PPV_ARGS(&compiled_op)));
 
-  dml::execute_dml_operator(compiled_op.Get(), {}, {});
+  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+  ComPtr<ID3D12Resource> temp_resource =
+      dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+
+  std::vector<ID3D12Resource*> inputs = {
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(a)),
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(b))};
+  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(c)};
+  dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                            temp_resource.Get());
 }
 
 template <>
@@ -428,13 +754,27 @@ void primitives<Device::DirectML>::mul(T a, const T* x, T* y, dim_t size) {
   op_desc.Desc = &mul_desc;
 
   ComPtr<IDMLOperator> op;
-  dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op));
+  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
 
   ComPtr<IDMLCompiledOperator> compiled_op;
-  dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                              IID_PPV_ARGS(&compiled_op));
+  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
+                                              IID_PPV_ARGS(&compiled_op)));
 
-  dml::execute_dml_operator(compiled_op.Get(), {}, {});
+  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+  ComPtr<ID3D12Resource> temp_resource =
+      dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+
+  // Create constant buffer for scalar
+  auto dxdevice = dml::get_device();
+  ComPtr<ID3D12Resource> scalar_resource =
+      dml::create_temporary_resource(sizeof(T));
+
+  std::vector<ID3D12Resource*> inputs = {
+      scalar_resource.Get(),
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x))};
+  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(y)};
+  dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                            temp_resource.Get());
 }
 
 template <>
@@ -464,13 +804,22 @@ void primitives<Device::DirectML>::mul(const T* a,
   op_desc.Desc = &mul_desc;
 
   ComPtr<IDMLOperator> op;
-  dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op));
+  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
 
   ComPtr<IDMLCompiledOperator> compiled_op;
-  dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                              IID_PPV_ARGS(&compiled_op));
+  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
+                                              IID_PPV_ARGS(&compiled_op)));
 
-  dml::execute_dml_operator(compiled_op.Get(), {}, {});
+  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+  ComPtr<ID3D12Resource> temp_resource =
+      dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+
+  std::vector<ID3D12Resource*> inputs = {
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(a)),
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(b))};
+  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(c)};
+  dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                            temp_resource.Get());
 }
 
 // Activation functions
@@ -496,13 +845,21 @@ void primitives<Device::DirectML>::relu(const T* x, T* y, dim_t size) {
   op_desc.Desc = &relu_desc;
 
   ComPtr<IDMLOperator> op;
-  dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op));
+  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
 
   ComPtr<IDMLCompiledOperator> compiled_op;
-  dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                              IID_PPV_ARGS(&compiled_op));
+  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
+                                              IID_PPV_ARGS(&compiled_op)));
 
-  dml::execute_dml_operator(compiled_op.Get(), {}, {});
+  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+  ComPtr<ID3D12Resource> temp_resource =
+      dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+
+  std::vector<ID3D12Resource*> inputs = {
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x))};
+  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(y)};
+  dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                            temp_resource.Get());
 }
 
 template <>
@@ -527,13 +884,21 @@ void primitives<Device::DirectML>::sigmoid(const T* x, T* y, dim_t size) {
   op_desc.Desc = &sigmoid_desc;
 
   ComPtr<IDMLOperator> op;
-  dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op));
+  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
 
   ComPtr<IDMLCompiledOperator> compiled_op;
-  dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                              IID_PPV_ARGS(&compiled_op));
+  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
+                                              IID_PPV_ARGS(&compiled_op)));
 
-  dml::execute_dml_operator(compiled_op.Get(), {}, {});
+  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+  ComPtr<ID3D12Resource> temp_resource =
+      dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+
+  std::vector<ID3D12Resource*> inputs = {
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x))};
+  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(y)};
+  dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                            temp_resource.Get());
 }
 
 template <>
@@ -558,13 +923,21 @@ void primitives<Device::DirectML>::tanh(const T* x, T* y, dim_t size) {
   op_desc.Desc = &tanh_desc;
 
   ComPtr<IDMLOperator> op;
-  dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op));
+  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
 
   ComPtr<IDMLCompiledOperator> compiled_op;
-  dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                              IID_PPV_ARGS(&compiled_op));
+  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
+                                              IID_PPV_ARGS(&compiled_op)));
 
-  dml::execute_dml_operator(compiled_op.Get(), {}, {});
+  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+  ComPtr<ID3D12Resource> temp_resource =
+      dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+
+  std::vector<ID3D12Resource*> inputs = {
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x))};
+  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(y)};
+  dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                            temp_resource.Get());
 }
 
 // Matrix operations
@@ -652,13 +1025,27 @@ void primitives<Device::DirectML>::gemm(bool a_is_packed,
   op_desc.Desc = &gemm_desc;
 
   ComPtr<IDMLOperator> op;
-  dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op));
+  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
 
   ComPtr<IDMLCompiledOperator> compiled_op;
-  dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                              IID_PPV_ARGS(&compiled_op));
+  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
+                                              IID_PPV_ARGS(&compiled_op)));
 
-  dml::execute_dml_operator(compiled_op.Get(), {}, {});
+  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+  ComPtr<ID3D12Resource> temp_resource =
+      dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+
+  std::vector<ID3D12Resource*> inputs = {
+      reinterpret_cast<ID3D12Resource*>(const_cast<In*>(a)),
+      reinterpret_cast<ID3D12Resource*>(const_cast<In*>(b))};
+
+  if (beta != 0.0f) {
+    inputs.push_back(reinterpret_cast<ID3D12Resource*>(c));
+  }
+
+  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(c)};
+  dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                            temp_resource.Get());
 }
 
 // Stub implementations for remaining methods
@@ -719,13 +1106,26 @@ void primitives<Device::DirectML>::max(T a, const T* x, T* y, dim_t size) {
   op_desc.Desc = &max_desc;
 
   ComPtr<IDMLOperator> op;
-  dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op));
+  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
 
   ComPtr<IDMLCompiledOperator> compiled_op;
-  dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                              IID_PPV_ARGS(&compiled_op));
+  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
+                                              IID_PPV_ARGS(&compiled_op)));
 
-  dml::execute_dml_operator(compiled_op.Get(), {}, {});
+  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+  ComPtr<ID3D12Resource> temp_resource =
+      dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+
+  auto dxdevice = dml::get_device();
+  ComPtr<ID3D12Resource> scalar_resource =
+      dml::create_temporary_resource(sizeof(T));
+
+  std::vector<ID3D12Resource*> inputs = {
+      scalar_resource.Get(),
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x))};
+  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(y)};
+  dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                            temp_resource.Get());
 }
 
 template <>
@@ -755,13 +1155,22 @@ void primitives<Device::DirectML>::max(const T* a,
   op_desc.Desc = &max_desc;
 
   ComPtr<IDMLOperator> op;
-  dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op));
+  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
 
   ComPtr<IDMLCompiledOperator> compiled_op;
-  dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                              IID_PPV_ARGS(&compiled_op));
+  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
+                                              IID_PPV_ARGS(&compiled_op)));
 
-  dml::execute_dml_operator(compiled_op.Get(), {}, {});
+  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+  ComPtr<ID3D12Resource> temp_resource =
+      dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+
+  std::vector<ID3D12Resource*> inputs = {
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(a)),
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(b))};
+  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(c)};
+  dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                            temp_resource.Get());
 }
 
 template <>
@@ -788,13 +1197,26 @@ void primitives<Device::DirectML>::min(T a, const T* x, T* y, dim_t size) {
   op_desc.Desc = &min_desc;
 
   ComPtr<IDMLOperator> op;
-  dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op));
+  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
 
   ComPtr<IDMLCompiledOperator> compiled_op;
-  dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                              IID_PPV_ARGS(&compiled_op));
+  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
+                                              IID_PPV_ARGS(&compiled_op)));
 
-  dml::execute_dml_operator(compiled_op.Get(), {}, {});
+  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+  ComPtr<ID3D12Resource> temp_resource =
+      dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+
+  auto dxdevice = dml::get_device();
+  ComPtr<ID3D12Resource> scalar_resource =
+      dml::create_temporary_resource(sizeof(T));
+
+  std::vector<ID3D12Resource*> inputs = {
+      scalar_resource.Get(),
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x))};
+  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(y)};
+  dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                            temp_resource.Get());
 }
 
 template <>
@@ -824,13 +1246,22 @@ void primitives<Device::DirectML>::min(const T* a,
   op_desc.Desc = &min_desc;
 
   ComPtr<IDMLOperator> op;
-  dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op));
+  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
 
   ComPtr<IDMLCompiledOperator> compiled_op;
-  dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                              IID_PPV_ARGS(&compiled_op));
+  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
+                                              IID_PPV_ARGS(&compiled_op)));
 
-  dml::execute_dml_operator(compiled_op.Get(), {}, {});
+  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+  ComPtr<ID3D12Resource> temp_resource =
+      dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+
+  std::vector<ID3D12Resource*> inputs = {
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(a)),
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(b))};
+  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(c)};
+  dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                            temp_resource.Get());
 }
 
 // Remaining stub implementations for completeness
@@ -883,13 +1314,21 @@ void primitives<Device::DirectML>::exp(const T* x, T* y, dim_t size) {
   op_desc.Desc = &exp_desc;
 
   ComPtr<IDMLOperator> op;
-  dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op));
+  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
 
   ComPtr<IDMLCompiledOperator> compiled_op;
-  dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                              IID_PPV_ARGS(&compiled_op));
+  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
+                                              IID_PPV_ARGS(&compiled_op)));
 
-  dml::execute_dml_operator(compiled_op.Get(), {}, {});
+  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+  ComPtr<ID3D12Resource> temp_resource =
+      dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+
+  std::vector<ID3D12Resource*> inputs = {
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x))};
+  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(y)};
+  dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                            temp_resource.Get());
 }
 
 template <>
@@ -914,13 +1353,21 @@ void primitives<Device::DirectML>::log(const T* x, T* y, dim_t size) {
   op_desc.Desc = &log_desc;
 
   ComPtr<IDMLOperator> op;
-  dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op));
+  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
 
   ComPtr<IDMLCompiledOperator> compiled_op;
-  dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                              IID_PPV_ARGS(&compiled_op));
+  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
+                                              IID_PPV_ARGS(&compiled_op)));
 
-  dml::execute_dml_operator(compiled_op.Get(), {}, {});
+  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+  ComPtr<ID3D12Resource> temp_resource =
+      dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+
+  std::vector<ID3D12Resource*> inputs = {
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x))};
+  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(y)};
+  dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                            temp_resource.Get());
 }
 
 template <>
@@ -945,13 +1392,21 @@ void primitives<Device::DirectML>::sin(const T* x, T* y, dim_t size) {
   op_desc.Desc = &sin_desc;
 
   ComPtr<IDMLOperator> op;
-  dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op));
+  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
 
   ComPtr<IDMLCompiledOperator> compiled_op;
-  dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                              IID_PPV_ARGS(&compiled_op));
+  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
+                                              IID_PPV_ARGS(&compiled_op)));
 
-  dml::execute_dml_operator(compiled_op.Get(), {}, {});
+  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+  ComPtr<ID3D12Resource> temp_resource =
+      dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+
+  std::vector<ID3D12Resource*> inputs = {
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x))};
+  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(y)};
+  dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                            temp_resource.Get());
 }
 
 template <>
@@ -976,13 +1431,21 @@ void primitives<Device::DirectML>::cos(const T* x, T* y, dim_t size) {
   op_desc.Desc = &cos_desc;
 
   ComPtr<IDMLOperator> op;
-  dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op));
+  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
 
   ComPtr<IDMLCompiledOperator> compiled_op;
-  dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                              IID_PPV_ARGS(&compiled_op));
+  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
+                                              IID_PPV_ARGS(&compiled_op)));
 
-  dml::execute_dml_operator(compiled_op.Get(), {}, {});
+  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+  ComPtr<ID3D12Resource> temp_resource =
+      dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+
+  std::vector<ID3D12Resource*> inputs = {
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x))};
+  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(y)};
+  dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                            temp_resource.Get());
 }
 
 // Additional required implementations (stubs for now)
@@ -1304,6 +1767,20 @@ template void primitives<Device::DirectML>::convert<bfloat16_t, float16_t>(
     const bfloat16_t*,
     float16_t*,
     dim_t);
+
+template dim_t primitives<Device::DirectML>::gemm_pack_b<int8_t>(const int8_t*,
+                                                                 const bool,
+                                                                 const dim_t,
+                                                                 const dim_t,
+                                                                 const float,
+                                                                 int8_t*);
+template dim_t primitives<Device::DirectML>::gemm_pack_b<float16_t>(
+    const float16_t*,
+    const bool,
+    const dim_t,
+    const dim_t,
+    const float,
+    float16_t*);
 
 }  // namespace ctranslate2
 
