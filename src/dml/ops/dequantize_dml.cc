@@ -198,5 +198,423 @@ void Dequantize::dequantize<Device::DirectML, int8_t, float>(
   device->ExecuteCommandList();
 }
 
+template <>
+void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
+    const StorageView& c,
+    const StorageView& a_scale,
+    const StorageView& b_scale,
+    const bool transpose_a,
+    const bool transpose_b,
+    const StorageView* bias,
+    StorageView& y) const {
+  auto* device = dml::get_device();
+  auto* dml_device = dml::get_dml_device();
+  auto* command_list = device->GetCommandList();
+
+  const dim_t batch_size = a_scale.size();
+  const dim_t depth = c.dim(-1);
+
+  // Get input buffers
+  auto* c_buffer = static_cast<ID3D12Resource*>(const_cast<void*>(c.buffer()));
+  auto* a_scale_buffer =
+      static_cast<ID3D12Resource*>(const_cast<void*>(a_scale.buffer()));
+  auto* b_scale_buffer =
+      static_cast<ID3D12Resource*>(const_cast<void*>(b_scale.buffer()));
+  auto* y_buffer = static_cast<ID3D12Resource*>(y.buffer());
+
+  // Create tensor descriptors
+  UINT c_dims[] = {static_cast<UINT>(batch_size), static_cast<UINT>(depth)};
+  UINT scale_dims_a[] = {static_cast<UINT>(transpose_a ? depth : batch_size),
+                         1};
+  UINT scale_dims_b[] = {static_cast<UINT>(transpose_b ? depth : batch_size),
+                         1};
+  UINT y_dims[] = {static_cast<UINT>(batch_size), static_cast<UINT>(depth)};
+
+  // Input tensor (int32)
+  DML_BUFFER_TENSOR_DESC c_tensor_desc = {};
+  c_tensor_desc.DataType = DML_TENSOR_DATA_TYPE_INT32;
+  c_tensor_desc.Flags = DML_TENSOR_FLAG_NONE;
+  c_tensor_desc.DimensionCount = 2;
+  c_tensor_desc.Sizes = c_dims;
+  c_tensor_desc.TotalTensorSizeInBytes = c.size() * sizeof(int32_t);
+  c_tensor_desc.GuaranteedBaseOffsetAlignment = 0;
+
+  DML_TENSOR_DESC c_desc = {};
+  c_desc.Type = DML_TENSOR_TYPE_BUFFER;
+  c_desc.Desc = &c_tensor_desc;
+
+  // A scale tensor (float)
+  DML_BUFFER_TENSOR_DESC a_scale_tensor_desc = {};
+  a_scale_tensor_desc.DataType = DML_TENSOR_DATA_TYPE_FLOAT32;
+  a_scale_tensor_desc.Flags = DML_TENSOR_FLAG_NONE;
+  a_scale_tensor_desc.DimensionCount = 2;
+  a_scale_tensor_desc.Sizes = scale_dims_a;
+  a_scale_tensor_desc.TotalTensorSizeInBytes = a_scale.size() * sizeof(float);
+  a_scale_tensor_desc.GuaranteedBaseOffsetAlignment = 0;
+
+  DML_TENSOR_DESC a_scale_desc = {};
+  a_scale_desc.Type = DML_TENSOR_TYPE_BUFFER;
+  a_scale_desc.Desc = &a_scale_tensor_desc;
+
+  // B scale tensor (float)
+  DML_BUFFER_TENSOR_DESC b_scale_tensor_desc = {};
+  b_scale_tensor_desc.DataType = DML_TENSOR_DATA_TYPE_FLOAT32;
+  b_scale_tensor_desc.Flags = DML_TENSOR_FLAG_NONE;
+  b_scale_tensor_desc.DimensionCount = 2;
+  b_scale_tensor_desc.Sizes = scale_dims_b;
+  b_scale_tensor_desc.TotalTensorSizeInBytes = b_scale.size() * sizeof(float);
+  b_scale_tensor_desc.GuaranteedBaseOffsetAlignment = 0;
+
+  DML_TENSOR_DESC b_scale_desc = {};
+  b_scale_desc.Type = DML_TENSOR_TYPE_BUFFER;
+  b_scale_desc.Desc = &b_scale_tensor_desc;
+
+  // Output tensor (float)
+  DML_BUFFER_TENSOR_DESC y_tensor_desc = {};
+  y_tensor_desc.DataType = DML_TENSOR_DATA_TYPE_FLOAT32;
+  y_tensor_desc.Flags = DML_TENSOR_FLAG_NONE;
+  y_tensor_desc.DimensionCount = 2;
+  y_tensor_desc.Sizes = y_dims;
+  y_tensor_desc.TotalTensorSizeInBytes = y.size() * sizeof(float);
+  y_tensor_desc.GuaranteedBaseOffsetAlignment = 0;
+
+  DML_TENSOR_DESC y_desc = {};
+  y_desc.Type = DML_TENSOR_TYPE_BUFFER;
+  y_desc.Desc = &y_tensor_desc;
+
+  // Create intermediate tensors for computation
+  DML_BUFFER_TENSOR_DESC intermediate_tensor_desc = y_tensor_desc;
+  DML_TENSOR_DESC intermediate_desc = {};
+  intermediate_desc.Type = DML_TENSOR_TYPE_BUFFER;
+  intermediate_desc.Desc = &intermediate_tensor_desc;
+
+  // Step 1: Cast int32 input to float
+  DML_CAST_OPERATOR_DESC cast_desc = {};
+  cast_desc.InputTensor = &c_desc;
+  cast_desc.OutputTensor = &intermediate_desc;
+
+  DML_OPERATOR_DESC cast_op_desc = {};
+  cast_op_desc.Type = DML_OPERATOR_CAST;
+  cast_op_desc.Desc = &cast_desc;
+
+  auto cast_op = dml::GetOrCreateCompiledOperatorApi(&cast_op_desc);
+
+  // Create temporary buffer for cast output
+  auto cast_output =
+      device->CreatePreferredDeviceMemoryBuffer(y.size() * sizeof(float));
+
+  // Step 2: Multiply scales (a_scale * b_scale)
+  DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC scale_mult_desc = {};
+  scale_mult_desc.ATensor = &a_scale_desc;
+  scale_mult_desc.BTensor = &b_scale_desc;
+  scale_mult_desc.OutputTensor = &intermediate_desc;
+
+  DML_OPERATOR_DESC scale_mult_op_desc = {};
+  scale_mult_op_desc.Type = DML_OPERATOR_ELEMENT_WISE_MULTIPLY;
+  scale_mult_op_desc.Desc = &scale_mult_desc;
+
+  auto scale_mult_op = dml::GetOrCreateCompiledOperatorApi(&scale_mult_op_desc);
+
+  // Create temporary buffer for scale multiplication
+  auto combined_scale =
+      device->CreatePreferredDeviceMemoryBuffer(y.size() * sizeof(float));
+
+  // Step 3: Divide cast output by combined scale
+  DML_ELEMENT_WISE_DIVIDE_OPERATOR_DESC divide_desc = {};
+  divide_desc.ATensor = &intermediate_desc;
+  divide_desc.BTensor = &intermediate_desc;
+  divide_desc.OutputTensor = &intermediate_desc;
+
+  DML_OPERATOR_DESC divide_op_desc = {};
+  divide_op_desc.Type = DML_OPERATOR_ELEMENT_WISE_DIVIDE;
+  divide_op_desc.Desc = &divide_desc;
+
+  auto divide_op = dml::GetOrCreateCompiledOperatorApi(&divide_op_desc);
+
+  // Create temporary buffer for division result
+  auto divide_output =
+      device->CreatePreferredDeviceMemoryBuffer(y.size() * sizeof(float));
+
+  // Step 4: Add bias if provided
+  Microsoft::WRL::ComPtr<IDMLCompiledOperator> bias_add_op;
+  Microsoft::WRL::ComPtr<ID3D12Resource> bias_output;
+
+  if (bias) {
+    auto* bias_buffer =
+        static_cast<ID3D12Resource*>(const_cast<void*>(bias->buffer()));
+
+    // Bias tensor
+    UINT bias_dims[] = {1, static_cast<UINT>(depth)};
+    DML_BUFFER_TENSOR_DESC bias_tensor_desc = {};
+    bias_tensor_desc.DataType = DML_TENSOR_DATA_TYPE_FLOAT32;
+    bias_tensor_desc.Flags = DML_TENSOR_FLAG_NONE;
+    bias_tensor_desc.DimensionCount = 2;
+    bias_tensor_desc.Sizes = bias_dims;
+    bias_tensor_desc.TotalTensorSizeInBytes = bias->size() * sizeof(float);
+    bias_tensor_desc.GuaranteedBaseOffsetAlignment = 0;
+
+    DML_TENSOR_DESC bias_desc = {};
+    bias_desc.Type = DML_TENSOR_TYPE_BUFFER;
+    bias_desc.Desc = &bias_tensor_desc;
+
+    DML_ELEMENT_WISE_ADD_OPERATOR_DESC bias_add_desc = {};
+    bias_add_desc.ATensor = &intermediate_desc;
+    bias_add_desc.BTensor = &bias_desc;
+    bias_add_desc.OutputTensor = &intermediate_desc;
+
+    DML_OPERATOR_DESC bias_add_op_desc = {};
+    bias_add_op_desc.Type = DML_OPERATOR_ELEMENT_WISE_ADD;
+    bias_add_op_desc.Desc = &bias_add_desc;
+
+    bias_add_op = dml::GetOrCreateCompiledOperatorApi(&bias_add_op_desc);
+    bias_output =
+        device->CreatePreferredDeviceMemoryBuffer(y.size() * sizeof(float));
+  }
+
+  // Step 5: Apply activation if specified
+  Microsoft::WRL::ComPtr<IDMLCompiledOperator> activation_op;
+
+  if (_activation_type) {
+    DML_OPERATOR_DESC activation_op_desc = {};
+
+    switch (*_activation_type) {
+      case ActivationType::ReLU: {
+        DML_ACTIVATION_RELU_OPERATOR_DESC relu_desc = {};
+        relu_desc.InputTensor = &intermediate_desc;
+        relu_desc.OutputTensor = &y_desc;
+
+        activation_op_desc.Type = DML_OPERATOR_ACTIVATION_RELU;
+        activation_op_desc.Desc = &relu_desc;
+        break;
+      }
+      case ActivationType::GELU: {
+        DML_ACTIVATION_GELU_OPERATOR_DESC gelu_desc = {};
+        gelu_desc.InputTensor = &intermediate_desc;
+        gelu_desc.OutputTensor = &y_desc;
+
+        activation_op_desc.Type = DML_OPERATOR_ACTIVATION_GELU;
+        activation_op_desc.Desc = &gelu_desc;
+        break;
+      }
+      case ActivationType::Sigmoid: {
+        DML_ACTIVATION_SIGMOID_OPERATOR_DESC sigmoid_desc = {};
+        sigmoid_desc.InputTensor = &intermediate_desc;
+        sigmoid_desc.OutputTensor = &y_desc;
+
+        activation_op_desc.Type = DML_OPERATOR_ACTIVATION_SIGMOID;
+        activation_op_desc.Desc = &sigmoid_desc;
+        break;
+      }
+      case ActivationType::Tanh: {
+        DML_ACTIVATION_TANH_OPERATOR_DESC tanh_desc = {};
+        tanh_desc.InputTensor = &intermediate_desc;
+        tanh_desc.OutputTensor = &y_desc;
+
+        activation_op_desc.Type = DML_OPERATOR_ACTIVATION_TANH;
+        activation_op_desc.Desc = &tanh_desc;
+        break;
+      }
+      case ActivationType::Swish: {
+        DML_ACTIVATION_SWISH_OPERATOR_DESC swish_desc = {};
+        swish_desc.InputTensor = &intermediate_desc;
+        swish_desc.OutputTensor = &y_desc;
+        swish_desc.SigmoidInputScale = 1.0f;
+
+        activation_op_desc.Type = DML_OPERATOR_ACTIVATION_SWISH;
+        activation_op_desc.Desc = &swish_desc;
+        break;
+      }
+      default:
+        // For unsupported activations, use identity
+        DML_ACTIVATION_IDENTITY_OPERATOR_DESC identity_desc = {};
+        identity_desc.InputTensor = &intermediate_desc;
+        identity_desc.OutputTensor = &y_desc;
+
+        activation_op_desc.Type = DML_OPERATOR_ACTIVATION_IDENTITY;
+        activation_op_desc.Desc = &identity_desc;
+        break;
+    }
+
+    activation_op = dml::GetOrCreateCompiledOperatorApi(&activation_op_desc);
+  }
+
+  // Execute the operators in sequence
+
+  // 1. Cast int32 to float
+  {
+    Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
+    DML_BINDING_TABLE_DESC binding_table_desc = {};
+    binding_table_desc.Dispatchable = cast_op.Get();
+    binding_table_desc.CPUDescriptorHandle = {};  // Will be set by device
+    binding_table_desc.GPUDescriptorHandle = {};  // Will be set by device
+    binding_table_desc.SizeInDescriptors =
+        cast_op->GetBindingProperties().RequiredDescriptorCount;
+
+    HRESULT hr = dml_device->CreateBindingTable(&binding_table_desc,
+                                                IID_PPV_ARGS(&binding_table));
+    if (FAILED(hr))
+      return;
+
+    DML_BUFFER_BINDING input_binding = {c_buffer, 0,
+                                        c.size() * sizeof(int32_t)};
+    DML_BUFFER_BINDING output_binding = {cast_output.Get(), 0,
+                                         y.size() * sizeof(float)};
+
+    DML_BINDING_DESC input_bind = {DML_BINDING_TYPE_BUFFER, &input_binding};
+    DML_BINDING_DESC output_bind = {DML_BINDING_TYPE_BUFFER, &output_binding};
+
+    binding_table->BindInputs(1, &input_bind);
+    binding_table->BindOutputs(1, &output_bind);
+
+    device->RecordDispatch(cast_op.Get(), binding_table.Get());
+  }
+
+  // 2. Multiply scales
+  {
+    Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
+    DML_BINDING_TABLE_DESC binding_table_desc = {};
+    binding_table_desc.Dispatchable = scale_mult_op.Get();
+    binding_table_desc.CPUDescriptorHandle = {};
+    binding_table_desc.GPUDescriptorHandle = {};
+    binding_table_desc.SizeInDescriptors =
+        scale_mult_op->GetBindingProperties().RequiredDescriptorCount;
+
+    HRESULT hr = dml_device->CreateBindingTable(&binding_table_desc,
+                                                IID_PPV_ARGS(&binding_table));
+    if (FAILED(hr))
+      return;
+
+    DML_BUFFER_BINDING a_scale_binding = {a_scale_buffer, 0,
+                                          a_scale.size() * sizeof(float)};
+    DML_BUFFER_BINDING b_scale_binding = {b_scale_buffer, 0,
+                                          b_scale.size() * sizeof(float)};
+    DML_BUFFER_BINDING scale_output_binding = {combined_scale.Get(), 0,
+                                               y.size() * sizeof(float)};
+
+    DML_BINDING_DESC inputs[] = {{DML_BINDING_TYPE_BUFFER, &a_scale_binding},
+                                 {DML_BINDING_TYPE_BUFFER, &b_scale_binding}};
+    DML_BINDING_DESC output_bind = {DML_BINDING_TYPE_BUFFER,
+                                    &scale_output_binding};
+
+    binding_table->BindInputs(2, inputs);
+    binding_table->BindOutputs(1, &output_bind);
+
+    device->RecordDispatch(scale_mult_op.Get(), binding_table.Get());
+  }
+
+  // 3. Divide cast output by combined scale
+  {
+    Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
+    DML_BINDING_TABLE_DESC binding_table_desc = {};
+    binding_table_desc.Dispatchable = divide_op.Get();
+    binding_table_desc.CPUDescriptorHandle = {};
+    binding_table_desc.GPUDescriptorHandle = {};
+    binding_table_desc.SizeInDescriptors =
+        divide_op->GetBindingProperties().RequiredDescriptorCount;
+
+    HRESULT hr = dml_device->CreateBindingTable(&binding_table_desc,
+                                                IID_PPV_ARGS(&binding_table));
+    if (FAILED(hr))
+      return;
+
+    DML_BUFFER_BINDING cast_binding = {cast_output.Get(), 0,
+                                       y.size() * sizeof(float)};
+    DML_BUFFER_BINDING scale_binding = {combined_scale.Get(), 0,
+                                        y.size() * sizeof(float)};
+    DML_BUFFER_BINDING divide_output_binding = {divide_output.Get(), 0,
+                                                y.size() * sizeof(float)};
+
+    DML_BINDING_DESC inputs[] = {{DML_BINDING_TYPE_BUFFER, &cast_binding},
+                                 {DML_BINDING_TYPE_BUFFER, &scale_binding}};
+    DML_BINDING_DESC output_bind = {DML_BINDING_TYPE_BUFFER,
+                                    &divide_output_binding};
+
+    binding_table->BindInputs(2, inputs);
+    binding_table->BindOutputs(1, &output_bind);
+
+    device->RecordDispatch(divide_op.Get(), binding_table.Get());
+  }
+
+  // 4. Add bias if provided
+  Microsoft::WRL::ComPtr<ID3D12Resource> current_output = divide_output;
+  if (bias) {
+    Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
+    DML_BINDING_TABLE_DESC binding_table_desc = {};
+    binding_table_desc.Dispatchable = bias_add_op.Get();
+    binding_table_desc.CPUDescriptorHandle = {};
+    binding_table_desc.GPUDescriptorHandle = {};
+    binding_table_desc.SizeInDescriptors =
+        bias_add_op->GetBindingProperties().RequiredDescriptorCount;
+
+    HRESULT hr = dml_device->CreateBindingTable(&binding_table_desc,
+                                                IID_PPV_ARGS(&binding_table));
+    if (FAILED(hr))
+      return;
+
+    auto* bias_buffer =
+        static_cast<ID3D12Resource*>(const_cast<void*>(bias->buffer()));
+
+    DML_BUFFER_BINDING divide_binding = {divide_output.Get(), 0,
+                                         y.size() * sizeof(float)};
+    DML_BUFFER_BINDING bias_binding = {bias_buffer, 0,
+                                       bias->size() * sizeof(float)};
+    DML_BUFFER_BINDING bias_output_binding = {bias_output.Get(), 0,
+                                              y.size() * sizeof(float)};
+
+    DML_BINDING_DESC inputs[] = {{DML_BINDING_TYPE_BUFFER, &divide_binding},
+                                 {DML_BINDING_TYPE_BUFFER, &bias_binding}};
+    DML_BINDING_DESC output_bind = {DML_BINDING_TYPE_BUFFER,
+                                    &bias_output_binding};
+
+    binding_table->BindInputs(2, inputs);
+    binding_table->BindOutputs(1, &output_bind);
+
+    device->RecordDispatch(bias_add_op.Get(), binding_table.Get());
+
+    current_output = bias_output;
+  }
+
+  // 5. Apply activation or copy to final output
+  if (activation_op) {
+    Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
+    DML_BINDING_TABLE_DESC binding_table_desc = {};
+    binding_table_desc.Dispatchable = activation_op.Get();
+    binding_table_desc.CPUDescriptorHandle = {};
+    binding_table_desc.GPUDescriptorHandle = {};
+    binding_table_desc.SizeInDescriptors =
+        activation_op->GetBindingProperties().RequiredDescriptorCount;
+
+    HRESULT hr = dml_device->CreateBindingTable(&binding_table_desc,
+                                                IID_PPV_ARGS(&binding_table));
+    if (FAILED(hr))
+      return;
+
+    DML_BUFFER_BINDING input_binding = {current_output.Get(), 0,
+                                        y.size() * sizeof(float)};
+    DML_BUFFER_BINDING output_binding = {y_buffer, 0, y.size() * sizeof(float)};
+
+    DML_BINDING_DESC input_bind = {DML_BINDING_TYPE_BUFFER, &input_binding};
+    DML_BINDING_DESC output_bind = {DML_BINDING_TYPE_BUFFER, &output_binding};
+
+    binding_table->BindInputs(1, &input_bind);
+    binding_table->BindOutputs(1, &output_bind);
+
+    device->RecordDispatch(activation_op.Get(), binding_table.Get());
+  } else {
+    // Copy current output to final output
+    command_list->CopyBufferRegion(y_buffer, 0, current_output.Get(), 0,
+                                   y.size() * sizeof(float));
+  }
+  device->ExecuteCommandList();
+
+  // Keep temporary resources alive until dispatch completes
+  device->KeepAliveUntilNextCommandListDispatch(cast_output);
+  device->KeepAliveUntilNextCommandListDispatch(combined_scale);
+  device->KeepAliveUntilNextCommandListDispatch(divide_output);
+  if (bias_output) {
+    device->KeepAliveUntilNextCommandListDispatch(bias_output);
+  }
+}
+
 }  // namespace ops
 }  // namespace ctranslate2
