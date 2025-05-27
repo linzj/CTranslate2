@@ -18,16 +18,40 @@
   }
 
 #define SINGLE_ARG(...) __VA_ARGS__
-#ifndef CT2_WITH_CUDA
-#  define DEVICE_DISPATCH(DEVICE, STMTS)                \
-  switch (DEVICE) {                                     \
-    UNSUPPORTED_DEVICE_CASE(Device::CUDA)               \
-    DEVICE_CASE(Device::CPU, SINGLE_ARG(STMTS))         \
+
+#if !defined(CT2_WITH_CUDA) && !defined(CT2_WITH_DIRECTML)
+// Neither CUDA nor DirectML available
+#define DEVICE_DISPATCH(DEVICE, STMTS)          \
+  switch (DEVICE) {                             \
+    UNSUPPORTED_DEVICE_CASE(Device::CUDA)       \
+    UNSUPPORTED_DEVICE_CASE(Device::DirectML)   \
+    DEVICE_CASE(Device::CPU, SINGLE_ARG(STMTS)) \
   }
+
+#elif defined(CT2_WITH_CUDA) && !defined(CT2_WITH_DIRECTML)
+// CUDA available, DirectML not available
+#define DEVICE_DISPATCH(DEVICE, STMTS)           \
+  switch (DEVICE) {                              \
+    DEVICE_CASE(Device::CUDA, SINGLE_ARG(STMTS)) \
+    UNSUPPORTED_DEVICE_CASE(Device::DirectML)    \
+    DEVICE_CASE(Device::CPU, SINGLE_ARG(STMTS))  \
+  }
+
+#elif !defined(CT2_WITH_CUDA) && defined(CT2_WITH_DIRECTML)
+// DirectML available, CUDA not available
+#define DEVICE_DISPATCH(DEVICE, STMTS)               \
+  switch (DEVICE) {                                  \
+    UNSUPPORTED_DEVICE_CASE(Device::CUDA)            \
+    DEVICE_CASE(Device::DirectML, SINGLE_ARG(STMTS)) \
+    DEVICE_CASE(Device::CPU, SINGLE_ARG(STMTS))      \
+  }
+
 #else
-#  define DEVICE_DISPATCH(DEVICE, STMTS)                \
-  switch (DEVICE) {                                     \
-    DEVICE_CASE(Device::CUDA, SINGLE_ARG(STMTS))        \
-    DEVICE_CASE(Device::CPU, SINGLE_ARG(STMTS))         \
+// Both CUDA and DirectML available
+#define DEVICE_DISPATCH(DEVICE, STMTS)               \
+  switch (DEVICE) {                                  \
+    DEVICE_CASE(Device::CUDA, SINGLE_ARG(STMTS))     \
+    DEVICE_CASE(Device::DirectML, SINGLE_ARG(STMTS)) \
+    DEVICE_CASE(Device::CPU, SINGLE_ARG(STMTS))      \
   }
 #endif

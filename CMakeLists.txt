@@ -242,6 +242,7 @@ if(WITH_DIRECTML)
     src/dml/operator_cache.cc
     src/dml/operator_cache.h
     src/dml/primitives_dml.cc
+    src/dml/ops/quantize_dml.cc
   )
 endif()
 

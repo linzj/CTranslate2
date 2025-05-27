@@ -139,6 +139,13 @@ int main(int argc, char* argv[]) {
     if (args.count("cuda_compute_type"))
       compute_type = ctranslate2::str_to_compute_type(args["cuda_compute_type"].as<std::string>());
     break;
+  case ctranslate2::Device::DirectML:
+    if (args.count("cuda_compute_type"))
+      compute_type = ctranslate2::str_to_compute_type(args["cuda_compute_type"].as<std::string>());
+    // DirectML does not support int8 compute type.
+    if (compute_type == ctranslate2::ComputeType::INT8)
+      compute_type = ctranslate2::ComputeType::INT8_FLOAT32;
+    break;
   };
 
   ctranslate2::ReplicaPoolConfig pool_config;
