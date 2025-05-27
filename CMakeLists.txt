@@ -245,6 +245,7 @@ if(WITH_DIRECTML)
     src/dml/primitives_dml.cc
     src/dml/ops/quantize_dml.cc
     src/dml/ops/dequantize_dml.cc
+    src/dml/ops/concat_split_slide_dml.cc
   )
 endif()
 
