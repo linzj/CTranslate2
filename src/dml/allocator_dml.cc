@@ -13,6 +13,9 @@
 
 namespace ctranslate2 {
 namespace dml {
+DMLAllocator::DMLAllocator() {}
+
+DMLAllocator::~DMLAllocator() = default;
 
 void* DMLAllocator::allocate(size_t size, int device_index) {
   if (size == 0)
