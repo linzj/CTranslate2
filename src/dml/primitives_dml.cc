@@ -1126,21 +1126,45 @@ void primitives<Device::DirectML>::gemm(bool a_is_packed,
                                         const Out* a_shift_compensation) {
   auto dml_device = dml::get_dml_device();
 
-  // Create tensor descriptors for matrices
-  static const UINT a_dims[] = {1, 1, static_cast<UINT>(transpose_a ? k : m),
-                                static_cast<UINT>(transpose_a ? m : k)};
-  static const UINT b_dims[] = {1, 1, static_cast<UINT>(transpose_b ? n : k),
-                                static_cast<UINT>(transpose_b ? k : n)};
-  static const UINT c_dims[] = {1, 1, static_cast<UINT>(m),
-                                static_cast<UINT>(n)};
+  // Handle packed matrices - DirectML doesn't support packed formats directly
+  if (a_is_packed || b_is_packed) {
+    throw std::runtime_error(
+        "DirectML backend does not support packed GEMM formats");
+  }
+
+  // Compute actual dimensions considering transposes
+  dim_t a_rows = transpose_a ? k : m;
+  dim_t a_cols = transpose_a ? m : k;
+  dim_t b_rows = transpose_b ? n : k;
+  dim_t b_cols = transpose_b ? k : n;
+
+  // Create tensor descriptors with proper strides based on leading dimensions
+  // For row-major storage: stride[i] = lda for moving between rows
+  UINT a_dims[] = {1, 1, static_cast<UINT>(a_rows), static_cast<UINT>(a_cols)};
+  UINT a_strides[] = {
+      static_cast<UINT>(lda * a_rows),  // Batch stride (not used)
+      static_cast<UINT>(lda * a_rows),  // Batch stride (not used)
+      static_cast<UINT>(lda),           // Row stride
+      1                                 // Column stride
+  };
+
+  UINT b_dims[] = {1, 1, static_cast<UINT>(b_rows), static_cast<UINT>(b_cols)};
+  UINT b_strides[] = {static_cast<UINT>(ldb * b_rows),
+                      static_cast<UINT>(ldb * b_rows), static_cast<UINT>(ldb),
+                      1};
+
+  UINT c_dims[] = {1, 1, static_cast<UINT>(m), static_cast<UINT>(n)};
+  UINT c_strides[] = {static_cast<UINT>(ldc * m), static_cast<UINT>(ldc * m),
+                      static_cast<UINT>(ldc), 1};
 
   DML_BUFFER_TENSOR_DESC a_buffer_desc = {};
   a_buffer_desc.DataType = dml::get_dml_data_type<In>();
   a_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
   a_buffer_desc.DimensionCount = 4;
   a_buffer_desc.Sizes = a_dims;
-  a_buffer_desc.Strides = nullptr;
-  a_buffer_desc.TotalTensorSizeInBytes = m * k * sizeof(In);
+  a_buffer_desc.Strides = a_strides;
+  // Total size must account for the leading dimension
+  a_buffer_desc.TotalTensorSizeInBytes = lda * a_rows * sizeof(In);
   a_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
 
   DML_TENSOR_DESC a_desc = {};
@@ -1152,8 +1176,8 @@ void primitives<Device::DirectML>::gemm(bool a_is_packed,
   b_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
   b_buffer_desc.DimensionCount = 4;
   b_buffer_desc.Sizes = b_dims;
-  b_buffer_desc.Strides = nullptr;
-  b_buffer_desc.TotalTensorSizeInBytes = k * n * sizeof(In);
+  b_buffer_desc.Strides = b_strides;
+  b_buffer_desc.TotalTensorSizeInBytes = ldb * b_rows * sizeof(In);
   b_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
 
   DML_TENSOR_DESC b_desc = {};
@@ -1165,52 +1189,150 @@ void primitives<Device::DirectML>::gemm(bool a_is_packed,
   c_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
   c_buffer_desc.DimensionCount = 4;
   c_buffer_desc.Sizes = c_dims;
-  c_buffer_desc.Strides = nullptr;
-  c_buffer_desc.TotalTensorSizeInBytes = m * n * sizeof(Out);
+  c_buffer_desc.Strides = c_strides;
+  c_buffer_desc.TotalTensorSizeInBytes = ldc * m * sizeof(Out);
   c_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
 
   DML_TENSOR_DESC c_desc = {};
   c_desc.Type = DML_TENSOR_TYPE_BUFFER;
   c_desc.Desc = &c_buffer_desc;
 
-  DML_GEMM_OPERATOR_DESC gemm_desc = {};
-  gemm_desc.ATensor = &a_desc;
-  gemm_desc.BTensor = &b_desc;
-  gemm_desc.CTensor = (beta != 0.0f) ? &c_desc : nullptr;
-  gemm_desc.OutputTensor = &c_desc;
-  gemm_desc.TransA =
-      transpose_a ? DML_MATRIX_TRANSFORM_TRANSPOSE : DML_MATRIX_TRANSFORM_NONE;
-  gemm_desc.TransB =
-      transpose_b ? DML_MATRIX_TRANSFORM_TRANSPOSE : DML_MATRIX_TRANSFORM_NONE;
-  gemm_desc.Alpha = alpha;
-  gemm_desc.Beta = beta;
+  // Handle a_shift_compensation for quantized GEMM
+  if (a_shift_compensation != nullptr) {
+    // For quantized GEMM (int8 inputs), we need to add the shift compensation
+    // This would require a separate addition operation after GEMM
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_GEMM;
-  op_desc.Desc = &gemm_desc;
+    // First perform the GEMM
+    DML_GEMM_OPERATOR_DESC gemm_desc = {};
+    gemm_desc.ATensor = &a_desc;
+    gemm_desc.BTensor = &b_desc;
+    gemm_desc.CTensor = (beta != 0.0f) ? &c_desc : nullptr;
+    gemm_desc.OutputTensor = &c_desc;
+    gemm_desc.TransA = transpose_a ? DML_MATRIX_TRANSFORM_TRANSPOSE
+                                   : DML_MATRIX_TRANSFORM_NONE;
+    gemm_desc.TransB = transpose_b ? DML_MATRIX_TRANSFORM_TRANSPOSE
+                                   : DML_MATRIX_TRANSFORM_NONE;
+    gemm_desc.Alpha = alpha;
+    gemm_desc.Beta = beta;
 
-  ComPtr<IDMLOperator> op;
-  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
+    DML_OPERATOR_DESC op_desc = {};
+    op_desc.Type = DML_OPERATOR_GEMM;
+    op_desc.Desc = &gemm_desc;
 
-  ComPtr<IDMLCompiledOperator> compiled_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
-                                              IID_PPV_ARGS(&compiled_op)));
+    ComPtr<IDMLOperator> op;
+    THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
 
-  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
-  ComPtr<ID3D12Resource> temp_resource =
-      dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+    ComPtr<IDMLCompiledOperator> compiled_op;
+    THROW_IF_FAILED(dml_device->CompileOperator(
+        op.Get(), DML_EXECUTION_FLAG_NONE, IID_PPV_ARGS(&compiled_op)));
 
-  std::vector<ID3D12Resource*> inputs = {
-      reinterpret_cast<ID3D12Resource*>(const_cast<In*>(a)),
-      reinterpret_cast<ID3D12Resource*>(const_cast<In*>(b))};
+    DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+    ComPtr<ID3D12Resource> temp_resource =
+        dml::create_temporary_resource(binding_props.TemporaryResourceSize);
 
-  if (beta != 0.0f) {
-    inputs.push_back(reinterpret_cast<ID3D12Resource*>(c));
+    std::vector<ID3D12Resource*> inputs = {
+        reinterpret_cast<ID3D12Resource*>(const_cast<In*>(a)),
+        reinterpret_cast<ID3D12Resource*>(const_cast<In*>(b))};
+
+    if (beta != 0.0f) {
+      inputs.push_back(reinterpret_cast<ID3D12Resource*>(c));
+    }
+
+    std::vector<ID3D12Resource*> outputs = {
+        reinterpret_cast<ID3D12Resource*>(c)};
+    dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                              temp_resource.Get());
+
+    // Then add the shift compensation
+    // Create tensor descriptor for shift compensation (1D tensor of size n)
+    DML_BUFFER_TENSOR_DESC shift_buffer_desc = {};
+    shift_buffer_desc.DataType = dml::get_dml_data_type<Out>();
+    shift_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
+    shift_buffer_desc.DimensionCount = 4;
+    UINT shift_dims[] = {1, 1, 1, static_cast<UINT>(n)};
+    shift_buffer_desc.Sizes = shift_dims;
+    shift_buffer_desc.Strides = nullptr;
+    shift_buffer_desc.TotalTensorSizeInBytes = n * sizeof(Out);
+    shift_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
+
+    DML_TENSOR_DESC shift_desc = {};
+    shift_desc.Type = DML_TENSOR_TYPE_BUFFER;
+    shift_desc.Desc = &shift_buffer_desc;
+
+    // Add shift compensation to each row of C
+    DML_ELEMENT_WISE_ADD_OPERATOR_DESC add_desc = {};
+    add_desc.ATensor = &c_desc;
+    add_desc.BTensor = &shift_desc;  // Will be broadcasted
+    add_desc.OutputTensor = &c_desc;
+
+    DML_OPERATOR_DESC add_op_desc = {};
+    add_op_desc.Type = DML_OPERATOR_ELEMENT_WISE_ADD;
+    add_op_desc.Desc = &add_desc;
+
+    ComPtr<IDMLOperator> add_op;
+    THROW_IF_FAILED(
+        dml_device->CreateOperator(&add_op_desc, IID_PPV_ARGS(&add_op)));
+
+    ComPtr<IDMLCompiledOperator> compiled_add_op;
+    THROW_IF_FAILED(dml_device->CompileOperator(
+        add_op.Get(), DML_EXECUTION_FLAG_NONE, IID_PPV_ARGS(&compiled_add_op)));
+
+    DML_BINDING_PROPERTIES add_binding_props =
+        compiled_add_op->GetBindingProperties();
+    ComPtr<ID3D12Resource> add_temp_resource =
+        dml::create_temporary_resource(add_binding_props.TemporaryResourceSize);
+
+    std::vector<ID3D12Resource*> add_inputs = {
+        reinterpret_cast<ID3D12Resource*>(c),
+        reinterpret_cast<ID3D12Resource*>(
+            const_cast<Out*>(a_shift_compensation))};
+    std::vector<ID3D12Resource*> add_outputs = {
+        reinterpret_cast<ID3D12Resource*>(c)};
+    dml::execute_dml_operator(compiled_add_op.Get(), add_inputs, add_outputs,
+                              nullptr, add_temp_resource.Get());
+
+  } else {
+    // Standard GEMM without shift compensation
+    DML_GEMM_OPERATOR_DESC gemm_desc = {};
+    gemm_desc.ATensor = &a_desc;
+    gemm_desc.BTensor = &b_desc;
+    gemm_desc.CTensor = (beta != 0.0f) ? &c_desc : nullptr;
+    gemm_desc.OutputTensor = &c_desc;
+    gemm_desc.TransA = transpose_a ? DML_MATRIX_TRANSFORM_TRANSPOSE
+                                   : DML_MATRIX_TRANSFORM_NONE;
+    gemm_desc.TransB = transpose_b ? DML_MATRIX_TRANSFORM_TRANSPOSE
+                                   : DML_MATRIX_TRANSFORM_NONE;
+    gemm_desc.Alpha = alpha;
+    gemm_desc.Beta = beta;
+
+    DML_OPERATOR_DESC op_desc = {};
+    op_desc.Type = DML_OPERATOR_GEMM;
+    op_desc.Desc = &gemm_desc;
+
+    ComPtr<IDMLOperator> op;
+    THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
+
+    ComPtr<IDMLCompiledOperator> compiled_op;
+    THROW_IF_FAILED(dml_device->CompileOperator(
+        op.Get(), DML_EXECUTION_FLAG_NONE, IID_PPV_ARGS(&compiled_op)));
+
+    DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+    ComPtr<ID3D12Resource> temp_resource =
+        dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+
+    std::vector<ID3D12Resource*> inputs = {
+        reinterpret_cast<ID3D12Resource*>(const_cast<In*>(a)),
+        reinterpret_cast<ID3D12Resource*>(const_cast<In*>(b))};
+
+    if (beta != 0.0f) {
+      inputs.push_back(reinterpret_cast<ID3D12Resource*>(c));
+    }
+
+    std::vector<ID3D12Resource*> outputs = {
+        reinterpret_cast<ID3D12Resource*>(c)};
+    dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                              temp_resource.Get());
   }
-
-  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(c)};
-  dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
-                            temp_resource.Get());
 }
 
 // Stub implementations for remaining methods
@@ -1638,7 +1760,7 @@ void primitives<Device::DirectML>::penalize_previous_tokens(
     dim_t batch_size,
     dim_t length,
     dim_t vocabulary_size) {
-throw std::runtime_error(
+  throw std::runtime_error(
       "DirectML does not support penalizing previous tokens directly. "
       "Implement as a custom operation.");
 }
