@@ -1823,24 +1823,179 @@ dim_t primitives<Device::DirectML>::gemm_pack_b(const T* b,
                                                 const dim_t n,
                                                 const float alpha,
                                                 T* dest) {
-  // DirectML doesn't require special packing formats, but we can still
-  // preprocess the matrix by applying alpha scaling and handling transpose
-
   if (alpha == 1.0f && !transpose_b) {
     // No preprocessing needed - return 0 to indicate no packing
     return 0;
   }
 
   auto dml_device = dml::get_dml_device();
+  auto dxdevice = dml::get_device();
+  auto d3d_device = dxdevice->D3D();
 
   // Calculate dimensions
-  dim_t rows = transpose_b ? n : k;
-  dim_t cols = transpose_b ? k : n;
-  dim_t total_elements = rows * cols;
+  dim_t src_rows = k;
+  dim_t src_cols = n;
+  dim_t dst_rows = transpose_b ? n : k;
+  dim_t dst_cols = transpose_b ? k : n;
+  dim_t total_elements = dst_rows * dst_cols;
 
-  // If alpha != 1.0, we need to scale the matrix
+  // Handle transpose operation
+  if (transpose_b) {
+    // Create tensor descriptors for transpose
+    // Source: k x n matrix
+    UINT src_dims[] = {1, 1, static_cast<UINT>(src_rows),
+                       static_cast<UINT>(src_cols)};
+    UINT src_strides[] = {
+        static_cast<UINT>(src_rows * src_cols),
+        static_cast<UINT>(src_rows * src_cols),
+        static_cast<UINT>(src_cols),  // Row stride
+        1                             // Column stride
+    };
+
+    // Destination: n x k matrix (transposed)
+    // To transpose, we swap dimensions and adjust strides
+    UINT dst_dims[] = {1, 1, static_cast<UINT>(dst_rows),
+                       static_cast<UINT>(dst_cols)};
+    UINT dst_strides[] = {static_cast<UINT>(dst_rows * dst_cols),
+                          static_cast<UINT>(dst_rows * dst_cols),
+                          static_cast<UINT>(dst_cols), 1};
+
+    DML_BUFFER_TENSOR_DESC src_buffer_desc = {};
+    src_buffer_desc.DataType = dml::get_dml_data_type<T>();
+    src_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
+    src_buffer_desc.DimensionCount = 4;
+    src_buffer_desc.Sizes = src_dims;
+    src_buffer_desc.Strides = src_strides;
+    src_buffer_desc.TotalTensorSizeInBytes = src_rows * src_cols * sizeof(T);
+    src_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
+
+    DML_TENSOR_DESC src_desc = {};
+    src_desc.Type = DML_TENSOR_TYPE_BUFFER;
+    src_desc.Desc = &src_buffer_desc;
+
+    // For transpose, we read the source with transposed strides
+    DML_BUFFER_TENSOR_DESC src_transposed_buffer_desc = {};
+    src_transposed_buffer_desc.DataType = dml::get_dml_data_type<T>();
+    src_transposed_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
+    src_transposed_buffer_desc.DimensionCount = 4;
+    src_transposed_buffer_desc.Sizes = dst_dims;  // Use destination dimensions
+    // Custom strides to read in transposed order
+    UINT transposed_strides[] = {
+        static_cast<UINT>(src_rows * src_cols),
+        static_cast<UINT>(src_rows * src_cols),
+        1,                           // Column becomes row (stride 1)
+        static_cast<UINT>(src_cols)  // Row becomes column (stride n)
+    };
+    src_transposed_buffer_desc.Strides = transposed_strides;
+    src_transposed_buffer_desc.TotalTensorSizeInBytes =
+        src_rows * src_cols * sizeof(T);
+    src_transposed_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
+
+    DML_TENSOR_DESC src_transposed_desc = {};
+    src_transposed_desc.Type = DML_TENSOR_TYPE_BUFFER;
+    src_transposed_desc.Desc = &src_transposed_buffer_desc;
+
+    DML_BUFFER_TENSOR_DESC dst_buffer_desc = {};
+    dst_buffer_desc.DataType = dml::get_dml_data_type<T>();
+    dst_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
+    dst_buffer_desc.DimensionCount = 4;
+    dst_buffer_desc.Sizes = dst_dims;
+    dst_buffer_desc.Strides = dst_strides;
+    dst_buffer_desc.TotalTensorSizeInBytes = dst_rows * dst_cols * sizeof(T);
+    dst_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
+
+    DML_TENSOR_DESC dst_desc = {};
+    dst_desc.Type = DML_TENSOR_TYPE_BUFFER;
+    dst_desc.Desc = &dst_buffer_desc;
+
+    // Use identity operator with transposed read strides
+    DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC transpose_desc = {};
+    transpose_desc.InputTensor = &src_transposed_desc;
+    transpose_desc.OutputTensor = &dst_desc;
+
+    DML_OPERATOR_DESC transpose_op_desc = {};
+    transpose_op_desc.Type = DML_OPERATOR_ELEMENT_WISE_IDENTITY;
+    transpose_op_desc.Desc = &transpose_desc;
+
+    ComPtr<IDMLOperator> transpose_op;
+    THROW_IF_FAILED(dml_device->CreateOperator(&transpose_op_desc,
+                                               IID_PPV_ARGS(&transpose_op)));
+
+    ComPtr<IDMLCompiledOperator> compiled_transpose_op;
+    THROW_IF_FAILED(
+        dml_device->CompileOperator(transpose_op.Get(), DML_EXECUTION_FLAG_NONE,
+                                    IID_PPV_ARGS(&compiled_transpose_op)));
+
+    DML_BINDING_PROPERTIES transpose_binding_props =
+        compiled_transpose_op->GetBindingProperties();
+    ComPtr<ID3D12Resource> transpose_temp_resource =
+        dml::create_temporary_resource(
+            transpose_binding_props.TemporaryResourceSize);
+
+    std::vector<ID3D12Resource*> transpose_inputs = {
+        reinterpret_cast<ID3D12Resource*>(const_cast<T*>(b))};
+    std::vector<ID3D12Resource*> transpose_outputs = {
+        reinterpret_cast<ID3D12Resource*>(dest)};
+
+    dml::execute_dml_operator(compiled_transpose_op.Get(), transpose_inputs,
+                              transpose_outputs, nullptr,
+                              transpose_temp_resource.Get());
+  } else {
+    // Just copy if no transpose needed
+    copy(b, dest, total_elements);
+  }
+
+  // Apply alpha scaling if needed
   if (alpha != 1.0f) {
-    // Create tensor descriptors
+    // Create and upload scalar value
+    D3D12_HEAP_PROPERTIES upload_heap_props = {};
+    upload_heap_props.Type = D3D12_HEAP_TYPE_UPLOAD;
+    upload_heap_props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+    upload_heap_props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+    upload_heap_props.CreationNodeMask = 1;
+    upload_heap_props.VisibleNodeMask = 1;
+
+    D3D12_RESOURCE_DESC upload_desc = {};
+    upload_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    upload_desc.Alignment = 0;
+    upload_desc.Width = sizeof(T);
+    upload_desc.Height = 1;
+    upload_desc.DepthOrArraySize = 1;
+    upload_desc.MipLevels = 1;
+    upload_desc.Format = DXGI_FORMAT_UNKNOWN;
+    upload_desc.SampleDesc.Count = 1;
+    upload_desc.SampleDesc.Quality = 0;
+    upload_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    upload_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+    ComPtr<ID3D12Resource> upload_buffer;
+    THROW_IF_FAILED(d3d_device->CreateCommittedResource(
+        &upload_heap_props, D3D12_HEAP_FLAG_NONE, &upload_desc,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+        IID_PPV_ARGS(&upload_buffer)));
+
+    // Map and write the scalar value
+    void* mapped_data = nullptr;
+    D3D12_RANGE read_range = {0, 0};  // We won't read
+    THROW_IF_FAILED(upload_buffer->Map(0, &read_range, &mapped_data));
+    T alpha_value = static_cast<T>(alpha);
+    memcpy(mapped_data, &alpha_value, sizeof(T));
+    D3D12_RANGE write_range = {0, sizeof(T)};
+    upload_buffer->Unmap(0, &write_range);
+
+    // Create GPU buffer for scalar
+    ComPtr<ID3D12Resource> scalar_resource =
+        dml::create_temporary_resource(sizeof(T));
+
+    // Copy from upload buffer to GPU buffer
+    auto command_list = dxdevice->GetCommandList();
+    command_list->CopyBufferRegion(scalar_resource.Get(), 0,
+                                   upload_buffer.Get(), 0, sizeof(T));
+
+    // Execute the copy
+    dxdevice->ExecuteCommandList();
+
+    // Now perform the scaling operation
     DML_BUFFER_TENSOR_DESC input_buffer_desc = {};
     DML_TENSOR_DESC input_desc =
         dml::create_tensor_desc<T>(total_elements, input_buffer_desc);
@@ -1849,15 +2004,27 @@ dim_t primitives<Device::DirectML>::gemm_pack_b(const T* b,
     DML_TENSOR_DESC output_desc =
         dml::create_tensor_desc<T>(total_elements, output_buffer_desc);
 
-    // Create scalar tensor for alpha
-    DML_BUFFER_TENSOR_DESC scalar_buffer_desc = {};
-    DML_TENSOR_DESC scalar_desc =
-        dml::create_tensor_desc<T>(1, scalar_buffer_desc);
+    // Create scalar tensor descriptor that will broadcast
+    UINT scalar_dims[] = {1, 1, 1, 1};
+    UINT scalar_strides[] = {0, 0, 0, 0};  // All zeros for broadcasting
 
-    // Use element-wise multiply to scale by alpha
+    DML_BUFFER_TENSOR_DESC scalar_buffer_desc = {};
+    scalar_buffer_desc.DataType = dml::get_dml_data_type<T>();
+    scalar_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
+    scalar_buffer_desc.DimensionCount = 4;
+    scalar_buffer_desc.Sizes = scalar_dims;
+    scalar_buffer_desc.Strides = scalar_strides;
+    scalar_buffer_desc.TotalTensorSizeInBytes = sizeof(T);
+    scalar_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
+
+    DML_TENSOR_DESC scalar_desc = {};
+    scalar_desc.Type = DML_TENSOR_TYPE_BUFFER;
+    scalar_desc.Desc = &scalar_buffer_desc;
+
+    // Create multiply operator
     DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC mul_desc = {};
     mul_desc.ATensor = &input_desc;
-    mul_desc.BTensor = &scalar_desc;  // Will be broadcasted
+    mul_desc.BTensor = &scalar_desc;
     mul_desc.OutputTensor = &output_desc;
 
     DML_OPERATOR_DESC op_desc = {};
@@ -1875,110 +2042,16 @@ dim_t primitives<Device::DirectML>::gemm_pack_b(const T* b,
     ComPtr<ID3D12Resource> temp_resource =
         dml::create_temporary_resource(binding_props.TemporaryResourceSize);
 
-    // Create scalar resource with alpha value
-    auto dxdevice = dml::get_device();
-    ComPtr<ID3D12Resource> scalar_resource =
-        dml::create_temporary_resource(sizeof(T));
-
-    // Note: In practice, you'd need to upload the alpha value to
-    // scalar_resource This would require an upload heap and copy operation
-
-    // First, copy or transpose the matrix if needed
-    const T* source = b;
-    T* intermediate = dest;
-
-    if (transpose_b) {
-      // Transpose the matrix first
-      UINT src_dims[] = {1, 1, static_cast<UINT>(n), static_cast<UINT>(k)};
-      UINT src_strides[] = {static_cast<UINT>(n * k), static_cast<UINT>(n * k),
-                            static_cast<UINT>(k), 1};
-
-      UINT dst_dims[] = {1, 1, static_cast<UINT>(k), static_cast<UINT>(n)};
-      UINT dst_strides[] = {static_cast<UINT>(k * n), static_cast<UINT>(k * n),
-                            static_cast<UINT>(n), 1};
-
-      DML_BUFFER_TENSOR_DESC src_buffer_desc = {};
-      src_buffer_desc.DataType = dml::get_dml_data_type<T>();
-      src_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-      src_buffer_desc.DimensionCount = 4;
-      src_buffer_desc.Sizes = src_dims;
-      src_buffer_desc.Strides = src_strides;
-      src_buffer_desc.TotalTensorSizeInBytes = n * k * sizeof(T);
-      src_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
-
-      DML_TENSOR_DESC src_desc = {};
-      src_desc.Type = DML_TENSOR_TYPE_BUFFER;
-      src_desc.Desc = &src_buffer_desc;
-
-      DML_BUFFER_TENSOR_DESC dst_buffer_desc = {};
-      dst_buffer_desc.DataType = dml::get_dml_data_type<T>();
-      dst_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-      dst_buffer_desc.DimensionCount = 4;
-      dst_buffer_desc.Sizes = dst_dims;
-      dst_buffer_desc.Strides = dst_strides;
-      dst_buffer_desc.TotalTensorSizeInBytes = k * n * sizeof(T);
-      dst_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
-
-      DML_TENSOR_DESC dst_desc = {};
-      dst_desc.Type = DML_TENSOR_TYPE_BUFFER;
-      dst_desc.Desc = &dst_buffer_desc;
-
-      // Use DML transpose operator
-      static const UINT permutation[] = {0, 1, 3,
-                                         2};  // Transpose last two dimensions
-
-      DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC transpose_desc = {};
-      transpose_desc.InputTensor = &src_desc;
-      transpose_desc.OutputTensor = &dst_desc;
-
-      // Note: DML doesn't have a direct transpose operator,
-      // so we'd need to use reshape/slice operations or custom implementation
-      // For now, we'll use identity with different strides as a placeholder
-
-      DML_OPERATOR_DESC transpose_op_desc = {};
-      transpose_op_desc.Type = DML_OPERATOR_ELEMENT_WISE_IDENTITY;
-      transpose_op_desc.Desc = &transpose_desc;
-
-      ComPtr<IDMLOperator> transpose_op;
-      THROW_IF_FAILED(dml_device->CreateOperator(&transpose_op_desc,
-                                                 IID_PPV_ARGS(&transpose_op)));
-
-      ComPtr<IDMLCompiledOperator> compiled_transpose_op;
-      THROW_IF_FAILED(dml_device->CompileOperator(
-          transpose_op.Get(), DML_EXECUTION_FLAG_NONE,
-          IID_PPV_ARGS(&compiled_transpose_op)));
-
-      DML_BINDING_PROPERTIES transpose_binding_props =
-          compiled_transpose_op->GetBindingProperties();
-      ComPtr<ID3D12Resource> transpose_temp_resource =
-          dml::create_temporary_resource(
-              transpose_binding_props.TemporaryResourceSize);
-
-      std::vector<ID3D12Resource*> transpose_inputs = {
-          reinterpret_cast<ID3D12Resource*>(const_cast<T*>(b))};
-      std::vector<ID3D12Resource*> transpose_outputs = {
-          reinterpret_cast<ID3D12Resource*>(dest)};
-      dml::execute_dml_operator(compiled_transpose_op.Get(), transpose_inputs,
-                                transpose_outputs, nullptr,
-                                transpose_temp_resource.Get());
-
-      source = dest;
-    }
-
-    // Now apply alpha scaling
+    // Execute scaling (in-place on dest)
     std::vector<ID3D12Resource*> inputs = {
-        reinterpret_cast<ID3D12Resource*>(const_cast<T*>(source)),
+        reinterpret_cast<ID3D12Resource*>(
+            dest),  // Input is the already transposed/copied data
         scalar_resource.Get()};
     std::vector<ID3D12Resource*> outputs = {
         reinterpret_cast<ID3D12Resource*>(dest)};
+
     dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
                               temp_resource.Get());
-
-  } else if (transpose_b) {
-    // Just transpose without scaling
-    // This would use similar transpose logic as above
-    copy(b, dest,
-         total_elements);  // Placeholder - should implement actual transpose
   }
 
   // Return the size of the packed matrix in bytes
