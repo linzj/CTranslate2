@@ -410,12 +410,28 @@ namespace ctranslate2 {
     if (size != _size)
       THROW_INVALID_ARGUMENT("buffer to copy is of size " + std::to_string(size)
                              + " but current storage size is " + std::to_string(_size));
-#ifdef CT2_WITH_CUDA
+#ifdef CT2_WITH_CUDA || CT2_WITH_DIRECTML
     if (device != _device) {
-      if (device == Device::CUDA)
-        cross_device_primitives<Device::CUDA, Device::CPU>::copy(data, this->data<T>(), size);
-      else
-        cross_device_primitives<Device::CPU, Device::CUDA>::copy(data, this->data<T>(), size);
+#if defined(CT2_WITH_CUDA)
+      if (_device == Device::CUDA || device == Device::CUDA) {
+        if (device == Device::CUDA)
+          cross_device_primitives<Device::CUDA, Device::CPU>::copy(
+              data, this->data<T>(), size);
+        else
+          cross_device_primitives<Device::CPU, Device::CUDA>::copy(
+              data, this->data<T>(), size);
+      }
+#if defined(CT2_WITH_DIRECTML)
+      else if (_device == Device::DirectML || device == Device::DirectML) {
+        if (device == Device::DirectML)
+          cross_device_primitives<Device::DirectML, Device::CPU>::copy(
+              data, this->data<T>(), size);
+        else
+          cross_device_primitives<Device::CPU, Device::DirectML>::copy(
+              data, this->data<T>(), size);
+      }
+#endif
+#endif  // CT2_WITH_CUDA || CT2_WITH_DIRECTML
     } else
 #endif
     {

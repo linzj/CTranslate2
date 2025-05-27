@@ -166,6 +166,7 @@ class Device {
                                                 std::wstring_view name = {});
 
   std::vector<std::byte> Download(Microsoft::WRL::ComPtr<ID3D12Resource>);
+  void Download(Microsoft::WRL::ComPtr<ID3D12Resource>, void* data, size_t size);
 
   void ClearShaderCaches();
 

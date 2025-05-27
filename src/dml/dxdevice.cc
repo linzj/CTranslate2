@@ -617,10 +617,29 @@ Microsoft::WRL::ComPtr<ID3D12Resource> Device::Upload(uint64_t totalSize,
 
 std::vector<std::byte> Device::Download(
     Microsoft::WRL::ComPtr<ID3D12Resource> buffer) {
-  if (buffer->GetDesc().Width > std::numeric_limits<size_t>::max()) {
+  D3D12_RESOURCE_DESC resource_desc = buffer->GetDesc();
+
+  std::vector<std::byte> outputBuffer(
+      static_cast<size_t>(buffer->GetDesc().Width));
+
+  size_t dataSize = static_cast<size_t>(buffer->GetDesc().Width);
+  Download(buffer, outputBuffer.data(), dataSize);
+  return outputBuffer;
+}
+
+void Device::Download(Microsoft::WRL::ComPtr<ID3D12Resource> buffer,
+                      void* data,
+                      size_t dataSize) {
+  D3D12_RESOURCE_DESC resource_desc = buffer->GetDesc();
+  if (resource_desc.Width > std::numeric_limits<size_t>::max()) {
     throw std::invalid_argument("Buffer width '" +
                                 std::to_string(buffer->GetDesc().Width) +
                                 "' is too large.");
+  }
+
+  if (dataSize > resource_desc.Width) {
+    throw std::invalid_argument(
+        "Attempting to download more data than the size of the buffer");
   }
 
   ComPtr<ID3D12Resource> resourceToMap;
@@ -651,17 +670,11 @@ std::vector<std::byte> Device::Download(
     ExecuteCommandListAndWait();
   }
 
-  std::vector<std::byte> outputBuffer(
-      static_cast<size_t>(buffer->GetDesc().Width));
-
-  size_t dataSize = static_cast<size_t>(buffer->GetDesc().Width);
   CD3DX12_RANGE readRange(0, dataSize);
   void* mappedBufferData = nullptr;
   THROW_IF_FAILED(resourceToMap->Map(0, &readRange, &mappedBufferData));
-  memcpy(outputBuffer.data(), mappedBufferData, dataSize);
+  memcpy(data, mappedBufferData, dataSize);
   resourceToMap->Unmap(0, nullptr);
-
-  return outputBuffer;
 }
 
 void Device::ExecuteCommandList() {

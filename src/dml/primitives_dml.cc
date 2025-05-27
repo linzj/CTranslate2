@@ -2222,8 +2222,9 @@ template <typename T>
 void cross_device_primitives<Device::CPU, Device::DirectML>::copy(const T* x,
                                                                   T* y,
                                                                   dim_t size) {
-  throw std::runtime_error(
-      "Cross-device copy from CPU to DirectML not implemented yet.");
+  auto device = dml::get_device();
+  std::string_view data(reinterpret_cast<const char*>(x), size * sizeof(T));
+  device->Upload(data.size(), data);
 }
 
 template <>
@@ -2231,8 +2232,9 @@ template <typename T>
 void cross_device_primitives<Device::DirectML, Device::CPU>::copy(const T* x,
                                                                   T* y,
                                                                   dim_t size) {
-  throw std::runtime_error(
-      "Cross-device copy from DirectML to CPU not implemented yet.");
+  auto device = dml::get_device();
+  device->Download(reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x)),
+                   reinterpret_cast<void*>(y), size * sizeof(T));
 }
 
 // Explicit template instantiations

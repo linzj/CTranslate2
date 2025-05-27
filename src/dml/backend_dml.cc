@@ -1,6 +1,4 @@
 #ifdef CT2_WITH_DIRECTML
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
 
 // Moved dxmodule.h and dxdevice.h to be before backend_dml.h
 #include "common.h"

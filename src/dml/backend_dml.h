@@ -1,6 +1,5 @@
 #pragma once
 #ifdef CT2_WITH_DIRECTML
-#include <memory>      // Added for std::unique_ptr
 #include "dxdevice.h"  // Added
 
 namespace ctranslate2 {
