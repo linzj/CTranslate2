@@ -1783,7 +1783,89 @@ template <typename T>
 void primitives<Device::DirectML>::transpose_2d(const T* a,
                                                 const dim_t* dims,
                                                 T* b) {
-  // Use DML slice/reshape operations
+  auto dml_device = dml::get_dml_device();
+
+  // dims[0] = rows, dims[1] = cols
+  dim_t rows = dims[0];
+  dim_t cols = dims[1];
+  dim_t total_elements = rows * cols;
+
+  // Create tensor descriptors
+  // Input: rows x cols matrix
+  UINT src_dims[] = {1, 1, static_cast<UINT>(rows), static_cast<UINT>(cols)};
+  UINT src_strides[] = {
+      static_cast<UINT>(total_elements), static_cast<UINT>(total_elements),
+      static_cast<UINT>(cols),  // Row stride
+      1                         // Column stride
+  };
+
+  // Output: cols x rows matrix (transposed)
+  UINT dst_dims[] = {1, 1, static_cast<UINT>(cols), static_cast<UINT>(rows)};
+  UINT dst_strides[] = {
+      static_cast<UINT>(total_elements), static_cast<UINT>(total_elements),
+      static_cast<UINT>(rows),  // Row stride in output
+      1                         // Column stride
+  };
+
+  // To transpose, we read the input with swapped strides
+  DML_BUFFER_TENSOR_DESC src_buffer_desc = {};
+  src_buffer_desc.DataType = dml::get_dml_data_type<T>();
+  src_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
+  src_buffer_desc.DimensionCount = 4;
+  src_buffer_desc.Sizes = dst_dims;  // Use output dimensions
+  // Custom strides to read in transposed order
+  UINT transposed_strides[] = {
+      static_cast<UINT>(total_elements), static_cast<UINT>(total_elements),
+      1,                       // Read columns as rows (stride 1)
+      static_cast<UINT>(cols)  // Read rows as columns (stride = original cols)
+  };
+  src_buffer_desc.Strides = transposed_strides;
+  src_buffer_desc.TotalTensorSizeInBytes = total_elements * sizeof(T);
+  src_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
+
+  DML_TENSOR_DESC src_desc = {};
+  src_desc.Type = DML_TENSOR_TYPE_BUFFER;
+  src_desc.Desc = &src_buffer_desc;
+
+  DML_BUFFER_TENSOR_DESC dst_buffer_desc = {};
+  dst_buffer_desc.DataType = dml::get_dml_data_type<T>();
+  dst_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
+  dst_buffer_desc.DimensionCount = 4;
+  dst_buffer_desc.Sizes = dst_dims;
+  dst_buffer_desc.Strides = dst_strides;
+  dst_buffer_desc.TotalTensorSizeInBytes = total_elements * sizeof(T);
+  dst_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
+
+  DML_TENSOR_DESC dst_desc = {};
+  dst_desc.Type = DML_TENSOR_TYPE_BUFFER;
+  dst_desc.Desc = &dst_buffer_desc;
+
+  // Use identity operator to copy with transposed reading
+  DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC identity_desc = {};
+  identity_desc.InputTensor = &src_desc;
+  identity_desc.OutputTensor = &dst_desc;
+
+  DML_OPERATOR_DESC op_desc = {};
+  op_desc.Type = DML_OPERATOR_ELEMENT_WISE_IDENTITY;
+  op_desc.Desc = &identity_desc;
+
+  ComPtr<IDMLOperator> op;
+  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
+
+  ComPtr<IDMLCompiledOperator> compiled_op;
+  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
+                                              IID_PPV_ARGS(&compiled_op)));
+
+  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+  ComPtr<ID3D12Resource> temp_resource =
+      dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+
+  std::vector<ID3D12Resource*> inputs = {
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(a))};
+  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(b)};
+
+  dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                            temp_resource.Get());
 }
 
 template <>
@@ -1792,7 +1874,92 @@ void primitives<Device::DirectML>::transpose_3d(const T* a,
                                                 const dim_t* dims,
                                                 const dim_t* perm,
                                                 T* b) {
-  // Use DML slice/reshape operations
+  auto dml_device = dml::get_dml_device();
+
+  // dims[0], dims[1], dims[2] are the input dimensions
+  // perm[0], perm[1], perm[2] define the permutation
+  dim_t total_elements = dims[0] * dims[1] * dims[2];
+
+  // Calculate output dimensions based on permutation
+  dim_t out_dims[3] = {dims[perm[0]], dims[perm[1]], dims[perm[2]]};
+
+  // Create 4D tensors (DML uses 4D tensors)
+  UINT src_dims[] = {1, static_cast<UINT>(dims[0]), static_cast<UINT>(dims[1]),
+                     static_cast<UINT>(dims[2])};
+  UINT dst_dims[] = {1, static_cast<UINT>(out_dims[0]),
+                     static_cast<UINT>(out_dims[1]),
+                     static_cast<UINT>(out_dims[2])};
+
+  // Calculate strides for source tensor
+  UINT src_strides[] = {static_cast<UINT>(total_elements),
+                        static_cast<UINT>(dims[1] * dims[2]),
+                        static_cast<UINT>(dims[2]), 1};
+
+  // Calculate permuted strides for reading
+  // Map each output dimension to its corresponding input stride
+  UINT perm_strides[4] = {
+      static_cast<UINT>(total_elements),  // Batch dimension unchanged
+      src_strides[perm[0] +
+                  1],  // +1 because we have batch dimension at index 0
+      src_strides[perm[1] + 1], src_strides[perm[2] + 1]};
+
+  DML_BUFFER_TENSOR_DESC src_buffer_desc = {};
+  src_buffer_desc.DataType = dml::get_dml_data_type<T>();
+  src_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
+  src_buffer_desc.DimensionCount = 4;
+  src_buffer_desc.Sizes = dst_dims;        // Use output dimensions
+  src_buffer_desc.Strides = perm_strides;  // Use permuted strides
+  src_buffer_desc.TotalTensorSizeInBytes = total_elements * sizeof(T);
+  src_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
+
+  DML_TENSOR_DESC src_desc = {};
+  src_desc.Type = DML_TENSOR_TYPE_BUFFER;
+  src_desc.Desc = &src_buffer_desc;
+
+  // Output tensor with standard layout
+  UINT dst_strides[] = {static_cast<UINT>(total_elements),
+                        static_cast<UINT>(out_dims[1] * out_dims[2]),
+                        static_cast<UINT>(out_dims[2]), 1};
+
+  DML_BUFFER_TENSOR_DESC dst_buffer_desc = {};
+  dst_buffer_desc.DataType = dml::get_dml_data_type<T>();
+  dst_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
+  dst_buffer_desc.DimensionCount = 4;
+  dst_buffer_desc.Sizes = dst_dims;
+  dst_buffer_desc.Strides = dst_strides;
+  dst_buffer_desc.TotalTensorSizeInBytes = total_elements * sizeof(T);
+  dst_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
+
+  DML_TENSOR_DESC dst_desc = {};
+  dst_desc.Type = DML_TENSOR_TYPE_BUFFER;
+  dst_desc.Desc = &dst_buffer_desc;
+
+  // Use identity operator to copy with transposed reading
+  DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC identity_desc = {};
+  identity_desc.InputTensor = &src_desc;
+  identity_desc.OutputTensor = &dst_desc;
+
+  DML_OPERATOR_DESC op_desc = {};
+  op_desc.Type = DML_OPERATOR_ELEMENT_WISE_IDENTITY;
+  op_desc.Desc = &identity_desc;
+
+  ComPtr<IDMLOperator> op;
+  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
+
+  ComPtr<IDMLCompiledOperator> compiled_op;
+  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
+                                              IID_PPV_ARGS(&compiled_op)));
+
+  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+  ComPtr<ID3D12Resource> temp_resource =
+      dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+
+  std::vector<ID3D12Resource*> inputs = {
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(a))};
+  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(b)};
+
+  dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                            temp_resource.Get());
 }
 
 template <>
@@ -1801,7 +1968,89 @@ void primitives<Device::DirectML>::transpose_4d(const T* a,
                                                 const dim_t* dims,
                                                 const dim_t* perm,
                                                 T* b) {
-  // Use DML slice/reshape operations
+  auto dml_device = dml::get_dml_device();
+
+  // dims[0], dims[1], dims[2], dims[3] are the input dimensions
+  // perm[0], perm[1], perm[2], perm[3] define the permutation
+  dim_t total_elements = dims[0] * dims[1] * dims[2] * dims[3];
+
+  // Calculate output dimensions based on permutation
+  UINT out_dims[4] = {
+      static_cast<UINT>(dims[perm[0]]), static_cast<UINT>(dims[perm[1]]),
+      static_cast<UINT>(dims[perm[2]]), static_cast<UINT>(dims[perm[3]])};
+
+  // Create tensor descriptors
+  UINT src_dims[] = {static_cast<UINT>(dims[0]), static_cast<UINT>(dims[1]),
+                     static_cast<UINT>(dims[2]), static_cast<UINT>(dims[3])};
+
+  // Calculate strides for source tensor (row-major layout)
+  UINT src_strides[] = {static_cast<UINT>(dims[1] * dims[2] * dims[3]),
+                        static_cast<UINT>(dims[2] * dims[3]),
+                        static_cast<UINT>(dims[3]), 1};
+
+  // Calculate permuted strides for reading
+  // Map each output dimension to its corresponding input stride
+  UINT perm_strides[4] = {src_strides[perm[0]], src_strides[perm[1]],
+                          src_strides[perm[2]], src_strides[perm[3]]};
+
+  DML_BUFFER_TENSOR_DESC src_buffer_desc = {};
+  src_buffer_desc.DataType = dml::get_dml_data_type<T>();
+  src_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
+  src_buffer_desc.DimensionCount = 4;
+  src_buffer_desc.Sizes = out_dims;        // Use output dimensions
+  src_buffer_desc.Strides = perm_strides;  // Use permuted strides
+  src_buffer_desc.TotalTensorSizeInBytes = total_elements * sizeof(T);
+  src_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
+
+  DML_TENSOR_DESC src_desc = {};
+  src_desc.Type = DML_TENSOR_TYPE_BUFFER;
+  src_desc.Desc = &src_buffer_desc;
+
+  // Output tensor with standard layout
+  UINT dst_strides[] = {
+      static_cast<UINT>(out_dims[1] * out_dims[2] * out_dims[3]),
+      static_cast<UINT>(out_dims[2] * out_dims[3]),
+      static_cast<UINT>(out_dims[3]), 1};
+
+  DML_BUFFER_TENSOR_DESC dst_buffer_desc = {};
+  dst_buffer_desc.DataType = dml::get_dml_data_type<T>();
+  dst_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
+  dst_buffer_desc.DimensionCount = 4;
+  dst_buffer_desc.Sizes = out_dims;
+  dst_buffer_desc.Strides = dst_strides;
+  dst_buffer_desc.TotalTensorSizeInBytes = total_elements * sizeof(T);
+  dst_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
+
+  DML_TENSOR_DESC dst_desc = {};
+  dst_desc.Type = DML_TENSOR_TYPE_BUFFER;
+  dst_desc.Desc = &dst_buffer_desc;
+
+  // Use identity operator to copy with transposed reading
+  DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC identity_desc = {};
+  identity_desc.InputTensor = &src_desc;
+  identity_desc.OutputTensor = &dst_desc;
+
+  DML_OPERATOR_DESC op_desc = {};
+  op_desc.Type = DML_OPERATOR_ELEMENT_WISE_IDENTITY;
+  op_desc.Desc = &identity_desc;
+
+  ComPtr<IDMLOperator> op;
+  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc, IID_PPV_ARGS(&op)));
+
+  ComPtr<IDMLCompiledOperator> compiled_op;
+  THROW_IF_FAILED(dml_device->CompileOperator(op.Get(), DML_EXECUTION_FLAG_NONE,
+                                              IID_PPV_ARGS(&compiled_op)));
+
+  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+  ComPtr<ID3D12Resource> temp_resource =
+      dml::create_temporary_resource(binding_props.TemporaryResourceSize);
+
+  std::vector<ID3D12Resource*> inputs = {
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(a))};
+  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(b)};
+
+  dml::execute_dml_operator(compiled_op.Get(), inputs, outputs, nullptr,
+                            temp_resource.Get());
 }
 
 template <>
@@ -1812,7 +2061,7 @@ void primitives<Device::DirectML>::compute_u8_compensation(
     dim_t n,
     float alpha,
     int32_t* compensation) {
-  // Quantization compensation - stub implementation
+  throw std::runtime_error("unimplemented function compute_u8_compensation");
 }
 
 template <>
