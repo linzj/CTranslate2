@@ -32,7 +32,7 @@ DML_TENSOR_DATA_TYPE get_dml_data_type(DataType dtype) {
 // Helper to create DML buffer tensor descriptor
 DML_BUFFER_TENSOR_DESC create_buffer_tensor_desc(const StorageView& storage) {
   std::vector<UINT> sizes(storage.rank());
-  for (size_t i = 0; i < storage.rank(); ++i) {
+  for (dim_t i = 0; i < storage.rank(); ++i) {
     sizes[i] = static_cast<UINT>(storage.dim(i));
   }
 
@@ -249,8 +249,8 @@ void Slide::compute(const StorageView& input,
   std::vector<UINT> sizes(input.rank());
   std::vector<UINT> strides(input.rank(), 1);
 
-  for (size_t i = 0; i < input.rank(); ++i) {
-    if (i == static_cast<size_t>(axis)) {
+  for (dim_t i = 0; i < input.rank(); ++i) {
+    if (i == static_cast<dim_t>(axis)) {
       offsets[i] = static_cast<UINT>(index);
       sizes[i] = static_cast<UINT>(output.dim(i));
     } else {

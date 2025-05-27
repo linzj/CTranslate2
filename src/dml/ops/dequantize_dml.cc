@@ -34,7 +34,8 @@ void Dequantize::dequantize<Device::DirectML, int8_t, float>(
       .Sizes = input_sizes.data(),
       .Strides = nullptr,
       .TotalTensorSizeInBytes =
-          static_cast<UINT64>(input.size() * sizeof(int8_t))};
+          static_cast<UINT64>(input.size() * sizeof(int8_t)),
+      .GuaranteedBaseOffsetAlignment = 0};
 
   DML_BUFFER_TENSOR_DESC float_output_desc = {
       .DataType = DML_TENSOR_DATA_TYPE_FLOAT32,
@@ -43,7 +44,8 @@ void Dequantize::dequantize<Device::DirectML, int8_t, float>(
       .Sizes = input_sizes.data(),
       .Strides = nullptr,
       .TotalTensorSizeInBytes =
-          static_cast<UINT64>(input.size() * sizeof(float))};
+          static_cast<UINT64>(input.size() * sizeof(float)),
+      .GuaranteedBaseOffsetAlignment = 0};
 
   DML_TENSOR_DESC input_desc = {.Type = DML_TENSOR_TYPE_BUFFER,
                                 .Desc = &input_buffer_desc};
@@ -107,7 +109,7 @@ void Dequantize::dequantize<Device::DirectML, int8_t, float>(
 
     // Set strides for broadcasting - only the last dimension has stride 1,
     // others 0
-    for (size_t i = 0; i < input.rank() - 1; ++i) {
+    for (dim_t i = 0; i < input.rank() - 1; ++i) {
       scale_strides[i] = 0;  // Broadcast these dimensions
     }
     scale_strides[input.rank() - 1] = 1;  // Normal stride for last dimension
@@ -124,7 +126,8 @@ void Dequantize::dequantize<Device::DirectML, int8_t, float>(
       .Sizes = scale_sizes.data(),
       .Strides = scale_strides.empty() ? nullptr : scale_strides.data(),
       .TotalTensorSizeInBytes =
-          static_cast<UINT64>(scale.size() * sizeof(float))};
+          static_cast<UINT64>(scale.size() * sizeof(float)),
+      .GuaranteedBaseOffsetAlignment = 0};
 
   DML_BUFFER_TENSOR_DESC div_output_desc = {
       .DataType = DML_TENSOR_DATA_TYPE_FLOAT32,
@@ -133,7 +136,8 @@ void Dequantize::dequantize<Device::DirectML, int8_t, float>(
       .Sizes = input_sizes.data(),
       .Strides = nullptr,
       .TotalTensorSizeInBytes =
-          static_cast<UINT64>(output.size() * sizeof(float))};
+          static_cast<UINT64>(output.size() * sizeof(float)),
+      .GuaranteedBaseOffsetAlignment = 0};
 
   DML_TENSOR_DESC float_input_tensor_desc = {
       .Type = DML_TENSOR_TYPE_BUFFER,

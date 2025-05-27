@@ -4,7 +4,6 @@
 #include "backend_dml.h"
 #include "common.h"
 #include "ctranslate2/devices.h"
-#include "ctranslate2/utils.h"
 
 #include <spdlog/spdlog.h>
 
