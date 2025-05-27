@@ -239,7 +239,7 @@ void BiasAdd::compute(const StorageView& value,
 
       // Execute add
       device->RecordDispatch(add_compiled_op.Get(), add_binding_table.Get());
-      device->ExecuteCommandListAndWait();
+      device->ExecuteCommandList();
 
       // Now create and execute activation operator
       DML_OPERATOR_DESC activation_op_desc = {};

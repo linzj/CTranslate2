@@ -171,7 +171,7 @@ void SoftMax::compute(const StorageView& input,
 
   // Record and dispatch the operation
   device->RecordDispatch(compiled_op.Get(), binding_table.Get());
-  device->ExecuteCommandListAndWait();
+  device->ExecuteCommandList();
 
   // Handle lengths parameter if provided - mask output for out-of-sequence
   // positions
