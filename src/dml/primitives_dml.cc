@@ -276,8 +276,12 @@ ComPtr<ID3D12Resource> create_temporary_resource(size_t size) {
 template <>
 template <typename T>
 T primitives<Device::DirectML>::at(const T* x, dim_t index) {
+  // Suppress unused parameter warnings
+  (void)x;
+  (void)index;
+
   // For single element access, copy to CPU temporarily
-  T result;
+  T result = T{};  // Initialize to avoid uninitialized variable warning
   // This would need proper DML buffer to CPU copy implementation
   return result;
 }
@@ -740,6 +744,8 @@ T primitives<Device::DirectML>::max(const T* array, dim_t size) {
 template <>
 template <typename T>
 void primitives<Device::DirectML>::add(T a, const T* x, T* y, dim_t size) {
+  (void)a;  // Suppress unused parameter warning
+
   auto dml_device = dml::get_dml_device();
 
   // For scalar + array, we need to create a constant buffer with the scalar
@@ -869,6 +875,8 @@ void primitives<Device::DirectML>::sub(const T* a,
 template <>
 template <typename T>
 void primitives<Device::DirectML>::mul(T a, const T* x, T* y, dim_t size) {
+  (void)a;  // Suppress unused parameter warning
+
   auto dml_device = dml::get_dml_device();
 
   DML_BUFFER_TENSOR_DESC a_buffer_desc = {};
@@ -1312,6 +1320,8 @@ void primitives<Device::DirectML>::mul_batch_broadcast(const T* a,
 template <>
 template <typename T>
 void primitives<Device::DirectML>::max(T a, const T* x, T* y, dim_t size) {
+  (void)a;  // Suppress unused parameter warning
+
   auto dml_device = dml::get_dml_device();
 
   DML_BUFFER_TENSOR_DESC a_buffer_desc = {};
@@ -1395,6 +1405,8 @@ void primitives<Device::DirectML>::max(const T* a,
 template <>
 template <typename T>
 void primitives<Device::DirectML>::min(T a, const T* x, T* y, dim_t size) {
+  (void)a;  // Suppress unused parameter warning
+
   auto dml_device = dml::get_dml_device();
 
   DML_BUFFER_TENSOR_DESC a_buffer_desc = {};
@@ -1646,6 +1658,9 @@ void primitives<Device::DirectML>::cos(const T* x, T* y, dim_t size) {
 template <>
 template <typename T>
 T primitives<Device::DirectML>::amax(const T* array, dim_t size) {
+  (void)array;  // Suppress unused parameter warnings
+  (void)size;
+
   throw std::runtime_error(
       "DirectML does not support amax operation directly. Use max instead.");
 }
@@ -1653,6 +1668,9 @@ T primitives<Device::DirectML>::amax(const T* array, dim_t size) {
 template <>
 template <typename T>
 float primitives<Device::DirectML>::logsumexp(const T* x, dim_t size) {
+  (void)x;  // Suppress unused parameter warnings
+  (void)size;
+
   throw std::runtime_error(
       "DirectML does not support logsumexp operation directly. Use exp and sum "
       "instead.");
@@ -1668,6 +1686,15 @@ void primitives<Device::DirectML>::penalize_previous_tokens(
     dim_t batch_size,
     dim_t length,
     dim_t vocabulary_size) {
+  // Suppress unused parameter warnings
+  (void)scores;
+  (void)previous_scores;
+  (void)previous_ids;
+  (void)penalty;
+  (void)batch_size;
+  (void)length;
+  (void)vocabulary_size;
+
   throw std::runtime_error(
       "DirectML does not support penalizing previous tokens directly. "
       "Implement as a custom operation.");
@@ -1681,6 +1708,15 @@ void primitives<Device::DirectML>::prepare_length_mask(const int32_t* lengths,
                                                        bool mask_future,
                                                        bool multi_query,
                                                        int32_t* mask) {
+  // Suppress unused parameter warnings
+  (void)lengths;
+  (void)batch_size;
+  (void)num_heads;
+  (void)num_queries;
+  (void)mask_future;
+  (void)multi_query;
+  (void)mask;
+
   throw std::runtime_error(
       "DirectML does not support preparing length masks directly. "
       "Implement as a custom operation.");
@@ -1957,6 +1993,14 @@ void primitives<Device::DirectML>::compute_u8_compensation(
     dim_t n,
     float alpha,
     int32_t* compensation) {
+  // Suppress unused parameter warnings
+  (void)b;
+  (void)transpose_b;
+  (void)k;
+  (void)n;
+  (void)alpha;
+  (void)compensation;
+
   throw std::runtime_error("unimplemented function compute_u8_compensation");
 }
 
