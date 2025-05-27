@@ -249,6 +249,7 @@ if(WITH_DIRECTML)
     src/dml/ops/softmax_dml.cc
     src/dml/ops/gather_dml.cc
     src/dml/ops/bias_add_dml.cc
+    src/dml/ops/tile_dml.cc
   )
 endif()
 
