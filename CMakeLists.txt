@@ -256,6 +256,7 @@ if(WITH_DIRECTML)
     src/dml/ops/topp_mask_dml.cc
     src/dml/ops/awq/dequantize_dml.cc
     src/dml/ops/awq/gemv_dml.cc
+    src/dml/ops/awq/gemm_dml.cc
   )
 endif()
 
