@@ -1,6 +1,7 @@
 #ifdef CT2_WITH_DIRECTML
 #include "ctranslate2/ops/quantize.h"
 #include "dml/backend_dml.h"
+#include "dml/operator.h"
 #include "dml/operator_cache.h"
 
 namespace ctranslate2 {
@@ -200,7 +201,7 @@ void Quantize::quantize(const StorageView& input,
       dml::GetOrCreateCompiledOperatorApi(&multiply_op_desc);
 
   // Step 6: Optional rounding
-  Microsoft::WRL::ComPtr<IDMLCompiledOperator> round_compiled_op;
+  dml::Operator* round_compiled_op;
   if (_round_before_cast) {
     DML_ELEMENT_WISE_ROUND_OPERATOR_DESC round_desc = {};
     round_desc.InputTensor = &input_desc;
@@ -230,180 +231,74 @@ void Quantize::quantize(const StorageView& input,
   // 1. Absolute value
   {
     Microsoft::WRL::ComPtr<IDMLOperatorInitializer> initializer;
-    IDMLCompiledOperator* ops[] = {abs_compiled_op.Get()};
-    HRESULT hr = dml::get_dml_device()->CreateOperatorInitializer(
-        1, ops, IID_PPV_ARGS(&initializer));
-    if (FAILED(hr))
-      throw std::runtime_error("Failed to create ABS initializer");
-
-    Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-    DML_BINDING_TABLE_DESC binding_desc = {};
-    binding_desc.Dispatchable = abs_compiled_op.Get();
-    hr = dml::get_dml_device()->CreateBindingTable(
-        &binding_desc, IID_PPV_ARGS(&binding_table));
-    if (FAILED(hr))
-      throw std::runtime_error("Failed to create ABS binding table");
 
     DML_BUFFER_BINDING input_binding = {input_resource, 0, input_size_bytes};
     DML_BUFFER_BINDING output_binding = {abs_buffer.Get(), 0, input_size_bytes};
-    DML_BINDING_DESC input_bind = {DML_BINDING_TYPE_BUFFER, &input_binding};
-    DML_BINDING_DESC output_bind = {DML_BINDING_TYPE_BUFFER, &output_binding};
+    std::vector<DML_BINDING_DESC> input_bind = {
+        {DML_BINDING_TYPE_BUFFER, &input_binding}};
+    std::vector<DML_BINDING_DESC> output_bind = {
+        {DML_BINDING_TYPE_BUFFER, &output_binding}};
 
-    binding_table->BindInputs(1, &input_bind);
-    binding_table->BindOutputs(1, &output_bind);
-
-    device->RecordInitialize(initializer.Get(), binding_table.Get());
-    device->RecordDispatch(abs_compiled_op.Get(), binding_table.Get());
+    abs_compiled_op->Execute(input_bind, output_bind);
   }
 
   // 2. Reduce max
   {
-    Microsoft::WRL::ComPtr<IDMLOperatorInitializer> initializer;
-    IDMLCompiledOperator* ops[] = {reduce_compiled_op.Get()};
-    HRESULT hr = dml::get_dml_device()->CreateOperatorInitializer(
-        1, ops, IID_PPV_ARGS(&initializer));
-    if (FAILED(hr))
-      throw std::runtime_error("Failed to create REDUCE initializer");
-
-    Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-    DML_BINDING_TABLE_DESC binding_desc = {};
-    binding_desc.Dispatchable = reduce_compiled_op.Get();
-    hr = dml::get_dml_device()->CreateBindingTable(
-        &binding_desc, IID_PPV_ARGS(&binding_table));
-    if (FAILED(hr))
-      throw std::runtime_error("Failed to create REDUCE binding table");
-
     DML_BUFFER_BINDING input_binding = {abs_buffer.Get(), 0, input_size_bytes};
     DML_BUFFER_BINDING output_binding = {max_buffer.Get(), 0, scale_size_bytes};
     DML_BINDING_DESC input_bind = {DML_BINDING_TYPE_BUFFER, &input_binding};
     DML_BINDING_DESC output_bind = {DML_BINDING_TYPE_BUFFER, &output_binding};
 
-    binding_table->BindInputs(1, &input_bind);
-    binding_table->BindOutputs(1, &output_bind);
-
-    device->RecordInitialize(initializer.Get(), binding_table.Get());
-    device->RecordDispatch(reduce_compiled_op.Get(), binding_table.Get());
+    reduce_compiled_op->Execute({input_bind}, {output_bind});
   }
 
   // 3. Avoid division by zero
   {
-    Microsoft::WRL::ComPtr<IDMLOperatorInitializer> initializer;
-    IDMLCompiledOperator* ops[] = {max_epsilon_compiled_op.Get()};
-    HRESULT hr = dml::get_dml_device()->CreateOperatorInitializer(
-        1, ops, IID_PPV_ARGS(&initializer));
-    if (FAILED(hr))
-      throw std::runtime_error("Failed to create MAX_EPSILON initializer");
-
-    Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-    DML_BINDING_TABLE_DESC binding_desc = {};
-    binding_desc.Dispatchable = max_epsilon_compiled_op.Get();
-    hr = dml::get_dml_device()->CreateBindingTable(
-        &binding_desc, IID_PPV_ARGS(&binding_table));
-    if (FAILED(hr))
-      throw std::runtime_error("Failed to create MAX_EPSILON binding table");
-
     DML_BUFFER_BINDING input1_binding = {max_buffer.Get(), 0, scale_size_bytes};
     DML_BUFFER_BINDING input2_binding = {const_epsilon_buffer.Get(), 0,
                                          sizeof(float)};
     DML_BUFFER_BINDING output_binding = {scale_factor_buffer.Get(), 0,
                                          scale_size_bytes};
-    DML_BINDING_DESC input_binds[] = {
+    std::vector<DML_BINDING_DESC> input_binds = {
         {DML_BINDING_TYPE_BUFFER, &input1_binding},
         {DML_BINDING_TYPE_BUFFER, &input2_binding}};
     DML_BINDING_DESC output_bind = {DML_BINDING_TYPE_BUFFER, &output_binding};
 
-    binding_table->BindInputs(2, input_binds);
-    binding_table->BindOutputs(1, &output_bind);
-
-    device->RecordInitialize(initializer.Get(), binding_table.Get());
-    device->RecordDispatch(max_epsilon_compiled_op.Get(), binding_table.Get());
+    max_epsilon_compiled_op->Execute(input_binds, {output_bind});
   }
 
   // 4. Compute scale factors (127 / max_val)
   {
-    Microsoft::WRL::ComPtr<IDMLOperatorInitializer> initializer;
-    IDMLCompiledOperator* ops[] = {divide_compiled_op.Get()};
-    HRESULT hr = dml::get_dml_device()->CreateOperatorInitializer(
-        1, ops, IID_PPV_ARGS(&initializer));
-    if (FAILED(hr))
-      throw std::runtime_error("Failed to create DIVIDE initializer");
-
-    Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-    DML_BINDING_TABLE_DESC binding_desc = {};
-    binding_desc.Dispatchable = divide_compiled_op.Get();
-    hr = dml::get_dml_device()->CreateBindingTable(
-        &binding_desc, IID_PPV_ARGS(&binding_table));
-    if (FAILED(hr))
-      throw std::runtime_error("Failed to create DIVIDE binding table");
-
     DML_BUFFER_BINDING input1_binding = {const_127_buffer.Get(), 0,
                                          sizeof(float)};
     DML_BUFFER_BINDING input2_binding = {scale_factor_buffer.Get(), 0,
                                          scale_size_bytes};
     DML_BUFFER_BINDING output_binding = {scale_resource, 0, scale_size_bytes};
-    DML_BINDING_DESC input_binds[] = {
+    std::vector<DML_BINDING_DESC> input_binds = {
         {DML_BINDING_TYPE_BUFFER, &input1_binding},
         {DML_BINDING_TYPE_BUFFER, &input2_binding}};
     DML_BINDING_DESC output_bind = {DML_BINDING_TYPE_BUFFER, &output_binding};
 
-    binding_table->BindInputs(2, input_binds);
-    binding_table->BindOutputs(1, &output_bind);
-
-    device->RecordInitialize(initializer.Get(), binding_table.Get());
-    device->RecordDispatch(divide_compiled_op.Get(), binding_table.Get());
+    divide_compiled_op->Execute(input_binds, {output_bind});
   }
 
   // 5. Multiply input by scale factors
   {
-    Microsoft::WRL::ComPtr<IDMLOperatorInitializer> initializer;
-    IDMLCompiledOperator* ops[] = {multiply_compiled_op.Get()};
-    HRESULT hr = dml::get_dml_device()->CreateOperatorInitializer(
-        1, ops, IID_PPV_ARGS(&initializer));
-    if (FAILED(hr))
-      throw std::runtime_error("Failed to create MULTIPLY initializer");
-
-    Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-    DML_BINDING_TABLE_DESC binding_desc = {};
-    binding_desc.Dispatchable = multiply_compiled_op.Get();
-    hr = dml::get_dml_device()->CreateBindingTable(
-        &binding_desc, IID_PPV_ARGS(&binding_table));
-    if (FAILED(hr))
-      throw std::runtime_error("Failed to create MULTIPLY binding table");
-
     DML_BUFFER_BINDING input1_binding = {input_resource, 0, input_size_bytes};
     DML_BUFFER_BINDING input2_binding = {scale_resource, 0, scale_size_bytes};
     DML_BUFFER_BINDING output_binding = {scaled_buffer.Get(), 0,
                                          input_size_bytes};
-    DML_BINDING_DESC input_binds[] = {
+    std::vector<DML_BINDING_DESC> input_binds = {
         {DML_BINDING_TYPE_BUFFER, &input1_binding},
         {DML_BINDING_TYPE_BUFFER, &input2_binding}};
     DML_BINDING_DESC output_bind = {DML_BINDING_TYPE_BUFFER, &output_binding};
 
-    binding_table->BindInputs(2, input_binds);
-    binding_table->BindOutputs(1, &output_bind);
-
-    device->RecordInitialize(initializer.Get(), binding_table.Get());
-    device->RecordDispatch(multiply_compiled_op.Get(), binding_table.Get());
+    multiply_compiled_op->Execute(input_binds, {output_bind});
   }
 
   // 6. Optional rounding
   ID3D12Resource* final_float_buffer = scaled_buffer.Get();
   if (_round_before_cast) {
-    Microsoft::WRL::ComPtr<IDMLOperatorInitializer> initializer;
-    IDMLCompiledOperator* ops[] = {round_compiled_op.Get()};
-    HRESULT hr = dml::get_dml_device()->CreateOperatorInitializer(
-        1, ops, IID_PPV_ARGS(&initializer));
-    if (FAILED(hr))
-      throw std::runtime_error("Failed to create ROUND initializer");
-
-    Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-    DML_BINDING_TABLE_DESC binding_desc = {};
-    binding_desc.Dispatchable = round_compiled_op.Get();
-    hr = dml::get_dml_device()->CreateBindingTable(
-        &binding_desc, IID_PPV_ARGS(&binding_table));
-    if (FAILED(hr))
-      throw std::runtime_error("Failed to create ROUND binding table");
-
     DML_BUFFER_BINDING input_binding = {scaled_buffer.Get(), 0,
                                         input_size_bytes};
     DML_BUFFER_BINDING output_binding = {rounded_buffer.Get(), 0,
@@ -411,43 +306,20 @@ void Quantize::quantize(const StorageView& input,
     DML_BINDING_DESC input_bind = {DML_BINDING_TYPE_BUFFER, &input_binding};
     DML_BINDING_DESC output_bind = {DML_BINDING_TYPE_BUFFER, &output_binding};
 
-    binding_table->BindInputs(1, &input_bind);
-    binding_table->BindOutputs(1, &output_bind);
-
-    device->RecordInitialize(initializer.Get(), binding_table.Get());
-    device->RecordDispatch(round_compiled_op.Get(), binding_table.Get());
+    round_compiled_op->Execute({input_bind}, {output_bind});
 
     final_float_buffer = rounded_buffer.Get();
   }
 
   // 7. Cast to int8
   {
-    Microsoft::WRL::ComPtr<IDMLOperatorInitializer> initializer;
-    IDMLCompiledOperator* ops[] = {cast_compiled_op.Get()};
-    HRESULT hr = dml::get_dml_device()->CreateOperatorInitializer(
-        1, ops, IID_PPV_ARGS(&initializer));
-    if (FAILED(hr))
-      throw std::runtime_error("Failed to create CAST initializer");
-
-    Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-    DML_BINDING_TABLE_DESC binding_desc = {};
-    binding_desc.Dispatchable = cast_compiled_op.Get();
-    hr = dml::get_dml_device()->CreateBindingTable(
-        &binding_desc, IID_PPV_ARGS(&binding_table));
-    if (FAILED(hr))
-      throw std::runtime_error("Failed to create CAST binding table");
-
     DML_BUFFER_BINDING input_binding = {final_float_buffer, 0,
                                         input_size_bytes};
     DML_BUFFER_BINDING output_binding = {output_resource, 0, output_size_bytes};
     DML_BINDING_DESC input_bind = {DML_BINDING_TYPE_BUFFER, &input_binding};
     DML_BINDING_DESC output_bind = {DML_BINDING_TYPE_BUFFER, &output_binding};
 
-    binding_table->BindInputs(1, &input_bind);
-    binding_table->BindOutputs(1, &output_bind);
-
-    device->RecordInitialize(initializer.Get(), binding_table.Get());
-    device->RecordDispatch(cast_compiled_op.Get(), binding_table.Get());
+    cast_compiled_op->Execute({input_bind}, {output_bind});
   }
 
   // Execute all commands

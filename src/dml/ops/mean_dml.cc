@@ -1,6 +1,7 @@
 #if defined(CT2_WITH_DIRECTML)
 #include "ctranslate2/ops/mean.h"
 #include "dml/backend_dml.h"
+#include "dml/operator.h"
 #include "dml/operator_cache.h"
 
 namespace ctranslate2 {
@@ -93,17 +94,6 @@ void Mean::compute(const StorageView& input,
   // Get compiled operator from cache
   auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
-  // Get binding properties
-  auto binding_props = compiled_op->GetBindingProperties();
-
-  // Create binding table
-  Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-  HRESULT hr =
-      dml_device->CreateBindingTable(nullptr, IID_PPV_ARGS(&binding_table));
-  if (FAILED(hr)) {
-    throw std::runtime_error("Failed to create binding table");
-  }
-
   // Bind input
   DML_BUFFER_BINDING input_binding = {};
   input_binding.Buffer =
@@ -115,8 +105,6 @@ void Mean::compute(const StorageView& input,
   input_binding_desc.Type = DML_BINDING_TYPE_BUFFER;
   input_binding_desc.Desc = &input_binding;
 
-  binding_table->BindInputs(1, &input_binding_desc);
-
   // Bind output
   DML_BUFFER_BINDING output_binding = {};
   output_binding.Buffer = static_cast<ID3D12Resource*>(output.buffer());
@@ -127,31 +115,8 @@ void Mean::compute(const StorageView& input,
   output_binding_desc.Type = DML_BINDING_TYPE_BUFFER;
   output_binding_desc.Desc = &output_binding;
 
-  binding_table->BindOutputs(1, &output_binding_desc);
-
-  // Create temporary resource if needed
-  if (binding_props.TemporaryResourceSize > 0) {
-    auto temp_resource = device->CreatePreferredDeviceMemoryBuffer(
-        binding_props.TemporaryResourceSize);
-
-    DML_BUFFER_BINDING temp_binding = {};
-    temp_binding.Buffer = temp_resource.Get();
-    temp_binding.Offset = 0;
-    temp_binding.SizeInBytes = binding_props.TemporaryResourceSize;
-
-    DML_BINDING_DESC temp_binding_desc = {};
-    temp_binding_desc.Type = DML_BINDING_TYPE_BUFFER;
-    temp_binding_desc.Desc = &temp_binding;
-
-    binding_table->BindTemporaryResource(&temp_binding_desc);
-
-    // Keep the resource alive until command list execution
-    device->KeepAliveUntilNextCommandListDispatch(std::move(temp_resource));
-  }
-
   // Record and execute the dispatch
-  device->RecordDispatch(compiled_op.Get(), binding_table.Get());
-  device->ExecuteCommandList();
+  compiled_op->Execute({input_binding_desc}, {output_binding_desc});
 }
 
 #define DECLARE_IMPL(T)                                                        \

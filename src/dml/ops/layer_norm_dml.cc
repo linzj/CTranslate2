@@ -3,6 +3,7 @@
 #include "ctranslate2/ops/layer_norm.h"
 
 #include "dml/backend_dml.h"
+#include "dml/operator.h"
 #include "dml/operator_cache.h"
 
 namespace ctranslate2 {
@@ -115,31 +116,6 @@ void LayerNorm::compute(const StorageView* beta,
   // Get or create compiled operator from cache
   auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
-  // Get binding properties
-  auto binding_props = compiled_op->GetBindingProperties();
-
-  // Create binding table
-  Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-  DML_BINDING_TABLE_DESC binding_table_desc = {};
-  binding_table_desc.Dispatchable = compiled_op.Get();
-  binding_table_desc.CPUDescriptorHandle = {};  // Managed by device
-  binding_table_desc.GPUDescriptorHandle = {};  // Managed by device
-  binding_table_desc.SizeInDescriptors = binding_props.RequiredDescriptorCount;
-
-  if (FAILED(dml_device->CreateBindingTable(&binding_table_desc,
-                                            IID_PPV_ARGS(&binding_table)))) {
-    throw std::runtime_error(
-        "Failed to create DML binding table for LayerNorm");
-  }
-
-  // Create temporary resource if needed
-  Microsoft::WRL::ComPtr<ID3D12Resource> temp_resource;
-  if (binding_props.TemporaryResourceSize > 0) {
-    temp_resource = device->CreatePreferredDeviceMemoryBuffer(
-        binding_props.TemporaryResourceSize);
-    device->KeepAliveUntilNextCommandListDispatch(temp_resource);
-  }
-
   // Get D3D12 resources from StorageView buffers
   // StorageView::buffer() returns ID3D12Resource* for DirectML backend
   auto input_resource =
@@ -166,12 +142,10 @@ void LayerNorm::compute(const StorageView* beta,
   bias_binding.Offset = 0;
   bias_binding.SizeInBytes = beta->size() * sizeof(T);
 
-  DML_BINDING_DESC input_bindings[] = {
+  std::vector<DML_BINDING_DESC> input_bindings = {
       {DML_BINDING_TYPE_BUFFER, &input_binding},
       {DML_BINDING_TYPE_BUFFER, &scale_binding},
       {DML_BINDING_TYPE_BUFFER, &bias_binding}};
-
-  binding_table->BindInputs(3, input_bindings);
 
   // Bind output tensor
   DML_BUFFER_BINDING output_binding = {};
@@ -179,30 +153,10 @@ void LayerNorm::compute(const StorageView* beta,
   output_binding.Offset = 0;
   output_binding.SizeInBytes = output.size() * sizeof(T);
 
-  DML_BINDING_DESC output_bindings[] = {
+  std::vector<DML_BINDING_DESC> output_bindings = {
       {DML_BINDING_TYPE_BUFFER, &output_binding}};
 
-  binding_table->BindOutputs(1, output_bindings);
-
-  // Bind temporary resource if needed
-  if (temp_resource) {
-    DML_BUFFER_BINDING temp_binding = {};
-    temp_binding.Buffer = temp_resource.Get();
-    temp_binding.Offset = 0;
-    temp_binding.SizeInBytes = binding_props.TemporaryResourceSize;
-
-    DML_BINDING_DESC temp_binding_desc = {};
-    temp_binding_desc.Type = DML_BINDING_TYPE_BUFFER;
-    temp_binding_desc.Desc = &temp_binding;
-
-    binding_table->BindTemporaryResource(&temp_binding_desc);
-  }
-
-  // Record dispatch command
-  device->RecordDispatch(compiled_op.Get(), binding_table.Get());
-
-  // Execute command list to perform the computation on GPU
-  device->ExecuteCommandList();
+  compiled_op->Execute(input_bindings, output_bindings);
 }
 
 #define DECLARE_IMPL(T)                                                   \

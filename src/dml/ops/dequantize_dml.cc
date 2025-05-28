@@ -2,7 +2,7 @@
 
 #include "ctranslate2/ops/dequantize.h"
 #include "dml/backend_dml.h"
-#include "dml/common.h"
+#include "dml/operator.h"
 #include "dml/operator_cache.h"
 
 namespace ctranslate2 {
@@ -61,17 +61,6 @@ void Dequantize::dequantize<Device::DirectML, int8_t, float>(
 
   auto cast_compiled_op = dml::GetOrCreateCompiledOperatorApi(&cast_op_desc);
 
-  // Create binding table for cast
-  Microsoft::WRL::ComPtr<IDMLBindingTable> cast_binding_table;
-  DML_BINDING_TABLE_DESC cast_binding_desc = {
-      .Dispatchable = cast_compiled_op.Get(),
-      .CPUDescriptorHandle = {},
-      .GPUDescriptorHandle = {},
-      .SizeInDescriptors = 0};
-
-  THROW_IF_FAILED(dml_device->CreateBindingTable(
-      &cast_binding_desc, IID_PPV_ARGS(&cast_binding_table)));
-
   // Bind cast inputs and outputs
   DML_BUFFER_BINDING cast_input_binding = {
       .Buffer = static_cast<ID3D12Resource*>(const_cast<void*>(input.buffer())),
@@ -89,10 +78,7 @@ void Dequantize::dequantize<Device::DirectML, int8_t, float>(
   DML_BINDING_DESC cast_output_bind = {.Type = DML_BINDING_TYPE_BUFFER,
                                        .Desc = &cast_output_binding};
 
-  cast_binding_table->BindInputs(1, &cast_input_bind);
-  cast_binding_table->BindOutputs(1, &cast_output_bind);
-
-  device->RecordDispatch(cast_compiled_op.Get(), cast_binding_table.Get());
+  cast_compiled_op->Execute({cast_input_bind}, {cast_output_bind});
 
   // Step 2: Element-wise division (float_input / scale)
 
@@ -161,17 +147,6 @@ void Dequantize::dequantize<Device::DirectML, int8_t, float>(
   auto divide_compiled_op =
       dml::GetOrCreateCompiledOperatorApi(&divide_op_desc);
 
-  // Create binding table for division
-  Microsoft::WRL::ComPtr<IDMLBindingTable> div_binding_table;
-  DML_BINDING_TABLE_DESC div_binding_desc = {
-      .Dispatchable = divide_compiled_op.Get(),
-      .CPUDescriptorHandle = {},
-      .GPUDescriptorHandle = {},
-      .SizeInDescriptors = 0};
-
-  THROW_IF_FAILED(dml_device->CreateBindingTable(
-      &div_binding_desc, IID_PPV_ARGS(&div_binding_table)));
-
   // Bind division inputs and outputs
   DML_BUFFER_BINDING div_input1_binding = {
       .Buffer = static_cast<ID3D12Resource*>(float_input.buffer()),
@@ -188,20 +163,14 @@ void Dequantize::dequantize<Device::DirectML, int8_t, float>(
       .Offset = 0,
       .SizeInBytes = static_cast<UINT64>(output.size() * sizeof(float))};
 
-  DML_BINDING_DESC div_input_bindings[2] = {
+  std::vector<DML_BINDING_DESC> div_input_bindings = {
       {.Type = DML_BINDING_TYPE_BUFFER, .Desc = &div_input1_binding},
       {.Type = DML_BINDING_TYPE_BUFFER, .Desc = &div_input2_binding}};
 
   DML_BINDING_DESC div_output_bind = {.Type = DML_BINDING_TYPE_BUFFER,
                                       .Desc = &div_output_binding};
 
-  div_binding_table->BindInputs(2, div_input_bindings);
-  div_binding_table->BindOutputs(1, &div_output_bind);
-
-  device->RecordDispatch(divide_compiled_op.Get(), div_binding_table.Get());
-
-  // Execute all recorded operations
-  device->ExecuteCommandList();
+  divide_compiled_op->Execute(div_input_bindings, {div_output_bind});
 }
 
 template <>
@@ -342,7 +311,7 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
       device->CreatePreferredDeviceMemoryBuffer(y.size() * sizeof(float));
 
   // Step 4: Add bias if provided
-  Microsoft::WRL::ComPtr<IDMLCompiledOperator> bias_add_op;
+  dml::Operator* bias_add_op = nullptr;
   Microsoft::WRL::ComPtr<ID3D12Resource> bias_output;
 
   if (bias) {
@@ -378,7 +347,7 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
   }
 
   // Step 5: Apply activation if specified
-  Microsoft::WRL::ComPtr<IDMLCompiledOperator> activation_op;
+  dml::Operator* activation_op;
 
   if (_activation_type) {
     DML_OPERATOR_DESC activation_op_desc = {};
@@ -448,19 +417,6 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
 
   // 1. Cast int32 to float
   {
-    Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-    DML_BINDING_TABLE_DESC binding_table_desc = {};
-    binding_table_desc.Dispatchable = cast_op.Get();
-    binding_table_desc.CPUDescriptorHandle = {};  // Will be set by device
-    binding_table_desc.GPUDescriptorHandle = {};  // Will be set by device
-    binding_table_desc.SizeInDescriptors =
-        cast_op->GetBindingProperties().RequiredDescriptorCount;
-
-    HRESULT hr = dml_device->CreateBindingTable(&binding_table_desc,
-                                                IID_PPV_ARGS(&binding_table));
-    if (FAILED(hr))
-      return;
-
     DML_BUFFER_BINDING input_binding = {c_buffer, 0,
                                         c.size() * sizeof(int32_t)};
     DML_BUFFER_BINDING output_binding = {cast_output.Get(), 0,
@@ -469,27 +425,11 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
     DML_BINDING_DESC input_bind = {DML_BINDING_TYPE_BUFFER, &input_binding};
     DML_BINDING_DESC output_bind = {DML_BINDING_TYPE_BUFFER, &output_binding};
 
-    binding_table->BindInputs(1, &input_bind);
-    binding_table->BindOutputs(1, &output_bind);
-
-    device->RecordDispatch(cast_op.Get(), binding_table.Get());
+    cast_op->Execute({input_bind}, {output_bind});
   }
 
   // 2. Multiply scales
   {
-    Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-    DML_BINDING_TABLE_DESC binding_table_desc = {};
-    binding_table_desc.Dispatchable = scale_mult_op.Get();
-    binding_table_desc.CPUDescriptorHandle = {};
-    binding_table_desc.GPUDescriptorHandle = {};
-    binding_table_desc.SizeInDescriptors =
-        scale_mult_op->GetBindingProperties().RequiredDescriptorCount;
-
-    HRESULT hr = dml_device->CreateBindingTable(&binding_table_desc,
-                                                IID_PPV_ARGS(&binding_table));
-    if (FAILED(hr))
-      return;
-
     DML_BUFFER_BINDING a_scale_binding = {a_scale_buffer, 0,
                                           a_scale.size() * sizeof(float)};
     DML_BUFFER_BINDING b_scale_binding = {b_scale_buffer, 0,
@@ -497,32 +437,17 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
     DML_BUFFER_BINDING scale_output_binding = {combined_scale.Get(), 0,
                                                y.size() * sizeof(float)};
 
-    DML_BINDING_DESC inputs[] = {{DML_BINDING_TYPE_BUFFER, &a_scale_binding},
-                                 {DML_BINDING_TYPE_BUFFER, &b_scale_binding}};
+    std::vector<DML_BINDING_DESC> inputs = {
+        {DML_BINDING_TYPE_BUFFER, &a_scale_binding},
+        {DML_BINDING_TYPE_BUFFER, &b_scale_binding}};
     DML_BINDING_DESC output_bind = {DML_BINDING_TYPE_BUFFER,
                                     &scale_output_binding};
 
-    binding_table->BindInputs(2, inputs);
-    binding_table->BindOutputs(1, &output_bind);
-
-    device->RecordDispatch(scale_mult_op.Get(), binding_table.Get());
+    scale_mult_op->Execute(inputs, {output_bind});
   }
 
   // 3. Divide cast output by combined scale
   {
-    Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-    DML_BINDING_TABLE_DESC binding_table_desc = {};
-    binding_table_desc.Dispatchable = divide_op.Get();
-    binding_table_desc.CPUDescriptorHandle = {};
-    binding_table_desc.GPUDescriptorHandle = {};
-    binding_table_desc.SizeInDescriptors =
-        divide_op->GetBindingProperties().RequiredDescriptorCount;
-
-    HRESULT hr = dml_device->CreateBindingTable(&binding_table_desc,
-                                                IID_PPV_ARGS(&binding_table));
-    if (FAILED(hr))
-      return;
-
     DML_BUFFER_BINDING cast_binding = {cast_output.Get(), 0,
                                        y.size() * sizeof(float)};
     DML_BUFFER_BINDING scale_binding = {combined_scale.Get(), 0,
@@ -530,33 +455,18 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
     DML_BUFFER_BINDING divide_output_binding = {divide_output.Get(), 0,
                                                 y.size() * sizeof(float)};
 
-    DML_BINDING_DESC inputs[] = {{DML_BINDING_TYPE_BUFFER, &cast_binding},
-                                 {DML_BINDING_TYPE_BUFFER, &scale_binding}};
+    std::vector<DML_BINDING_DESC> inputs = {
+        {DML_BINDING_TYPE_BUFFER, &cast_binding},
+        {DML_BINDING_TYPE_BUFFER, &scale_binding}};
     DML_BINDING_DESC output_bind = {DML_BINDING_TYPE_BUFFER,
                                     &divide_output_binding};
 
-    binding_table->BindInputs(2, inputs);
-    binding_table->BindOutputs(1, &output_bind);
-
-    device->RecordDispatch(divide_op.Get(), binding_table.Get());
+    divide_op->Execute(inputs, {output_bind});
   }
 
   // 4. Add bias if provided
   Microsoft::WRL::ComPtr<ID3D12Resource> current_output = divide_output;
   if (bias) {
-    Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-    DML_BINDING_TABLE_DESC binding_table_desc = {};
-    binding_table_desc.Dispatchable = bias_add_op.Get();
-    binding_table_desc.CPUDescriptorHandle = {};
-    binding_table_desc.GPUDescriptorHandle = {};
-    binding_table_desc.SizeInDescriptors =
-        bias_add_op->GetBindingProperties().RequiredDescriptorCount;
-
-    HRESULT hr = dml_device->CreateBindingTable(&binding_table_desc,
-                                                IID_PPV_ARGS(&binding_table));
-    if (FAILED(hr))
-      return;
-
     auto* bias_buffer =
         static_cast<ID3D12Resource*>(const_cast<void*>(bias->buffer()));
 
@@ -567,34 +477,18 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
     DML_BUFFER_BINDING bias_output_binding = {bias_output.Get(), 0,
                                               y.size() * sizeof(float)};
 
-    DML_BINDING_DESC inputs[] = {{DML_BINDING_TYPE_BUFFER, &divide_binding},
-                                 {DML_BINDING_TYPE_BUFFER, &bias_binding}};
+    std::vector<DML_BINDING_DESC> inputs = {
+        {DML_BINDING_TYPE_BUFFER, &divide_binding},
+        {DML_BINDING_TYPE_BUFFER, &bias_binding}};
     DML_BINDING_DESC output_bind = {DML_BINDING_TYPE_BUFFER,
                                     &bias_output_binding};
 
-    binding_table->BindInputs(2, inputs);
-    binding_table->BindOutputs(1, &output_bind);
-
-    device->RecordDispatch(bias_add_op.Get(), binding_table.Get());
-
+    bias_add_op->Execute(inputs, {output_bind});
     current_output = bias_output;
   }
 
   // 5. Apply activation or copy to final output
   if (activation_op) {
-    Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-    DML_BINDING_TABLE_DESC binding_table_desc = {};
-    binding_table_desc.Dispatchable = activation_op.Get();
-    binding_table_desc.CPUDescriptorHandle = {};
-    binding_table_desc.GPUDescriptorHandle = {};
-    binding_table_desc.SizeInDescriptors =
-        activation_op->GetBindingProperties().RequiredDescriptorCount;
-
-    HRESULT hr = dml_device->CreateBindingTable(&binding_table_desc,
-                                                IID_PPV_ARGS(&binding_table));
-    if (FAILED(hr))
-      return;
-
     DML_BUFFER_BINDING input_binding = {current_output.Get(), 0,
                                         y.size() * sizeof(float)};
     DML_BUFFER_BINDING output_binding = {y_buffer, 0, y.size() * sizeof(float)};
@@ -602,10 +496,7 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
     DML_BINDING_DESC input_bind = {DML_BINDING_TYPE_BUFFER, &input_binding};
     DML_BINDING_DESC output_bind = {DML_BINDING_TYPE_BUFFER, &output_binding};
 
-    binding_table->BindInputs(1, &input_bind);
-    binding_table->BindOutputs(1, &output_bind);
-
-    device->RecordDispatch(activation_op.Get(), binding_table.Get());
+    activation_op->Execute({input_bind}, {output_bind});
   } else {
     // Copy current output to final output
     command_list->CopyBufferRegion(y_buffer, 0, current_output.Get(), 0,

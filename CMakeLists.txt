@@ -242,6 +242,13 @@ if(WITH_DIRECTML)
     src/dml/module_info.h
     src/dml/operator_cache.cc
     src/dml/operator_cache.h
+    src/dml/command_queue.cc
+    src/dml/command_queue.h
+    src/dml/descriptor_pool.cc
+    src/dml/descriptor_pool.h
+    src/dml/gpu_event.h
+    src/dml/operator.cc
+    src/dml/operator.h
     src/dml/primitives_dml.cc
     src/dml/ops/quantize_dml.cc
     src/dml/ops/dequantize_dml.cc
@@ -257,6 +264,7 @@ if(WITH_DIRECTML)
     src/dml/ops/awq/dequantize_dml.cc
     src/dml/ops/awq/gemv_dml.cc
     src/dml/ops/awq/gemm_dml.cc
+    src/dml/ops/awq/rms_norm_dml.cc
   )
 endif()
 

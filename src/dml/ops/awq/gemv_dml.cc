@@ -2,6 +2,7 @@
 
 #include "ctranslate2/ops/awq/gemv.h"
 #include "dml/backend_dml.h"
+#include "dml/operator.h"
 #include "dml/operator_cache.h"
 
 namespace ctranslate2 {
@@ -108,16 +109,6 @@ void dequantize_weights_dml(const StorageView& quantized_weights,
   // Get or create compiled operator from cache
   auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
-  // Create binding table
-  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
-
-  Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-  DML_BINDING_TABLE_DESC binding_table_desc = {};
-  binding_table_desc.Dispatchable = compiled_op.Get();
-
-  dml_device->CreateBindingTable(&binding_table_desc,
-                                 IID_PPV_ARGS(&binding_table));
-
   // Bind inputs and outputs
   DML_BUFFER_BINDING input_binding = {
       reinterpret_cast<ID3D12Resource*>(
@@ -137,34 +128,20 @@ void dequantize_weights_dml(const StorageView& quantized_weights,
       static_cast<UINT64>(dequantized_weights.size() *
                           dequantized_weights.item_size())};
 
-  DML_BINDING_DESC input_bindings[] = {
+  std::vector<DML_BINDING_DESC> input_bindings = {
       {DML_BINDING_TYPE_BUFFER, &input_binding},
       {DML_BINDING_TYPE_BUFFER, &scale_binding},
       {DML_BINDING_TYPE_BUFFER, &zero_binding}};
-  DML_BINDING_DESC output_bindings[] = {
+  std::vector<DML_BINDING_DESC> output_bindings = {
       {DML_BINDING_TYPE_BUFFER, &output_binding}};
 
-  binding_table->BindInputs(3, input_bindings);
-  binding_table->BindOutputs(1, output_bindings);
-
   // Record dispatch
-  device->RecordDispatch(compiled_op.Get(), binding_table.Get());
+  compiled_op->Execute(input_bindings, output_bindings);
 }
 
-void execute_dml_operator(IDMLCompiledOperator* compiled_op,
+void execute_dml_operator(dml::Operator* compiled_op,
                           const std::vector<const StorageView*>& inputs,
                           const std::vector<StorageView*>& outputs) {
-  auto* device = dml::get_device();
-  auto* dml_device = dml::get_dml_device();
-
-  // Create binding table
-  Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-  DML_BINDING_TABLE_DESC binding_table_desc = {};
-  binding_table_desc.Dispatchable = compiled_op;
-
-  dml_device->CreateBindingTable(&binding_table_desc,
-                                 IID_PPV_ARGS(&binding_table));
-
   // Create input bindings
   std::vector<DML_BUFFER_BINDING> input_buffer_bindings;
   std::vector<DML_BINDING_DESC> input_bindings;
@@ -195,17 +172,7 @@ void execute_dml_operator(IDMLCompiledOperator* compiled_op,
     output_bindings.push_back(binding_desc);
   }
 
-  // Bind inputs and outputs
-  binding_table->BindInputs(static_cast<UINT>(input_bindings.size()),
-                            input_bindings.data());
-  binding_table->BindOutputs(static_cast<UINT>(output_bindings.size()),
-                             output_bindings.data());
-
-  // Record dispatch
-  device->RecordDispatch(compiled_op, binding_table.Get());
-
-  // Execute immediately for this operation
-  device->ExecuteCommandList();
+  compiled_op->Execute(input_bindings, output_bindings);
 }
 
 void slice_tensor_k_dimension(const StorageView& input,
@@ -252,7 +219,7 @@ void slice_tensor_k_dimension(const StorageView& input,
   auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
   // Create and execute binding
-  execute_dml_operator(compiled_op.Get(), {&input}, {&output});
+  execute_dml_operator(compiled_op, {&input}, {&output});
 }
 
 void perform_partial_gemv(const StorageView& a_slice,
@@ -300,8 +267,7 @@ void perform_partial_gemv(const StorageView& a_slice,
   auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
   // Execute the operation
-  execute_dml_operator(compiled_op.Get(), {&reshaped_a, &b_slice},
-                       {&reshaped_c});
+  execute_dml_operator(compiled_op, {&reshaped_a, &b_slice}, {&reshaped_c});
 }
 
 void reduce_split_k_results(StorageView& c) {
@@ -342,7 +308,7 @@ void reduce_split_k_results(StorageView& c) {
   auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
   // Execute the reduction
-  execute_dml_operator(compiled_op.Get(), {&c}, {&final_output});
+  execute_dml_operator(compiled_op, {&c}, {&final_output});
 
   // Copy final result back to c with correct shape
   c = std::move(final_output);
@@ -369,14 +335,6 @@ void zero_tensor_dml(StorageView& tensor) {
   // Get or create compiled operator
   auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
-  // Create binding table
-  Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-  DML_BINDING_TABLE_DESC binding_table_desc = {};
-  binding_table_desc.Dispatchable = compiled_op.Get();
-
-  dml_device->CreateBindingTable(&binding_table_desc,
-                                 IID_PPV_ARGS(&binding_table));
-
   // Bind output
   DML_BUFFER_BINDING output_binding = {
       reinterpret_cast<ID3D12Resource*>(tensor.buffer()), 0,
@@ -384,10 +342,8 @@ void zero_tensor_dml(StorageView& tensor) {
 
   DML_BINDING_DESC output_bind_desc = {DML_BINDING_TYPE_BUFFER,
                                        &output_binding};
-  binding_table->BindOutputs(1, &output_bind_desc);
 
-  // Record dispatch
-  device->RecordDispatch(compiled_op.Get(), binding_table.Get());
+  compiled_op->Execute({}, {output_bind_desc});
 }
 }  // namespace
 
@@ -461,16 +417,6 @@ void GemvAwq::compute_gemv<Device::DirectML, float16_t, int>(
   // Get or create compiled operator from cache
   auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
-  // Create binding table
-  DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
-
-  Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-  DML_BINDING_TABLE_DESC binding_table_desc = {};
-  binding_table_desc.Dispatchable = compiled_op.Get();
-
-  dml_device->CreateBindingTable(&binding_table_desc,
-                                 IID_PPV_ARGS(&binding_table));
-
   // Bind inputs and outputs
   DML_BUFFER_BINDING a_binding = {
       reinterpret_cast<ID3D12Resource*>(const_cast<void*>(reshaped_a.buffer())),
@@ -483,18 +429,13 @@ void GemvAwq::compute_gemv<Device::DirectML, float16_t, int>(
       reinterpret_cast<ID3D12Resource*>(reshaped_c.buffer()), 0,
       reshaped_c.size() * sizeof(float16_t)};
 
-  DML_BINDING_DESC input_bindings[] = {{DML_BINDING_TYPE_BUFFER, &a_binding},
-                                       {DML_BINDING_TYPE_BUFFER, &b_binding}};
-  DML_BINDING_DESC output_bindings[] = {{DML_BINDING_TYPE_BUFFER, &c_binding}};
+  std::vector<DML_BINDING_DESC> input_bindings = {
+      {DML_BINDING_TYPE_BUFFER, &a_binding},
+      {DML_BINDING_TYPE_BUFFER, &b_binding}};
+  std::vector<DML_BINDING_DESC> output_bindings = {
+      {DML_BINDING_TYPE_BUFFER, &c_binding}};
 
-  binding_table->BindInputs(2, input_bindings);
-  binding_table->BindOutputs(1, output_bindings);
-
-  // Record dispatch
-  device->RecordDispatch(compiled_op.Get(), binding_table.Get());
-
-  // Execute command list
-  device->ExecuteCommandList();
+  compiled_op->Execute(input_bindings, output_bindings);
 }
 
 template <>

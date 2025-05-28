@@ -2,6 +2,7 @@
 
 #include "ctranslate2/ops/gather.h"
 #include "dml/backend_dml.h"
+#include "dml/operator.h"
 #include "dml/operator_cache.h"
 #include "type_dispatch.h"
 
@@ -111,30 +112,6 @@ void Gather::compute(const StorageView& data,
   // Get or create compiled operator from cache
   auto compiled_operator = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
-  // Get binding properties
-  auto binding_props = compiled_operator->GetBindingProperties();
-
-  // Create temporary resource if needed
-  Microsoft::WRL::ComPtr<ID3D12Resource> temporary_resource;
-  if (binding_props.TemporaryResourceSize > 0) {
-    temporary_resource = device->CreatePreferredDeviceMemoryBuffer(
-        binding_props.TemporaryResourceSize);
-  }
-
-  // Create binding table
-  DML_BINDING_TABLE_DESC binding_table_desc = {};
-  binding_table_desc.Dispatchable = compiled_operator.Get();
-  binding_table_desc.CPUDescriptorHandle = {};  // Will be filled by device
-  binding_table_desc.GPUDescriptorHandle = {};  // Will be filled by device
-  binding_table_desc.SizeInDescriptors = binding_props.RequiredDescriptorCount;
-
-  Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-  if (FAILED(dml_device->CreateBindingTable(&binding_table_desc,
-                                            IID_PPV_ARGS(&binding_table)))) {
-    throw std::runtime_error(
-        "Failed to create DML binding table for gather operation");
-  }
-
   // Convert StorageView buffers to ID3D12Resource*
   // As noted in the requirements, buffer() returns ID3D12Resource* for DML
   // device
@@ -155,13 +132,9 @@ void Gather::compute(const StorageView& data,
   indices_binding.Offset = 0;
   indices_binding.SizeInBytes = input.size() * sizeof(int32_t);
 
-  DML_BINDING_DESC input_bindings[2] = {};
-  input_bindings[0].Type = DML_BINDING_TYPE_BUFFER;
-  input_bindings[0].Desc = &data_binding;
-  input_bindings[1].Type = DML_BINDING_TYPE_BUFFER;
-  input_bindings[1].Desc = &indices_binding;
-
-  binding_table->BindInputs(2, input_bindings);
+  std::vector<DML_BINDING_DESC> input_bindings = {
+      {.Type = DML_BINDING_TYPE_BUFFER, .Desc = &data_binding},
+      {.Type = DML_BINDING_TYPE_BUFFER, .Desc = &indices_binding}};
 
   // Bind output tensor
   DML_BUFFER_BINDING output_binding = {};
@@ -173,30 +146,7 @@ void Gather::compute(const StorageView& data,
   output_binding_desc.Type = DML_BINDING_TYPE_BUFFER;
   output_binding_desc.Desc = &output_binding;
 
-  binding_table->BindOutputs(1, &output_binding_desc);
-
-  // Bind temporary resource if needed
-  if (temporary_resource) {
-    DML_BUFFER_BINDING temp_binding = {};
-    temp_binding.Buffer = temporary_resource.Get();
-    temp_binding.Offset = 0;
-    temp_binding.SizeInBytes = binding_props.TemporaryResourceSize;
-
-    DML_BINDING_DESC temp_binding_desc = {};
-    temp_binding_desc.Type = DML_BINDING_TYPE_BUFFER;
-    temp_binding_desc.Desc = &temp_binding;
-
-    binding_table->BindTemporaryResource(&temp_binding_desc);
-  }
-
-  // Keep temporary resource alive until dispatch completes
-  if (temporary_resource) {
-    device->KeepAliveUntilNextCommandListDispatch(temporary_resource);
-  }
-
-  // Record and execute the dispatch
-  device->RecordDispatch(compiled_operator.Get(), binding_table.Get());
-  device->ExecuteCommandList();
+  compiled_operator->Execute(input_bindings, {output_binding_desc});
 }
 
 #define DECLARE_IMPL(T)                                                    \

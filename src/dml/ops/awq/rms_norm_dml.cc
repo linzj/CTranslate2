@@ -2,6 +2,7 @@
 #include "ctranslate2/ops/rms_norm.h"
 
 #include "dml/backend_dml.h"
+#include "dml/operator.h"
 #include "dml/operator_cache.h"
 
 namespace ctranslate2 {
@@ -38,7 +39,7 @@ Microsoft::WRL::ComPtr<ID3D12Resource> create_epsilon_constant_buffer(
 
   if (data_type == DML_TENSOR_DATA_TYPE_FLOAT16) {
     std::vector<uint16_t> epsilon_data_fp16(batch_size);
-    for (size_t i = 0; i < batch_size; ++i) {
+    for (dim_t i = 0; i < batch_size; ++i) {
       // Convert float to float16 (simplified)
       epsilon_data_fp16[i] =
           static_cast<uint16_t>(epsilon_value * 65504.0f / 65504.0f);
@@ -245,9 +246,10 @@ void RMSNorm::compute(const StorageView& gamma,
       dml::GetOrCreateCompiledOperatorApi(&norm_multiply_op_desc);
 
   // Step 6: Final computation - handle residual connection
-  Microsoft::WRL::ComPtr<IDMLCompiledOperator> final_op;
+  dml::Operator* final_op;
   Microsoft::WRL::ComPtr<ID3D12Resource> gamma_modified_buffer;
   DML_TENSOR_DESC gamma_final_desc = gamma_desc;
+  DML_BUFFER_TENSOR_DESC gamma_modified_desc;
 
   if (_use_residual) {
     // Compute (1 + gamma) first
@@ -279,7 +281,7 @@ void RMSNorm::compute(const StorageView& gamma,
     DML_BUFFER_TENSOR_DESC ones_desc = gamma_tensor_desc;
     DML_TENSOR_DESC ones_tensor = {DML_TENSOR_TYPE_BUFFER, &ones_desc};
 
-    DML_BUFFER_TENSOR_DESC gamma_modified_desc = gamma_tensor_desc;
+    gamma_modified_desc = gamma_tensor_desc;
     gamma_modified_desc.TotalTensorSizeInBytes = gamma.size() * type_size;
     DML_TENSOR_DESC gamma_modified_tensor = {DML_TENSOR_TYPE_BUFFER,
                                              &gamma_modified_desc};
@@ -294,14 +296,6 @@ void RMSNorm::compute(const StorageView& gamma,
     auto gamma_add_op = dml::GetOrCreateCompiledOperatorApi(&gamma_add_op_desc);
 
     // Execute gamma addition first
-    auto binding_props = gamma_add_op->GetBindingProperties();
-    DML_BINDING_TABLE_DESC binding_desc = {};
-    binding_desc.Dispatchable = gamma_add_op.Get();
-    binding_desc.SizeInDescriptors = binding_props.RequiredDescriptorCount;
-
-    Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-    dml_device->CreateBindingTable(&binding_desc, IID_PPV_ARGS(&binding_table));
-
     DML_BUFFER_BINDING ones_binding = {
         ones_buffer.Get(), 0, static_cast<UINT64>(gamma.size() * type_size)};
     DML_BUFFER_BINDING gamma_binding = {
@@ -310,16 +304,13 @@ void RMSNorm::compute(const StorageView& gamma,
         gamma_modified_buffer.Get(), 0,
         static_cast<UINT64>(gamma.size() * type_size)};
 
-    DML_BINDING_DESC input_bindings[] = {
+    std::vector<DML_BINDING_DESC> input_bindings = {
         {DML_BINDING_TYPE_BUFFER, &ones_binding},
         {DML_BINDING_TYPE_BUFFER, &gamma_binding}};
     DML_BINDING_DESC output_binding = {DML_BINDING_TYPE_BUFFER,
                                        &gamma_modified_binding};
 
-    binding_table->BindInputs(2, input_bindings);
-    binding_table->BindOutputs(1, &output_binding);
-
-    device->RecordDispatch(gamma_add_op.Get(), binding_table.Get());
+    gamma_add_op->Execute(input_bindings, {output_binding});
 
     gamma_final_desc.Desc = &gamma_modified_desc;
   }
@@ -336,7 +327,7 @@ void RMSNorm::compute(const StorageView& gamma,
 
   // Execute all operations in sequence
   struct OperationStep {
-    Microsoft::WRL::ComPtr<IDMLCompiledOperator> op;
+    dml::Operator* op;
     std::vector<DML_BUFFER_BINDING> input_bindings;
     std::vector<DML_BUFFER_BINDING> output_bindings;
   };
@@ -401,14 +392,6 @@ void RMSNorm::compute(const StorageView& gamma,
 
   // Execute all operations
   for (auto& operation : operations) {
-    auto binding_props = operation.op->GetBindingProperties();
-    DML_BINDING_TABLE_DESC binding_desc = {};
-    binding_desc.Dispatchable = operation.op.Get();
-    binding_desc.SizeInDescriptors = binding_props.RequiredDescriptorCount;
-
-    Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-    dml_device->CreateBindingTable(&binding_desc, IID_PPV_ARGS(&binding_table));
-
     std::vector<DML_BINDING_DESC> input_binding_descs;
     for (auto& binding : operation.input_bindings) {
       input_binding_descs.push_back({DML_BINDING_TYPE_BUFFER, &binding});
@@ -419,12 +402,7 @@ void RMSNorm::compute(const StorageView& gamma,
       output_binding_descs.push_back({DML_BINDING_TYPE_BUFFER, &binding});
     }
 
-    binding_table->BindInputs(input_binding_descs.size(),
-                              input_binding_descs.data());
-    binding_table->BindOutputs(output_binding_descs.size(),
-                               output_binding_descs.data());
-
-    device->RecordDispatch(operation.op.Get(), binding_table.Get());
+    operation.op->Execute(input_binding_descs, output_binding_descs);
   }
 
   device->ExecuteCommandList();

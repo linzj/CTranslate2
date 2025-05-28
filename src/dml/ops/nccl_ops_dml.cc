@@ -1,6 +1,7 @@
 #ifdef CT2_WITH_DIRECTML
 #include "ctranslate2/ops/nccl_ops.h"
 #include "dml/backend_dml.h"
+#include "dml/operator.h"
 #include "dml/operator_cache.h"
 #include "type_dispatch.h"
 
@@ -137,13 +138,6 @@ void perform_dml_reduce_operation(const StorageView& input,
   // Get or create compiled operator from cache
   auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
-  // Get binding properties
-  auto binding_props = compiled_op->GetBindingProperties();
-
-  // Create binding table
-  Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-  dml_device->CreateBindingTable(nullptr, IID_PPV_ARGS(&binding_table));
-
   // Bind inputs
   DML_BUFFER_BINDING input_binding = {};
   input_binding.Buffer = input_buffer;
@@ -153,8 +147,6 @@ void perform_dml_reduce_operation(const StorageView& input,
   DML_BINDING_DESC input_binding_desc = {};
   input_binding_desc.Type = DML_BINDING_TYPE_BUFFER;
   input_binding_desc.Desc = &input_binding;
-
-  binding_table->BindInputs(1, &input_binding_desc);
 
   // Bind outputs
   DML_BUFFER_BINDING output_binding = {};
@@ -166,34 +158,8 @@ void perform_dml_reduce_operation(const StorageView& input,
   output_binding_desc.Type = DML_BINDING_TYPE_BUFFER;
   output_binding_desc.Desc = &output_binding;
 
-  binding_table->BindOutputs(1, &output_binding_desc);
-
-  // Create and bind temporary resource if needed
-  Microsoft::WRL::ComPtr<ID3D12Resource> temp_buffer;
-  if (binding_props.TemporaryResourceSize > 0) {
-    temp_buffer = device->CreatePreferredDeviceMemoryBuffer(
-        binding_props.TemporaryResourceSize);
-
-    DML_BUFFER_BINDING temp_binding = {};
-    temp_binding.Buffer = temp_buffer.Get();
-    temp_binding.Offset = 0;
-    temp_binding.SizeInBytes = binding_props.TemporaryResourceSize;
-
-    DML_BINDING_DESC temp_binding_desc = {};
-    temp_binding_desc.Type = DML_BINDING_TYPE_BUFFER;
-    temp_binding_desc.Desc = &temp_binding;
-
-    binding_table->BindTemporaryResource(&temp_binding_desc);
-
-    // Keep temp buffer alive until execution completes
-    device->KeepAliveUntilNextCommandListDispatch(std::move(temp_buffer));
-  }
-
   // Record the dispatch operation
-  device->RecordDispatch(compiled_op.Get(), binding_table.Get());
-
-  // Execute the command list
-  device->ExecuteCommandList();
+  compiled_op->Execute({input_binding_desc}, {output_binding_desc});
 }
 #endif
 

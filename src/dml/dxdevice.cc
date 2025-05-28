@@ -1,6 +1,8 @@
 #include "dxdevice.h"
 #include <spdlog/spdlog.h>
+#include "command_queue.h"
 #include "common.h"
+#include "descriptor_pool.h"
 
 #include <assert.h>
 #include <dxgi1_6.h>
@@ -167,6 +169,7 @@ Device::Device(IAdapter* adapter,
   THROW_IF_FAILED(m_d3d->CheckFeatureSupport(
       D3D12_FEATURE_FEATURE_LEVELS, &featureLevels, sizeof(featureLevels)));
 
+  m_descriptorPool = std::make_unique<DescriptorPool>(m_d3d.Get(), 1024 * 1024);
 #if 0
   // Custom heaps are optional for MCDM devices, so we also need to check for
   // support.
@@ -181,17 +184,15 @@ Device::Device(IAdapter* adapter,
   }
 #endif
 
-  THROW_IF_FAILED(m_d3d->CreateFence(
-      0, D3D12_FENCE_FLAG_NONE,
-      IID_GRAPHICS_PPV_ARGS(m_fence.ReleaseAndGetAddressOf())));
-
   D3D12_COMMAND_QUEUE_DESC queueDesc = {};
   queueDesc.Flags = disableGpuTimeout
                         ? D3D12_COMMAND_QUEUE_FLAG_DISABLE_GPU_TIMEOUT
                         : D3D12_COMMAND_QUEUE_FLAG_NONE;
   queueDesc.Type = commandListType;
+  ComPtr<ID3D12CommandQueue> queue;
   THROW_IF_FAILED(m_d3d->CreateCommandQueue(
-      &queueDesc, IID_GRAPHICS_PPV_ARGS(m_queue.ReleaseAndGetAddressOf())));
+      &queueDesc, IID_GRAPHICS_PPV_ARGS(queue.ReleaseAndGetAddressOf())));
+  m_queue = std::make_unique<CommandQueue>(queue.Get(), false);
   m_commandListType = queueDesc.Type;
 
 #if defined(INCLUDE_DXGI)
@@ -236,6 +237,8 @@ Device::Device(IAdapter* adapter,
 
   THROW_IF_FAILED(
       m_dml->CreateCommandRecorder(IID_PPV_ARGS(&m_commandRecorder)));
+  THROW_IF_FAILED(m_dml->CreateOperatorInitializer(
+      0, nullptr, IID_PPV_ARGS(&m_initializer)));
 
   // Each GPU time measurement requires a pair of timestamps
   m_timestampCapacity = maxGpuTimeMeasurements * 2;
@@ -280,9 +283,9 @@ Device::Device(ID3D12Device* d3ddevice,
                std::shared_ptr<DmlModule> dmlModule)
     : m_d3dModule(d3dModule),
       m_dmlModule(dmlModule),
-      m_queue(command_queue),
       m_commandListType(commandListType),
       m_dispatchRepeat(dispatchRepeat),
+      m_queue(std::make_unique<CommandQueue>(command_queue, false)),
       m_restoreBackgroundProcessing(false),
       m_restoreStablePowerState(false),
       m_useCustomHeaps(preferCustomHeaps) {
@@ -324,10 +327,6 @@ Device::Device(ID3D12Device* d3ddevice,
     }
   }
 #endif
-
-  THROW_IF_FAILED(m_d3d->CreateFence(
-      0, D3D12_FENCE_FLAG_NONE,
-      IID_GRAPHICS_PPV_ARGS(m_fence.ReleaseAndGetAddressOf())));
 
 #if defined(INCLUDE_DXGI)
   // Create dummy swapchain for frame indication
@@ -397,6 +396,8 @@ Device::Device(ID3D12Device* d3ddevice,
   if (clearShaderCaches) {
     ClearShaderCaches();
   }
+
+  m_descriptorPool = std::make_unique<DescriptorPool>(m_d3d.Get(), 1024 * 1024);
 }
 
 Device::~Device() {
@@ -504,38 +505,7 @@ ComPtr<ID3D12Resource> Device::CreateReadbackBuffer(
 }
 
 void Device::WaitForGpuWorkToComplete() {
-  uint64_t nextFenceValue = m_fence->GetCompletedValue() + 1;
-  THROW_IF_FAILED(m_queue->Signal(m_fence.Get(), nextFenceValue));
-  THROW_IF_FAILED(m_fence->SetEventOnCompletion(nextFenceValue, nullptr));
-}
-
-void Device::RecordInitialize(IDMLDispatchable* dispatchable,
-                              IDMLBindingTable* bindingTable) {
-  m_commandRecorder->RecordDispatch(m_commandList.Get(), dispatchable,
-                                    bindingTable);
-}
-
-void Device::RecordDispatch(IDMLDispatchable* dispatchable,
-                            IDMLBindingTable* bindingTable) {
-  RecordTimestamp();
-
-  for (uint32_t i = 0; i < m_dispatchRepeat; i++) {
-    m_commandRecorder->RecordDispatch(m_commandList.Get(), dispatchable,
-                                      bindingTable);
-    if (!m_postDispatchBarriers.empty()) {
-      if (m_postDispatchBarriers.size() >
-          std::numeric_limits<uint32_t>::max()) {
-        throw std::invalid_argument(
-            "ResourceBarrier " + std::to_string(m_postDispatchBarriers.size()) +
-            " is too large.");
-      }
-      m_commandList->ResourceBarrier(
-          static_cast<uint32_t>(m_postDispatchBarriers.size()),
-          m_postDispatchBarriers.data());
-    }
-  }
-
-  RecordTimestamp();
+  m_queue->GetCurrentCompletionEvent().WaitForSignal();
 }
 
 void Device::RecordDispatch(const char* name,
@@ -759,8 +729,7 @@ std::vector<double> Device::ResolveTimingSamples() {
     return {};
   }
 
-  uint64_t frequency;
-  THROW_IF_FAILED(m_queue->GetTimestampFrequency(&frequency));
+  uint64_t frequency = m_queue->GetTimestampFrequency();
 
   std::vector<double> samples(timestamps.size() / 2);
 
@@ -904,6 +873,176 @@ void Device::DummyPresent() {
     m_dummySwapChain->Present(0, 0);
   }
 #endif
+}
+
+void Device::InitializeOperator(
+    IDMLCompiledOperator* op,
+    const DML_BINDING_DESC& persistentResourceBinding,
+    const DML_BINDING_DESC& inputArrayBinding) {
+  // Reset the initializer to reference the input operator.
+  IDMLCompiledOperator* ops[] = {op};
+  THROW_IF_FAILED(m_initializer->Reset(ARRAYSIZE(ops), ops));
+
+  DML_BINDING_PROPERTIES initBindingProps =
+      m_initializer->GetBindingProperties();
+
+  const uint32_t numDescriptors = initBindingProps.RequiredDescriptorCount;
+  DescriptorRange descriptorRange = m_descriptorPool->AllocDescriptors(
+      numDescriptors, m_queue->GetNextCompletionEvent());
+
+  // Create a binding table for initialization.
+  DML_BINDING_TABLE_DESC bindingTableDesc = {};
+  bindingTableDesc.Dispatchable = m_initializer.Get();
+  bindingTableDesc.CPUDescriptorHandle = descriptorRange.cpuHandle;
+  bindingTableDesc.GPUDescriptorHandle = descriptorRange.gpuHandle;
+  bindingTableDesc.SizeInDescriptors = numDescriptors;
+
+  ComPtr<IDMLBindingTable> bindingTable;
+  THROW_IF_FAILED(m_dml->CreateBindingTable(&bindingTableDesc,
+                                            IID_PPV_ARGS(&bindingTable)));
+
+  // Create a temporary resource for initializing the op, if it's required.
+  UINT64 temporaryResourceSize = initBindingProps.TemporaryResourceSize;
+  if (temporaryResourceSize > 0) {
+    ComPtr<ID3D12Resource> buffer = CreatePreferredDeviceMemoryBuffer(
+        temporaryResourceSize, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    // Bind the temporary resource.
+    DML_BUFFER_BINDING bufferBinding = {buffer.Get(), 0, temporaryResourceSize};
+    DML_BINDING_DESC bindingDesc = {DML_BINDING_TYPE_BUFFER, &bufferBinding};
+    bindingTable->BindTemporaryResource(&bindingDesc);
+    KeepAliveUntilNextCommandListDispatch(std::move(buffer));
+  }
+
+  // Bind inputs, if provided.
+  if (inputArrayBinding.Type != DML_BINDING_TYPE_NONE) {
+    // An operator with inputs to bind MUST use a BUFFER_ARRAY.
+    assert(inputArrayBinding.Type == DML_BINDING_TYPE_BUFFER_ARRAY);
+    bindingTable->BindInputs(1, &inputArrayBinding);
+  }
+
+  // Bind the persistent resource, which is an output of initialization.
+  if (persistentResourceBinding.Type != DML_BINDING_TYPE_NONE) {
+    // Persistent resources MUST be bound as buffers.
+    assert(persistentResourceBinding.Type == DML_BINDING_TYPE_BUFFER);
+    bindingTable->BindOutputs(1, &persistentResourceBinding);
+  }
+
+  // Record the initialization work.
+  SetDescriptorHeap(descriptorRange.heap);
+  m_commandRecorder->RecordDispatch(m_commandList.Get(), m_initializer.Get(),
+                                    bindingTable.Get());
+
+  // Barrier if there's an output (i.e. persistent resource), or if any temps
+  // are used.
+  if ((persistentResourceBinding.Type != DML_BINDING_TYPE_NONE) ||
+      (temporaryResourceSize > 0)) {
+    auto uav = CD3DX12_RESOURCE_BARRIER::UAV(nullptr);
+    m_commandList->ResourceBarrier(1, &uav);
+  }
+  ExecuteCommandList();
+}
+
+void Device::ExecuteOperator(IDMLCompiledOperator* op,
+                             const DML_BINDING_DESC& persistentResourceBinding,
+                             std::vector<DML_BINDING_DESC> inputBindings,
+                             std::vector<DML_BINDING_DESC> outputBindings) {
+  DML_BINDING_PROPERTIES execBindingProps = op->GetBindingProperties();
+
+  const uint32_t numDescriptors = execBindingProps.RequiredDescriptorCount;
+  DescriptorRange descriptorRange = m_descriptorPool->AllocDescriptors(
+      numDescriptors, m_queue->GetNextCompletionEvent());
+
+  // Create a binding table for execution.
+  DML_BINDING_TABLE_DESC bindingTableDesc = {};
+  bindingTableDesc.Dispatchable = op;
+  bindingTableDesc.CPUDescriptorHandle = descriptorRange.cpuHandle;
+  bindingTableDesc.GPUDescriptorHandle = descriptorRange.gpuHandle;
+  bindingTableDesc.SizeInDescriptors = numDescriptors;
+
+  ComPtr<IDMLBindingTable> bindingTable;
+  THROW_IF_FAILED(m_dml->CreateBindingTable(&bindingTableDesc,
+                                            IID_PPV_ARGS(&bindingTable)));
+
+  // Create a temporary resource for executing the op, if it's required.
+  UINT64 temporaryResourceSize = execBindingProps.TemporaryResourceSize;
+  if (temporaryResourceSize > 0) {
+    ComPtr<ID3D12Resource> buffer = CreatePreferredDeviceMemoryBuffer(
+        temporaryResourceSize, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+    // Bind the temporary resource.
+    DML_BUFFER_BINDING bufferBinding = {buffer.Get(), 0, temporaryResourceSize};
+    DML_BINDING_DESC bindingDesc = {DML_BINDING_TYPE_BUFFER, &bufferBinding};
+    bindingTable->BindTemporaryResource(&bindingDesc);
+    KeepAliveUntilNextCommandListDispatch(std::move(buffer));
+  }
+
+  if (persistentResourceBinding.Type != DML_BINDING_TYPE_NONE) {
+    bindingTable->BindPersistentResource(&persistentResourceBinding);
+  }
+
+  bindingTable->BindInputs(static_cast<uint32_t>(inputBindings.size()),
+                           inputBindings.data());
+  bindingTable->BindOutputs(static_cast<uint32_t>(outputBindings.size()),
+                            outputBindings.data());
+
+  // Record the execution work.
+  SetDescriptorHeap(descriptorRange.heap);
+  m_commandRecorder->RecordDispatch(m_commandList.Get(), op,
+                                    bindingTable.Get());
+
+  // Barrier all outputs.
+  auto uav = CD3DX12_RESOURCE_BARRIER::UAV(nullptr);
+  m_commandList->ResourceBarrier(1, &uav);
+  ExecuteCommandList();
+}
+
+void Device::ExecuteOperator(IDMLCompiledOperator* op,
+                             std::vector<DML_BINDING_DESC> inputBindings,
+                             std::vector<DML_BINDING_DESC> outputBindings) {
+  DML_BINDING_DESC persistentBindingDesc = {};
+  ExecuteOperator(op, persistentBindingDesc, std::move(inputBindings),
+                  std::move(outputBindings));
+}
+
+void Device::ExecuteOperator(
+    IDMLCompiledOperator* compiled_op,
+    const std::vector<ID3D12Resource*>& input_resources,
+    const std::vector<ID3D12Resource*>& output_resources,
+    ID3D12Resource* persistent_resource) {
+  DML_BINDING_DESC persistent_binding_desc = {};
+  if (persistent_resource) {
+    DML_BUFFER_BINDING persist_binding =
+        create_buffer_binding(persistent_resource);
+    persistent_binding_desc = create_binding_desc(persist_binding);
+  }
+
+  std::vector<DML_BINDING_DESC> input_binding_descs;
+  input_binding_descs.reserve(input_resources.size());
+  for (auto* resource : input_resources) {
+    input_binding_descs.push_back(
+        create_binding_desc(create_buffer_binding(resource)));
+  }
+
+  std::vector<DML_BINDING_DESC> output_binding_descs;
+  output_binding_descs.reserve(output_resources.size());
+  for (auto* resource : output_resources) {
+    output_binding_descs.push_back(
+        create_binding_desc(create_buffer_binding(resource)));
+  }
+
+  ExecuteOperator(compiled_op, persistent_binding_desc,
+                  std::move(input_binding_descs),
+                  std::move(output_binding_descs));
+}
+
+void Device::SetDescriptorHeap(ID3D12DescriptorHeap* descriptorHeap) {
+  if (descriptorHeap != nullptr && descriptorHeap != m_currentDescriptorHeap) {
+    m_currentDescriptorHeap = descriptorHeap;
+
+    ID3D12DescriptorHeap* descriptorHeaps[] = {descriptorHeap};
+    m_commandList->SetDescriptorHeaps(ARRAYSIZE(descriptorHeaps),
+                                      descriptorHeaps);
+  }
 }
 
 }  // namespace dml

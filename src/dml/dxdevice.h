@@ -1,7 +1,7 @@
 #pragma once
 
-#include "dxmodule.h"
 #include <memory>
+#include "dxmodule.h"
 
 #ifdef INCLUDE_DXGI
 #include <dxgi1_6.h>
@@ -26,9 +26,33 @@ using IAdapter = IDXGIAdapter1;
 namespace ctranslate2 {
 namespace dml {
 
+class CommandQueue;
+class DescriptorPool;
+
+// Inline helpers
+inline DML_BUFFER_BINDING create_buffer_binding(ID3D12Resource* resource,
+                                                UINT64 offset = 0,
+                                                UINT64 size = 0) {
+  DML_BUFFER_BINDING binding = {};
+  binding.Buffer = resource;
+  binding.Offset = offset;
+  binding.SizeInBytes =
+      (size == 0 && resource) ? resource->GetDesc().Width : size;
+  return binding;
+}
+
+// Helper to create binding description
+inline DML_BINDING_DESC create_binding_desc(
+    const DML_BUFFER_BINDING& buffer_binding) {
+  DML_BINDING_DESC desc = {};
+  desc.Type = DML_BINDING_TYPE_BUFFER;
+  desc.Desc = &buffer_binding;
+  return desc;
+}
+
 class Device {
  public:
-  Device(IAdapter* adapter, // IAdapter is ::IDXGIAdapter1, should be fine
+  Device(IAdapter* adapter,  // IAdapter is ::IDXGIAdapter1, should be fine
          D3D_FEATURE_LEVEL featureLevel,
          DML_FEATURE_LEVEL dmlFeatureLevel,
          bool debugLayersEnabled,
@@ -67,7 +91,7 @@ class Device {
 
   ID3D12Device9* D3D() { return m_d3d.Get(); }
   IDMLDevice1* DML() { return m_dml.Get(); }
-  ID3D12CommandQueue* GetCommandQueue() { return m_queue.Get(); }
+  // ID3D12CommandQueue* GetCommandQueue();
   ID3D12QueryHeap* GetTimestampHeap() { return m_timestampHeap.Get(); }
   D3D12_COMMAND_LIST_TYPE GetCommandListType() const {
     return m_commandListType;
@@ -129,12 +153,6 @@ class Device {
 
   void ResetCommandList();
 
-  // Records the dispatch of an IDMLDispatchable into the device command list.
-  void RecordInitialize(IDMLDispatchable* dispatchable,
-                        IDMLBindingTable* bindingTable);
-  void RecordDispatch(IDMLDispatchable* dispatchable,
-                      IDMLBindingTable* bindingTable);
-
   // Records the dispatch of an HLSL shader.
   void RecordDispatch(const char* name,
                       uint32_t threadGroupX,
@@ -166,7 +184,9 @@ class Device {
                                                 std::wstring_view name = {});
 
   std::vector<std::byte> Download(Microsoft::WRL::ComPtr<ID3D12Resource>);
-  void Download(Microsoft::WRL::ComPtr<ID3D12Resource>, void* data, size_t size);
+  void Download(Microsoft::WRL::ComPtr<ID3D12Resource>,
+                void* data,
+                size_t size);
 
   void ClearShaderCaches();
 
@@ -174,10 +194,29 @@ class Device {
   static DXGI_FORMAT GetDxgiFormatFromDmlTensorDataType(
       DML_TENSOR_DATA_TYPE dataType);
 
+  void InitializeOperator(IDMLCompiledOperator* op,
+                          const DML_BINDING_DESC& persistentResourceBinding,
+                          const DML_BINDING_DESC& inputArrayBinding);
+
+  void ExecuteOperator(IDMLCompiledOperator* op,
+                       const DML_BINDING_DESC& persistentResourceBinding,
+                       std::vector<DML_BINDING_DESC> inputBindings,
+                       std::vector<DML_BINDING_DESC> outputBindings);
+
+  void ExecuteOperator(IDMLCompiledOperator* op,
+                       std::vector<DML_BINDING_DESC> inputBindings,
+                       std::vector<DML_BINDING_DESC> outputBindings);
+
+  void ExecuteOperator(IDMLCompiledOperator* compiled_op,
+                       const std::vector<ID3D12Resource*>& input_resources,
+                       const std::vector<ID3D12Resource*>& output_resources,
+                       ID3D12Resource* persistent_resource = nullptr);
+
   void DummyPresent();
 
  private:
   void EnsureDxcInterfaces();
+  void SetDescriptorHeap(ID3D12DescriptorHeap* descriptorHeap);
 
  private:
   std::shared_ptr<D3d12Module> m_d3dModule;
@@ -188,12 +227,12 @@ class Device {
 #endif
   Microsoft::WRL::ComPtr<IDMLDevice1> m_dml;
   Microsoft::WRL::ComPtr<IDMLCommandRecorder> m_commandRecorder;
-  Microsoft::WRL::ComPtr<ID3D12CommandQueue> m_queue;
+  Microsoft::WRL::ComPtr<IDMLOperatorInitializer> m_initializer;
   Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_timestampHeap;
+  ID3D12DescriptorHeap* m_currentDescriptorHeap = nullptr;
   uint32_t m_timestampCapacity = 0;
   uint32_t m_timestampHeadIndex = 0;
   uint32_t m_timestampCount = 0;
-  Microsoft::WRL::ComPtr<ID3D12Fence> m_fence;
   D3D12_COMMAND_LIST_TYPE m_commandListType = D3D12_COMMAND_LIST_TYPE_COMPUTE;
   Microsoft::WRL::ComPtr<ID3D12CommandAllocator> m_commandAllocator;
   Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> m_commandList;
@@ -201,6 +240,8 @@ class Device {
   uint32_t m_dispatchRepeat = 1;
   std::vector<D3D12_RESOURCE_BARRIER> m_postDispatchBarriers;
   std::optional<D3D12_FEATURE_DATA_ARCHITECTURE1> m_architectureSupport;
+  std::unique_ptr<CommandQueue> m_queue;
+  std::unique_ptr<DescriptorPool> m_descriptorPool;
 
   DWORD m_callbackCookie = 0;
   bool m_restoreBackgroundProcessing = false;
@@ -221,5 +262,5 @@ class Device {
 #endif
 };
 
-} // namespace dml     // Added closing namespace
-} // namespace ctranslate2 // Added closing namespace
+}  // namespace dml
+}  // namespace ctranslate2

@@ -3,6 +3,7 @@
 #include "ctranslate2/ops/softmax.h"
 
 #include "dml/backend_dml.h"
+#include "dml/operator.h"
 #include "dml/operator_cache.h"
 
 namespace ctranslate2 {
@@ -107,23 +108,6 @@ void SoftMax::compute(const StorageView& input,
   // Get or create compiled operator from cache
   auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
-  // Get binding properties
-  auto binding_props = compiled_op->GetBindingProperties();
-
-  // Create binding table
-  Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-  DML_BINDING_TABLE_DESC binding_table_desc = {};
-  binding_table_desc.Dispatchable = compiled_op.Get();
-  binding_table_desc.CPUDescriptorHandle = {};  // Will be set by device
-  binding_table_desc.GPUDescriptorHandle = {};  // Will be set by device
-  binding_table_desc.SizeInDescriptors = binding_props.RequiredDescriptorCount;
-
-  HRESULT hr = dml_device->CreateBindingTable(&binding_table_desc,
-                                              IID_PPV_ARGS(&binding_table));
-  if (FAILED(hr)) {
-    throw std::runtime_error("Failed to create DML binding table");
-  }
-
   // Setup input binding
   DML_BUFFER_BINDING input_binding = {};
   input_binding.Buffer =
@@ -135,8 +119,6 @@ void SoftMax::compute(const StorageView& input,
   input_binding_desc.Type = DML_BINDING_TYPE_BUFFER;
   input_binding_desc.Desc = &input_binding;
 
-  binding_table->BindInputs(1, &input_binding_desc);
-
   // Setup output binding
   DML_BUFFER_BINDING output_binding = {};
   output_binding.Buffer = static_cast<ID3D12Resource*>(output.buffer());
@@ -147,35 +129,14 @@ void SoftMax::compute(const StorageView& input,
   output_binding_desc.Type = DML_BINDING_TYPE_BUFFER;
   output_binding_desc.Desc = &output_binding;
 
-  binding_table->BindOutputs(1, &output_binding_desc);
-
-  // Handle temporary resource if needed
-  if (binding_props.TemporaryResourceSize > 0) {
-    auto temp_buffer = device->CreatePreferredDeviceMemoryBuffer(
-        binding_props.TemporaryResourceSize);
-
-    DML_BUFFER_BINDING temp_binding = {};
-    temp_binding.Buffer = temp_buffer.Get();
-    temp_binding.Offset = 0;
-    temp_binding.SizeInBytes = binding_props.TemporaryResourceSize;
-
-    DML_BINDING_DESC temp_binding_desc = {};
-    temp_binding_desc.Type = DML_BINDING_TYPE_BUFFER;
-    temp_binding_desc.Desc = &temp_binding;
-
-    binding_table->BindTemporaryResource(&temp_binding_desc);
-
-    // Keep the buffer alive
-    device->KeepAliveUntilNextCommandListDispatch(temp_buffer);
-  }
-
-  // Record and dispatch the operation
-  device->RecordDispatch(compiled_op.Get(), binding_table.Get());
-  device->ExecuteCommandList();
+  std::vector<DML_BINDING_DESC> input_bindings = {input_binding_desc};
+  std::vector<DML_BINDING_DESC> output_bindings = {output_binding_desc};
+  compiled_op->Execute(input_bindings, output_bindings);
 
   // Handle lengths parameter if provided - mask output for out-of-sequence
   // positions
   if (lengths) {
+#if 0
     // Use primitives to zero out positions beyond sequence length
     auto output_data = output.data<T>();
     auto length_data = lengths->data<int32_t>();
@@ -190,6 +151,10 @@ void SoftMax::compute(const StorageView& input,
         }
       }
     }
+#else
+    throw std::invalid_argument(
+        "SoftMax with lengths parameter is not implemented for DirectML");
+#endif
   }
 }
 

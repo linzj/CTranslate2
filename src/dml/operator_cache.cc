@@ -1,6 +1,7 @@
 #include "operator_cache.h"
 #include "backend_dml.h"
 #include "common.h"
+#include "operator.h"
 
 #include <spdlog/spdlog.h>
 
@@ -349,10 +350,10 @@ std::string DMLOperatorCache::GenerateCacheKey(const DML_OPERATOR_DESC* op_desc,
   return key_stream.str();
 }
 
-Microsoft::WRL::ComPtr<IDMLCompiledOperator>
-DMLOperatorCache::GetOrCreateCompiledOperator(IDMLDevice* device,
-                                              const DML_OPERATOR_DESC* op_desc,
-                                              DML_EXECUTION_FLAGS flags) {
+Operator* DMLOperatorCache::GetOrCreateCompiledOperator(
+    Device* device,
+    const DML_OPERATOR_DESC* op_desc,
+    DML_EXECUTION_FLAGS flags) {
   std::string key;
   if (kCacheEnabled) {
     key = GenerateCacheKey(op_desc, flags);
@@ -365,7 +366,7 @@ DMLOperatorCache::GetOrCreateCompiledOperator(IDMLDevice* device,
         SPDLOG_DEBUG(("Cache HIT for key prefix: " +
                       key.substr(0, std::min(key.length(), (size_t)16)) + "\n")
                          .c_str());
-        return it->second;
+        return it->second.get();
       }
     }
     SPDLOG_DEBUG(("Cache MISS for key prefix: " +
@@ -373,14 +374,18 @@ DMLOperatorCache::GetOrCreateCompiledOperator(IDMLDevice* device,
                      .c_str());
   }
 
+  auto dml_device = device->DML();
   // Not found, create and compile. This is done outside the lock to avoid
   // holding it during potentially long operations.
   Microsoft::WRL::ComPtr<IDMLOperator> dml_operator;
-  THROW_IF_FAILED(device->CreateOperator(op_desc, IID_PPV_ARGS(&dml_operator)));
+  THROW_IF_FAILED(
+      dml_device->CreateOperator(op_desc, IID_PPV_ARGS(&dml_operator)));
 
   Microsoft::WRL::ComPtr<IDMLCompiledOperator> compiled_operator;
-  THROW_IF_FAILED(device->CompileOperator(dml_operator.Get(), flags,
-                                          IID_PPV_ARGS(&compiled_operator)));
+  THROW_IF_FAILED(dml_device->CompileOperator(
+      dml_operator.Get(), flags, IID_PPV_ARGS(&compiled_operator)));
+  std::unique_ptr<Operator> operator_obj =
+      std::make_unique<Operator>(device, std::move(compiled_operator));
 
   if (kCacheEnabled) {
     // Re-lock to insert into the cache
@@ -388,21 +393,21 @@ DMLOperatorCache::GetOrCreateCompiledOperator(IDMLDevice* device,
     // Double-check if another thread created it in the meantime
     auto it = _cache.find(key);
     if (it != _cache.end()) {
-      return it->second;  // Another thread created and inserted it
+      return it->second.get();  // Another thread created and inserted it
     }
-    _cache[key] = compiled_operator;
+    _cache[key] = std::move(operator_obj);
+    return _cache[key].get();
   }
-  return compiled_operator;
+  return operator_obj.release();
 }
 
 // Implementation of the global helper function
-Microsoft::WRL::ComPtr<IDMLCompiledOperator> GetOrCreateCompiledOperatorApi(
-    const DML_OPERATOR_DESC* op_desc,
-    DML_EXECUTION_FLAGS flags) {
+Operator* GetOrCreateCompiledOperatorApi(const DML_OPERATOR_DESC* op_desc,
+                                         DML_EXECUTION_FLAGS flags) {
   // Assumes get_dml_device() is available in ctranslate2::dml namespace
   // and returns the current IDMLDevice*.
   return DMLOperatorCache::instance().GetOrCreateCompiledOperator(
-      ctranslate2::dml::get_dml_device(), op_desc, flags);
+      get_device(), op_desc, flags);
 }
 
 }  // namespace dml

@@ -2,6 +2,7 @@
 
 #include "ctranslate2/ops/bias_add.h"
 #include "dml/backend_dml.h"
+#include "dml/operator.h"
 #include "dml/operator_cache.h"
 
 namespace ctranslate2 {
@@ -83,7 +84,7 @@ void BiasAdd::compute(const StorageView& value,
   output_tensor.Type = DML_TENSOR_TYPE_BUFFER;
   output_tensor.Desc = &output_desc;
 
-  Microsoft::WRL::ComPtr<IDMLCompiledOperator> compiled_op;
+  dml::Operator* compiled_op;
 
   if (!_activation_type) {
     // Simple addition without activation
@@ -200,10 +201,6 @@ void BiasAdd::compute(const StorageView& value,
 
       auto add_compiled_op = dml::GetOrCreateCompiledOperatorApi(&add_op_desc);
 
-      // Execute add operation first
-      Microsoft::WRL::ComPtr<IDMLBindingTable> add_binding_table;
-      dml_device->CreateBindingTable(nullptr, IID_PPV_ARGS(&add_binding_table));
-
       // Bind inputs for add
       DML_BUFFER_BINDING value_binding = {};
       value_binding.Buffer =
@@ -217,13 +214,9 @@ void BiasAdd::compute(const StorageView& value,
       bias_binding.Offset = 0;
       bias_binding.SizeInBytes = bias.size() * sizeof(T);
 
-      DML_BINDING_DESC add_input_bindings[2] = {};
-      add_input_bindings[0].Type = DML_BINDING_TYPE_BUFFER;
-      add_input_bindings[0].Desc = &value_binding;
-      add_input_bindings[1].Type = DML_BINDING_TYPE_BUFFER;
-      add_input_bindings[1].Desc = &bias_binding;
-
-      add_binding_table->BindInputs(2, add_input_bindings);
+      std::vector<DML_BINDING_DESC> add_input_bindings = {
+          {DML_BINDING_TYPE_BUFFER, &value_binding},
+          {DML_BINDING_TYPE_BUFFER, &bias_binding}};
 
       // Bind output for add
       DML_BUFFER_BINDING output_binding = {};
@@ -235,11 +228,8 @@ void BiasAdd::compute(const StorageView& value,
       add_output_binding_desc.Type = DML_BINDING_TYPE_BUFFER;
       add_output_binding_desc.Desc = &output_binding;
 
-      add_binding_table->BindOutputs(1, &add_output_binding_desc);
-
       // Execute add
-      device->RecordDispatch(add_compiled_op.Get(), add_binding_table.Get());
-      device->ExecuteCommandList();
+      add_compiled_op->Execute(add_input_bindings, {add_output_binding_desc});
 
       // Now create and execute activation operator
       DML_OPERATOR_DESC activation_op_desc = {};
@@ -272,10 +262,7 @@ void BiasAdd::compute(const StorageView& value,
     }
   }
 
-  // Create binding table for final operation
-  Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-  dml_device->CreateBindingTable(nullptr, IID_PPV_ARGS(&binding_table));
-
+  std::vector<DML_BINDING_DESC> input_bindings;
   if (!_activation_type || fused_activation) {
     // Bind inputs for add operation (or fused add+activation)
     DML_BUFFER_BINDING value_binding = {};
@@ -290,13 +277,10 @@ void BiasAdd::compute(const StorageView& value,
     bias_binding.Offset = 0;
     bias_binding.SizeInBytes = bias.size() * sizeof(T);
 
-    DML_BINDING_DESC input_bindings[2] = {};
-    input_bindings[0].Type = DML_BINDING_TYPE_BUFFER;
-    input_bindings[0].Desc = &value_binding;
-    input_bindings[1].Type = DML_BINDING_TYPE_BUFFER;
-    input_bindings[1].Desc = &bias_binding;
-
-    binding_table->BindInputs(2, input_bindings);
+    input_bindings.emplace_back(DML_BINDING_DESC{
+        .Type = DML_BINDING_TYPE_BUFFER, .Desc = &value_binding});
+    input_bindings.emplace_back(DML_BINDING_DESC{
+        .Type = DML_BINDING_TYPE_BUFFER, .Desc = &bias_binding});
   } else {
     // Bind input for activation operation (output from previous add is now
     // input)
@@ -308,8 +292,7 @@ void BiasAdd::compute(const StorageView& value,
     DML_BINDING_DESC input_binding_desc = {};
     input_binding_desc.Type = DML_BINDING_TYPE_BUFFER;
     input_binding_desc.Desc = &input_binding;
-
-    binding_table->BindInputs(1, &input_binding_desc);
+    input_bindings.push_back(input_binding_desc);
   }
 
   // Bind output
@@ -322,11 +305,7 @@ void BiasAdd::compute(const StorageView& value,
   output_binding_desc.Type = DML_BINDING_TYPE_BUFFER;
   output_binding_desc.Desc = &output_binding;
 
-  binding_table->BindOutputs(1, &output_binding_desc);
-
-  // Record and execute
-  device->RecordDispatch(compiled_op.Get(), binding_table.Get());
-  device->ExecuteCommandList();
+  compiled_op->Execute(input_bindings, {output_binding_desc});
 }
 
 #define DECLARE_IMPL(T)                                                       \

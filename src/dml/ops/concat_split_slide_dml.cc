@@ -4,6 +4,7 @@
 #include "ctranslate2/ops/split.h"
 
 #include "dml/backend_dml.h"
+#include "dml/operator.h"
 #include "dml/operator_cache.h"
 #include "type_dispatch.h"
 
@@ -120,13 +121,6 @@ void Concat::compute(const std::vector<const StorageView*>& inputs,
   // Get or create compiled operator
   auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
-  // Create binding table
-  Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-  DML_BINDING_TABLE_DESC binding_table_desc = {};
-  binding_table_desc.Dispatchable = compiled_op.Get();
-  device->DML()->CreateBindingTable(&binding_table_desc,
-                                    IID_PPV_ARGS(&binding_table));
-
   // Create input bindings
   std::vector<DML_BUFFER_BINDING> input_buffer_bindings;
   std::vector<DML_BINDING_DESC> input_binding_descs;
@@ -144,14 +138,7 @@ void Concat::compute(const std::vector<const StorageView*>& inputs,
   DML_BINDING_DESC output_binding_desc =
       create_binding_desc(output_buffer_binding);
 
-  // Bind tensors
-  binding_table->BindInputs(static_cast<UINT>(input_binding_descs.size()),
-                            input_binding_descs.data());
-  binding_table->BindOutputs(1, &output_binding_desc);
-
-  // Record and execute
-  device->RecordDispatch(compiled_op.Get(), binding_table.Get());
-  device->ExecuteCommandList();
+  compiled_op->Execute(input_binding_descs, {output_binding_desc});
 }
 
 template <Device D, typename T>
@@ -194,13 +181,6 @@ void Split::compute(const StorageView& input,
   // Get or create compiled operator
   auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
-  // Create binding table
-  Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-  DML_BINDING_TABLE_DESC binding_table_desc = {};
-  binding_table_desc.Dispatchable = compiled_op.Get();
-  device->DML()->CreateBindingTable(&binding_table_desc,
-                                    IID_PPV_ARGS(&binding_table));
-
   // Create input binding
   DML_BUFFER_BINDING input_buffer_binding = create_buffer_binding(input);
   DML_BINDING_DESC input_binding_desc =
@@ -218,14 +198,7 @@ void Split::compute(const StorageView& input,
         create_binding_desc(output_buffer_bindings.back()));
   }
 
-  // Bind tensors
-  binding_table->BindInputs(1, &input_binding_desc);
-  binding_table->BindOutputs(static_cast<UINT>(output_binding_descs.size()),
-                             output_binding_descs.data());
-
-  // Record and execute
-  device->RecordDispatch(compiled_op.Get(), binding_table.Get());
-  device->ExecuteCommandList();
+  compiled_op->Execute({input_binding_desc}, output_binding_descs);
 }
 
 template <Device D, typename T>
@@ -274,13 +247,6 @@ void Slide::compute(const StorageView& input,
   // Get or create compiled operator
   auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
-  // Create binding table
-  Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-  DML_BINDING_TABLE_DESC binding_table_desc = {};
-  binding_table_desc.Dispatchable = compiled_op.Get();
-  device->DML()->CreateBindingTable(&binding_table_desc,
-                                    IID_PPV_ARGS(&binding_table));
-
   // Create input binding
   DML_BUFFER_BINDING input_buffer_binding = create_buffer_binding(input);
   DML_BINDING_DESC input_binding_desc =
@@ -291,13 +257,7 @@ void Slide::compute(const StorageView& input,
   DML_BINDING_DESC output_binding_desc =
       create_binding_desc(output_buffer_binding);
 
-  // Bind tensors
-  binding_table->BindInputs(1, &input_binding_desc);
-  binding_table->BindOutputs(1, &output_binding_desc);
-
-  // Record and execute
-  device->RecordDispatch(compiled_op.Get(), binding_table.Get());
-  device->ExecuteCommandList();
+  compiled_op->Execute({input_binding_desc}, {output_binding_desc});
 }
 
 // Explicit template instantiations for DirectML

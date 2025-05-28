@@ -3,8 +3,8 @@
 
 #include <array>
 #include "dml/backend_dml.h"
+#include "dml/operator.h"
 #include "dml/operator_cache.h"
-
 
 namespace ctranslate2 {
 namespace ops {
@@ -137,22 +137,6 @@ void DequantizeAwq::dequantize(const StorageView& input,
   // Get compiled operator from cache
   auto compiledOp = dml::GetOrCreateCompiledOperatorApi(&opDesc);
 
-  // Get binding properties
-  auto bindingProps = compiledOp->GetBindingProperties();
-
-  // Create binding table
-  Microsoft::WRL::ComPtr<IDMLBindingTable> bindingTable;
-  DML_BINDING_TABLE_DESC bindingTableDesc = {};
-  bindingTableDesc.Dispatchable = compiledOp.Get();
-  bindingTableDesc.CPUDescriptorHandle = {};  // Will be filled by device
-  bindingTableDesc.GPUDescriptorHandle = {};  // Will be filled by device
-  bindingTableDesc.SizeInDescriptors = bindingProps.RequiredDescriptorCount;
-
-  if (FAILED(dml_device->CreateBindingTable(&bindingTableDesc,
-                                            IID_PPV_ARGS(&bindingTable)))) {
-    throw std::runtime_error("Failed to create DML binding table");
-  }
-
   // Create input bindings
   std::array<DML_BUFFER_BINDING, 3> inputBindings = {
       {{reinterpret_cast<ID3D12Resource*>(const_cast<void*>(input.buffer())), 0,
@@ -162,7 +146,7 @@ void DequantizeAwq::dequantize(const StorageView& input,
        {reinterpret_cast<ID3D12Resource*>(const_cast<void*>(zero.buffer())), 0,
         zero.size() * sizeof(InT)}}};
 
-  std::array<DML_BINDING_DESC, 3> inputBindingDescs = {
+  std::vector<DML_BINDING_DESC> inputBindingDescs = {
       {{DML_BINDING_TYPE_BUFFER, &inputBindings[0]},
        {DML_BINDING_TYPE_BUFFER, &inputBindings[1]},
        {DML_BINDING_TYPE_BUFFER, &inputBindings[2]}}};
@@ -174,47 +158,7 @@ void DequantizeAwq::dequantize(const StorageView& input,
   DML_BINDING_DESC outputBindingDesc = {DML_BINDING_TYPE_BUFFER,
                                         &outputBinding};
 
-  // Bind inputs and outputs
-  bindingTable->BindInputs(static_cast<UINT>(inputBindingDescs.size()),
-                           inputBindingDescs.data());
-  bindingTable->BindOutputs(1, &outputBindingDesc);
-
-  // Create temporary resource if needed
-  Microsoft::WRL::ComPtr<ID3D12Resource> tempResource;
-  DML_BUFFER_BINDING tempBinding = {};
-  DML_BINDING_DESC tempBindingDesc = {};
-
-  if (bindingProps.TemporaryResourceSize > 0) {
-    tempResource = device->CreatePreferredDeviceMemoryBuffer(
-        bindingProps.TemporaryResourceSize);
-    tempBinding = {tempResource.Get(), 0, bindingProps.TemporaryResourceSize};
-    tempBindingDesc = {DML_BINDING_TYPE_BUFFER, &tempBinding};
-    bindingTable->BindTemporaryResource(&tempBindingDesc);
-
-    // Keep resource alive until dispatch completes
-    device->KeepAliveUntilNextCommandListDispatch(tempResource);
-  }
-
-  // Create persistent resource if needed
-  Microsoft::WRL::ComPtr<ID3D12Resource> persistentResource;
-  DML_BUFFER_BINDING persistentBinding = {};
-  DML_BINDING_DESC persistentBindingDesc = {};
-
-  if (bindingProps.PersistentResourceSize > 0) {
-    persistentResource = device->CreatePreferredDeviceMemoryBuffer(
-        bindingProps.PersistentResourceSize);
-    persistentBinding = {persistentResource.Get(), 0,
-                         bindingProps.PersistentResourceSize};
-    persistentBindingDesc = {DML_BINDING_TYPE_BUFFER, &persistentBinding};
-    bindingTable->BindPersistentResource(&persistentBindingDesc);
-
-    // Keep resource alive until dispatch completes
-    device->KeepAliveUntilNextCommandListDispatch(persistentResource);
-  }
-
-  // Record dispatch and execute
-  device->RecordDispatch(compiledOp.Get(), bindingTable.Get());
-  device->ExecuteCommandList();
+  compiledOp->Execute(inputBindingDescs, {outputBindingDesc});
 }
 
 #define DECLARE_IMPL(T)                                              \

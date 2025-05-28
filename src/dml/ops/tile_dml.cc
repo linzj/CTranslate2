@@ -2,6 +2,7 @@
 #include "ctranslate2/ops/tile.h"
 
 #include "dml/backend_dml.h"
+#include "dml/operator.h"
 #include "dml/operator_cache.h"
 #include "type_dispatch.h"
 
@@ -95,32 +96,6 @@ void Tile::compute(const StorageView& input,
   // Get or create compiled operator from cache
   auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
-  // Get binding properties
-  auto binding_props = compiled_op->GetBindingProperties();
-
-  // Create binding table
-  Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-  DML_BINDING_TABLE_DESC binding_table_desc = {};
-  binding_table_desc.Dispatchable = compiled_op.Get();
-  binding_table_desc
-      .CPUDescriptorHandle = {};  // Device will handle descriptor allocation
-  binding_table_desc.GPUDescriptorHandle = {};
-  binding_table_desc.SizeInDescriptors = binding_props.RequiredDescriptorCount;
-
-  HRESULT hr = dml_device->CreateBindingTable(&binding_table_desc,
-                                              IID_PPV_ARGS(&binding_table));
-  if (FAILED(hr)) {
-    throw std::runtime_error(
-        "Failed to create DirectML binding table for Tile operation");
-  }
-
-  // Create temporary resource if needed
-  Microsoft::WRL::ComPtr<ID3D12Resource> temp_resource;
-  if (binding_props.TemporaryResourceSize > 0) {
-    temp_resource = device->CreatePreferredDeviceMemoryBuffer(
-        binding_props.TemporaryResourceSize);
-  }
-
   // Bind input buffer
   DML_BUFFER_BINDING input_binding = {};
   input_binding.Buffer =
@@ -132,8 +107,6 @@ void Tile::compute(const StorageView& input,
   input_binding_desc.Type = DML_BINDING_TYPE_BUFFER;
   input_binding_desc.Desc = &input_binding;
 
-  binding_table->BindInputs(1, &input_binding_desc);
-
   // Bind output buffer
   DML_BUFFER_BINDING output_binding = {};
   output_binding.Buffer = static_cast<ID3D12Resource*>(output.buffer());
@@ -143,35 +116,10 @@ void Tile::compute(const StorageView& input,
   DML_BINDING_DESC output_binding_desc = {};
   output_binding_desc.Type = DML_BINDING_TYPE_BUFFER;
   output_binding_desc.Desc = &output_binding;
+  std::vector<DML_BINDING_DESC> output_bindings = {output_binding_desc};
+  std::vector<DML_BINDING_DESC> input_bindings = {input_binding_desc};
 
-  binding_table->BindOutputs(1, &output_binding_desc);
-
-  // Bind temporary resource if needed
-  if (temp_resource) {
-    DML_BUFFER_BINDING temp_binding = {};
-    temp_binding.Buffer = temp_resource.Get();
-    temp_binding.Offset = 0;
-    temp_binding.SizeInBytes = binding_props.TemporaryResourceSize;
-
-    DML_BINDING_DESC temp_binding_desc = {};
-    temp_binding_desc.Type = DML_BINDING_TYPE_BUFFER;
-    temp_binding_desc.Desc = &temp_binding;
-
-    binding_table->BindTemporaryResource(&temp_binding_desc);
-  }
-
-  // Keep resources alive until dispatch completes
-  if (temp_resource) {
-    device->KeepAliveUntilNextCommandListDispatch(std::move(temp_resource));
-  }
-  device->KeepAliveUntilNextCommandListDispatch(compiled_op);
-  device->KeepAliveUntilNextCommandListDispatch(binding_table);
-
-  // Record dispatch operation
-  device->RecordDispatch(compiled_op.Get(), binding_table.Get());
-
-  // Execute the command list
-  device->ExecuteCommandList();
+  compiled_op->Execute(input_bindings, output_bindings);
 }
 
 #define DECLARE_IMPL(T)                                 \
