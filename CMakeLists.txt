@@ -254,6 +254,7 @@ if(WITH_DIRECTML)
     src/dml/ops/mean_dml.cc
     src/dml/ops/nccl_ops_dml.cc
     src/dml/ops/topp_mask_dml.cc
+    src/dml/ops/awq/dequantize_dml.cc
   )
 endif()
 
