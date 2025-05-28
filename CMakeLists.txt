@@ -253,6 +253,7 @@ if(WITH_DIRECTML)
     src/dml/ops/layer_norm_dml.cc
     src/dml/ops/mean_dml.cc
     src/dml/ops/nccl_ops_dml.cc
+    src/dml/ops/topp_mask_dml.cc
   )
 endif()
 
