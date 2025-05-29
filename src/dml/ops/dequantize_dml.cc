@@ -501,15 +501,7 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
     // Copy current output to final output
     command_list->CopyBufferRegion(y_buffer, 0, current_output.Get(), 0,
                                    y.size() * sizeof(float));
-  }
-  device->ExecuteCommandList();
-
-  // Keep temporary resources alive until dispatch completes
-  device->KeepAliveUntilNextCommandListDispatch(cast_output);
-  device->KeepAliveUntilNextCommandListDispatch(combined_scale);
-  device->KeepAliveUntilNextCommandListDispatch(divide_output);
-  if (bias_output) {
-    device->KeepAliveUntilNextCommandListDispatch(bias_output);
+    device->ExecuteCommandList();
   }
 }
 

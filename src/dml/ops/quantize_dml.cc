@@ -321,19 +321,6 @@ void Quantize::quantize(const StorageView& input,
 
     cast_compiled_op->Execute({input_bind}, {output_bind});
   }
-
-  // Execute all commands
-  device->ExecuteCommandList();
-
-  // Keep intermediate buffers alive
-  device->KeepAliveUntilNextCommandListDispatch(std::move(abs_buffer));
-  device->KeepAliveUntilNextCommandListDispatch(std::move(max_buffer));
-  device->KeepAliveUntilNextCommandListDispatch(std::move(scale_factor_buffer));
-  device->KeepAliveUntilNextCommandListDispatch(std::move(scaled_buffer));
-  device->KeepAliveUntilNextCommandListDispatch(std::move(rounded_buffer));
-  device->KeepAliveUntilNextCommandListDispatch(std::move(const_127_buffer));
-  device->KeepAliveUntilNextCommandListDispatch(
-      std::move(const_epsilon_buffer));
 }
 
 // Explicit template instantiation

@@ -429,10 +429,13 @@ Device::CreatePreferredDeviceMemoryBuffer(uint64_t sizeInBytes,
                                           D3D12_RESOURCE_FLAGS resourceFlags,
                                           uint64_t alignment,
                                           D3D12_HEAP_FLAGS heapFlags) {
-  return m_useCustomHeaps ? CreateCustomBuffer(sizeInBytes, resourceFlags,
-                                               alignment, heapFlags)
-                          : CreateDefaultBuffer(sizeInBytes, resourceFlags,
-                                                alignment, heapFlags);
+  auto return_value =
+      m_useCustomHeaps
+          ? CreateCustomBuffer(sizeInBytes, resourceFlags, alignment, heapFlags)
+          : CreateDefaultBuffer(sizeInBytes, resourceFlags, alignment,
+                                heapFlags);
+  KeepAliveUntilNextCommandListDispatch(return_value);
+  return return_value;
 }
 
 Microsoft::WRL::ComPtr<ID3D12Resource> Device::CreateCustomBuffer(
