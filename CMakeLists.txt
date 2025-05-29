@@ -262,6 +262,7 @@ if(WITH_DIRECTML)
     src/dml/ops/nccl_ops_dml.cc
     src/dml/ops/topp_mask_dml.cc
     src/dml/ops/conv1d_dml.cc
+    src/dml/ops/rotary_dml.cc
     src/dml/ops/awq/dequantize_dml.cc
     src/dml/ops/awq/gemv_dml.cc
     src/dml/ops/awq/gemm_dml.cc
