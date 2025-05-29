@@ -506,6 +506,8 @@ ComPtr<ID3D12Resource> Device::CreateReadbackBuffer(
 
 void Device::WaitForGpuWorkToComplete() {
   m_queue->GetCurrentCompletionEvent().WaitForSignal();
+
+  m_descriptorPool->Trim();
 }
 
 void Device::RecordDispatch(const char* name,
