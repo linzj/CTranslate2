@@ -250,6 +250,8 @@ if(WITH_DIRECTML)
     src/dml/operator.cc
     src/dml/operator.h
     src/dml/primitives_dml.cc
+    src/dml/dml_utils.cc
+    src/dml/dml_utils.h
     src/dml/ops/quantize_dml.cc
     src/dml/ops/dequantize_dml.cc
     src/dml/ops/concat_split_slide_dml.cc

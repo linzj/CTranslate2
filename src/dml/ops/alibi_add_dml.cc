@@ -3,74 +3,16 @@
 #ifdef CT2_WITH_DIRECTML
 #include "ctranslate2/utils.h"
 #include "dml/backend_dml.h"
+#include "dml/dml_utils.h"  // Added for centralized DML utilities
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
 
 namespace ctranslate2 {
 namespace ops {
 
-// Helper to convert DataType to DML_TENSOR_DATA_TYPE
-static DML_TENSOR_DATA_TYPE to_dml_data_type(DataType type) {
-  switch (type) {
-    case DataType::FLOAT32:
-      return DML_TENSOR_DATA_TYPE_FLOAT32;
-    case DataType::FLOAT16:
-      return DML_TENSOR_DATA_TYPE_FLOAT16;
-    default:
-      THROW_INVALID_ARGUMENT(
-          "Unsupported data type for DirectML in AlibiAdd: " +
-          dtype_name(type));
-  }
-}
-
-// Helper structure for tensor descriptions
-struct DmlTensorDescBundle {
-  DML_BUFFER_TENSOR_DESC buffer_desc{};
-  DML_TENSOR_DESC tensor_desc{};
-  std::vector<UINT> sizes_vec;
-  std::vector<UINT> strides_vec;
-
-  // Constructor for standard tensors
-  DmlTensorDescBundle(const StorageView& storage) {
-    const auto& shape = storage.shape();
-    const auto dtype = storage.dtype();
-    const size_t item_size = storage.item_size();
-
-    sizes_vec.resize(shape.size());
-    for (size_t i = 0; i < shape.size(); ++i) {
-      sizes_vec[i] = static_cast<UINT>(shape[i]);
-    }
-
-    buffer_desc.DataType = to_dml_data_type(dtype);
-    buffer_desc.DimensionCount = static_cast<UINT>(sizes_vec.size());
-    buffer_desc.Sizes = sizes_vec.data();
-    buffer_desc.Strides = nullptr;  // Contiguous by default
-    buffer_desc.TotalTensorSizeInBytes = storage.size() * storage.item_size();
-    buffer_desc.GuaranteedBaseOffsetAlignment = 0;
-
-    tensor_desc.Type = DML_TENSOR_TYPE_BUFFER;
-    tensor_desc.Desc = &buffer_desc;
-  }
-
-  // Constructor for broadcasted views
-  DmlTensorDescBundle(DataType data_type,
-                      const std::vector<UINT>& sizes,
-                      const std::vector<UINT>& strides,
-                      UINT64 total_size_bytes) {
-    sizes_vec = sizes;
-    strides_vec = strides;
-
-    buffer_desc.DataType = to_dml_data_type(data_type);
-    buffer_desc.DimensionCount = static_cast<UINT>(sizes_vec.size());
-    buffer_desc.Sizes = sizes_vec.data();
-    buffer_desc.Strides = strides_vec.data();
-    buffer_desc.TotalTensorSizeInBytes = total_size_bytes;
-    buffer_desc.GuaranteedBaseOffsetAlignment = 0;
-
-    tensor_desc.Type = DML_TENSOR_TYPE_BUFFER;
-    tensor_desc.Desc = &buffer_desc;
-  }
-};
+// Local to_dml_data_type and DmlTensorDescBundle are removed.
+// They will be replaced by ctranslate2::dml::utils::get_dml_data_type
+// and ctranslate2::dml::utils::DmlTensorDescBundle respectively.
 
 template <Device D, typename T>
 void AlibiAdd::compute(const StorageView& input,
@@ -97,8 +39,8 @@ void AlibiAdd::compute(const StorageView& input,
   output.resize_as(input);
 
   // Create tensor descriptors
-  DmlTensorDescBundle input_desc(input);
-  DmlTensorDescBundle output_desc(output);
+  dml::utils::DmlTensorDescBundle input_desc(input);
+  dml::utils::DmlTensorDescBundle output_desc(output);
 
   // Create broadcasted alibi view
   std::vector<UINT> alibi_sizes = {1,  // Batch (broadcasted)
@@ -113,14 +55,15 @@ void AlibiAdd::compute(const StorageView& input,
       1   // Stride within head
   };
 
-  DmlTensorDescBundle alibi_view_desc(alibi.dtype(), alibi_sizes, alibi_strides,
-                                      alibi.size() * alibi.item_size());
+  dml::utils::DmlTensorDescBundle alibi_view_desc(
+      alibi.dtype(), alibi_sizes, &alibi_strides,  // Pass pointer to strides
+      alibi.size() * alibi.item_size());
 
   // Create element-wise add operator
   DML_ELEMENT_WISE_ADD_OPERATOR_DESC add_desc = {};
-  add_desc.ATensor = &input_desc.tensor_desc;
-  add_desc.BTensor = &alibi_view_desc.tensor_desc;
-  add_desc.OutputTensor = &output_desc.tensor_desc;
+  add_desc.ATensor = &input_desc.get_tensor_desc();
+  add_desc.BTensor = &alibi_view_desc.get_tensor_desc();
+  add_desc.OutputTensor = &output_desc.get_tensor_desc();
 
   DML_OPERATOR_DESC op_desc = {DML_OPERATOR_ELEMENT_WISE_ADD, &add_desc};
 

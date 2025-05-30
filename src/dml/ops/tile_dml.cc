@@ -2,6 +2,7 @@
 #include "ctranslate2/ops/tile.h"
 
 #include "dml/backend_dml.h"
+#include "dml/dml_utils.h"
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
 #include "type_dispatch.h"
@@ -20,72 +21,35 @@ void Tile::compute(const StorageView& input,
   auto* device = dml::get_device();
   auto* dml_device = dml::get_dml_device();
 
-  // Convert ctranslate2 data type to DML data type
-  DML_TENSOR_DATA_TYPE dml_data_type;
-  if constexpr (std::is_same_v<T, float>) {
-    dml_data_type = DML_TENSOR_DATA_TYPE_FLOAT32;
-  } else if constexpr (std::is_same_v<T, ctranslate2::float16_t>) {
-    dml_data_type = DML_TENSOR_DATA_TYPE_FLOAT16;
-  } else if constexpr (std::is_same_v<T, int32_t>) {
-    dml_data_type = DML_TENSOR_DATA_TYPE_INT32;
-  } else if constexpr (std::is_same_v<T, int16_t>) {
-    dml_data_type = DML_TENSOR_DATA_TYPE_INT16;
-  } else if constexpr (std::is_same_v<T, int8_t>) {
-    dml_data_type = DML_TENSOR_DATA_TYPE_INT8;
-  } else if constexpr (std::is_same_v<T, ctranslate2::bfloat16_t>) {
+  if constexpr (std::is_same_v<T, ctranslate2::bfloat16_t>) {
     throw std::invalid_argument(
         "DirectML does not support bfloat16 for Tile operation");
-  } else {
-    static_assert(sizeof(T) == 0,
-                  "Unsupported data type for DirectML Tile operation");
   }
 
-  // Set up input tensor descriptor
-  // Input shape: [outer_size, inner_size]
-  UINT input_sizes[2] = {static_cast<UINT>(outer_size),
-                         static_cast<UINT>(inner_size)};
+  std::vector<UINT> input_dims_vec = {static_cast<UINT>(outer_size),
+                                      static_cast<UINT>(inner_size)};
+  dml::utils::DmlTensorDescBundle input_desc_bundle(
+      input.dtype(), input_dims_vec,
+      nullptr,                    // Default strides
+      input.size() * sizeof(T));  // Corrected: removed 5th arg
+  const DML_TENSOR_DESC& dml_input_desc_ref =
+      input_desc_bundle.get_tensor_desc();
 
-  DML_BUFFER_TENSOR_DESC input_buffer_desc = {};
-  input_buffer_desc.DataType = dml_data_type;
-  input_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-  input_buffer_desc.DimensionCount = 2;
-  input_buffer_desc.Sizes = input_sizes;
-  input_buffer_desc.Strides = nullptr;  // Use default strides
-  input_buffer_desc.TotalTensorSizeInBytes = input.size() * sizeof(T);
-  input_buffer_desc.GuaranteedBaseOffsetAlignment =
-      DML_MINIMUM_BUFFER_TENSOR_ALIGNMENT;
+  std::vector<UINT> output_dims_vec = {
+      static_cast<UINT>(outer_size),
+      static_cast<UINT>(inner_size * _num_tiles)};
+  dml::utils::DmlTensorDescBundle output_desc_bundle(
+      output.dtype(), output_dims_vec,
+      nullptr,                     // Default strides
+      output.size() * sizeof(T));  // Corrected: removed 5th arg
+  const DML_TENSOR_DESC& dml_output_desc_ref =
+      output_desc_bundle.get_tensor_desc();
 
-  DML_TENSOR_DESC input_tensor_desc = {};
-  input_tensor_desc.Type = DML_TENSOR_TYPE_BUFFER;
-  input_tensor_desc.Desc = &input_buffer_desc;
-
-  // Set up output tensor descriptor
-  // Output shape: [outer_size, inner_size * _num_tiles]
-  UINT output_sizes[2] = {static_cast<UINT>(outer_size),
-                          static_cast<UINT>(inner_size * _num_tiles)};
-
-  DML_BUFFER_TENSOR_DESC output_buffer_desc = {};
-  output_buffer_desc.DataType = dml_data_type;
-  output_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-  output_buffer_desc.DimensionCount = 2;
-  output_buffer_desc.Sizes = output_sizes;
-  output_buffer_desc.Strides = nullptr;
-  output_buffer_desc.TotalTensorSizeInBytes = output.size() * sizeof(T);
-  output_buffer_desc.GuaranteedBaseOffsetAlignment =
-      DML_MINIMUM_BUFFER_TENSOR_ALIGNMENT;
-
-  DML_TENSOR_DESC output_tensor_desc = {};
-  output_tensor_desc.Type = DML_TENSOR_TYPE_BUFFER;
-  output_tensor_desc.Desc = &output_buffer_desc;
-
-  // Set up repeats array: repeat 1 time along outer dim, _num_tiles times along
-  // inner dim
   UINT repeats[2] = {1, static_cast<UINT>(_num_tiles)};
 
-  // Create tile operator descriptor
   DML_TILE_OPERATOR_DESC tile_desc = {};
-  tile_desc.InputTensor = &input_tensor_desc;
-  tile_desc.OutputTensor = &output_tensor_desc;
+  tile_desc.InputTensor = &dml_input_desc_ref;
+  tile_desc.OutputTensor = &dml_output_desc_ref;
   tile_desc.RepeatsCount = 2;
   tile_desc.Repeats = repeats;
 
@@ -93,33 +57,28 @@ void Tile::compute(const StorageView& input,
   op_desc.Type = DML_OPERATOR_TILE;
   op_desc.Desc = &tile_desc;
 
-  // Get or create compiled operator from cache
   auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
-  // Bind input buffer
-  DML_BUFFER_BINDING input_binding = {};
-  input_binding.Buffer =
-      static_cast<ID3D12Resource*>(const_cast<void*>(input.buffer()));
-  input_binding.Offset = 0;
-  input_binding.SizeInBytes = input.size() * sizeof(T);
+  DML_BUFFER_BINDING input_buffer_binding_storage =
+      dml::utils::create_buffer_binding(
+          reinterpret_cast<ID3D12Resource*>(const_cast<void*>(input.buffer())),
+          0, input_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+  DML_BINDING_DESC input_binding_desc_for_op =
+      dml::utils::create_binding_desc(&input_buffer_binding_storage);
 
-  DML_BINDING_DESC input_binding_desc = {};
-  input_binding_desc.Type = DML_BINDING_TYPE_BUFFER;
-  input_binding_desc.Desc = &input_binding;
+  DML_BUFFER_BINDING output_buffer_binding_storage =
+      dml::utils::create_buffer_binding(
+          reinterpret_cast<ID3D12Resource*>(output.buffer()), 0,
+          output_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+  DML_BINDING_DESC output_binding_desc_for_op =
+      dml::utils::create_binding_desc(&output_buffer_binding_storage);
 
-  // Bind output buffer
-  DML_BUFFER_BINDING output_binding = {};
-  output_binding.Buffer = static_cast<ID3D12Resource*>(output.buffer());
-  output_binding.Offset = 0;
-  output_binding.SizeInBytes = output.size() * sizeof(T);
+  std::vector<DML_BINDING_DESC> bindings_for_op_inputs = {
+      input_binding_desc_for_op};
+  std::vector<DML_BINDING_DESC> bindings_for_op_outputs = {
+      output_binding_desc_for_op};
 
-  DML_BINDING_DESC output_binding_desc = {};
-  output_binding_desc.Type = DML_BINDING_TYPE_BUFFER;
-  output_binding_desc.Desc = &output_binding;
-  std::vector<DML_BINDING_DESC> output_bindings = {output_binding_desc};
-  std::vector<DML_BINDING_DESC> input_bindings = {input_binding_desc};
-
-  compiled_op->Execute(input_bindings, output_bindings);
+  compiled_op->Execute(bindings_for_op_inputs, bindings_for_op_outputs);
 }
 
 #define DECLARE_IMPL(T)                                 \

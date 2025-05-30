@@ -4,76 +4,13 @@
 #include "ctranslate2/ops/split.h"
 
 #include "dml/backend_dml.h"
+#include "dml/dml_utils.h"  // Added for centralized DML utilities
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
 #include "type_dispatch.h"
 
 namespace ctranslate2 {
 namespace ops {
-
-namespace {
-// Helper to convert ctranslate2 DataType to DML_TENSOR_DATA_TYPE
-DML_TENSOR_DATA_TYPE get_dml_data_type(DataType dtype) {
-  switch (dtype) {
-    case DataType::FLOAT32:
-      return DML_TENSOR_DATA_TYPE_FLOAT32;
-    case DataType::FLOAT16:
-      return DML_TENSOR_DATA_TYPE_FLOAT16;
-    case DataType::INT32:
-      return DML_TENSOR_DATA_TYPE_INT32;
-    case DataType::INT16:
-      return DML_TENSOR_DATA_TYPE_INT16;
-    case DataType::INT8:
-      return DML_TENSOR_DATA_TYPE_INT8;
-    default:
-      throw std::runtime_error("Unsupported data type for DirectML");
-  }
-}
-
-// Helper to create DML buffer tensor descriptor
-DML_BUFFER_TENSOR_DESC create_buffer_tensor_desc(const StorageView& storage) {
-  std::vector<UINT> sizes(storage.rank());
-  for (dim_t i = 0; i < storage.rank(); ++i) {
-    sizes[i] = static_cast<UINT>(storage.dim(i));
-  }
-
-  DML_BUFFER_TENSOR_DESC desc = {};
-  desc.DataType = get_dml_data_type(storage.dtype());
-  desc.Flags = DML_TENSOR_FLAG_NONE;
-  desc.DimensionCount = static_cast<UINT>(storage.rank());
-  desc.Sizes = sizes.data();
-  desc.Strides = nullptr;  // Use default strides
-  desc.TotalTensorSizeInBytes = storage.size() * storage.item_size();
-  desc.GuaranteedBaseOffsetAlignment = DML_MINIMUM_BUFFER_TENSOR_ALIGNMENT;
-  return desc;
-}
-
-// Helper to create tensor descriptor
-DML_TENSOR_DESC create_tensor_desc(const DML_BUFFER_TENSOR_DESC& buffer_desc) {
-  DML_TENSOR_DESC desc = {};
-  desc.Type = DML_TENSOR_TYPE_BUFFER;
-  desc.Desc = &buffer_desc;
-  return desc;
-}
-
-// Helper to create buffer binding
-DML_BUFFER_BINDING create_buffer_binding(const StorageView& storage) {
-  DML_BUFFER_BINDING binding = {};
-  binding.Buffer =
-      reinterpret_cast<ID3D12Resource*>(const_cast<void*>(storage.buffer()));
-  binding.Offset = 0;
-  binding.SizeInBytes = storage.size() * storage.item_size();
-  return binding;
-}
-
-// Helper to create binding descriptor
-DML_BINDING_DESC create_binding_desc(const DML_BUFFER_BINDING& buffer_binding) {
-  DML_BINDING_DESC desc = {};
-  desc.Type = DML_BINDING_TYPE_BUFFER;
-  desc.Desc = &buffer_binding;
-  return desc;
-}
-}  // namespace
 
 template <Device D, typename T>
 void Concat::compute(const std::vector<const StorageView*>& inputs,
@@ -92,26 +29,29 @@ void Concat::compute(const std::vector<const StorageView*>& inputs,
 
   auto* device = dml::get_device();
 
-  // Create input tensor descriptors
-  std::vector<DML_BUFFER_TENSOR_DESC> input_buffer_descs;
-  std::vector<DML_TENSOR_DESC> input_tensor_descs;
-  input_buffer_descs.reserve(inputs.size());
-  input_tensor_descs.reserve(inputs.size());
+  // Create input tensor descriptors using DmlTensorDescBundle
+  std::vector<dml::utils::DmlTensorDescBundle> input_desc_bundles;
+  std::vector<DML_TENSOR_DESC>
+      input_tensor_descs_for_op;  // For DML_JOIN_OPERATOR_DESC
+  input_desc_bundles.reserve(inputs.size());
+  input_tensor_descs_for_op.reserve(inputs.size());
 
-  for (const auto* input : inputs) {
-    input_buffer_descs.push_back(create_buffer_tensor_desc(*input));
-    input_tensor_descs.push_back(create_tensor_desc(input_buffer_descs.back()));
+  for (const auto* input_sv : inputs) {
+    input_desc_bundles.emplace_back(*input_sv);
+    input_tensor_descs_for_op.push_back(
+        input_desc_bundles.back().get_tensor_desc());
   }
 
   // Create output tensor descriptor
-  DML_BUFFER_TENSOR_DESC output_buffer_desc = create_buffer_tensor_desc(output);
-  DML_TENSOR_DESC output_tensor_desc = create_tensor_desc(output_buffer_desc);
+  dml::utils::DmlTensorDescBundle output_desc_bundle(output);
+  const DML_TENSOR_DESC& output_tensor_desc_ref =
+      output_desc_bundle.get_tensor_desc();
 
   // Create JOIN operator descriptor
   DML_JOIN_OPERATOR_DESC join_desc = {};
   join_desc.InputCount = static_cast<UINT>(inputs.size());
-  join_desc.InputTensors = input_tensor_descs.data();
-  join_desc.OutputTensor = &output_tensor_desc;
+  join_desc.InputTensors = input_tensor_descs_for_op.data();
+  join_desc.OutputTensor = &output_tensor_desc_ref;
   join_desc.Axis = static_cast<UINT>(axis);
 
   DML_OPERATOR_DESC op_desc = {};
@@ -122,23 +62,31 @@ void Concat::compute(const std::vector<const StorageView*>& inputs,
   auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
   // Create input bindings
-  std::vector<DML_BUFFER_BINDING> input_buffer_bindings;
-  std::vector<DML_BINDING_DESC> input_binding_descs;
-  input_buffer_bindings.reserve(inputs.size());
-  input_binding_descs.reserve(inputs.size());
+  std::vector<DML_BUFFER_BINDING>
+      input_buffer_bindings_storage;  // To keep DML_BUFFER_BINDING alive
+  std::vector<DML_BINDING_DESC> input_binding_descs_for_op;
+  input_buffer_bindings_storage.reserve(inputs.size());
+  input_binding_descs_for_op.reserve(inputs.size());
 
-  for (const auto* input : inputs) {
-    input_buffer_bindings.push_back(create_buffer_binding(*input));
-    input_binding_descs.push_back(
-        create_binding_desc(input_buffer_bindings.back()));
+  for (const auto* input_sv : inputs) {
+    input_buffer_bindings_storage.push_back(dml::utils::create_buffer_binding(
+        reinterpret_cast<ID3D12Resource*>(
+            const_cast<void*>(input_sv->buffer())),
+        0, input_sv->size() * input_sv->item_size()));
+    input_binding_descs_for_op.push_back(
+        dml::utils::create_binding_desc(&input_buffer_bindings_storage.back()));
   }
 
   // Create output binding
-  DML_BUFFER_BINDING output_buffer_binding = create_buffer_binding(output);
-  DML_BINDING_DESC output_binding_desc =
-      create_binding_desc(output_buffer_binding);
+  DML_BUFFER_BINDING output_buffer_binding_storage =
+      dml::utils::create_buffer_binding(
+          reinterpret_cast<ID3D12Resource*>(output.buffer()), 0,
+          output.size() * output.item_size());
+  DML_BINDING_DESC output_binding_desc_for_op =
+      dml::utils::create_binding_desc(&output_buffer_binding_storage);
 
-  compiled_op->Execute(input_binding_descs, {output_binding_desc});
+  compiled_op->Execute(input_binding_descs_for_op,
+                       {output_binding_desc_for_op});
 }
 
 template <Device D, typename T>
@@ -152,26 +100,27 @@ void Split::compute(const StorageView& input,
   auto* device = dml::get_device();
 
   // Create input tensor descriptor
-  DML_BUFFER_TENSOR_DESC input_buffer_desc = create_buffer_tensor_desc(input);
-  DML_TENSOR_DESC input_tensor_desc = create_tensor_desc(input_buffer_desc);
+  dml::utils::DmlTensorDescBundle input_desc_bundle(input);
+  const DML_TENSOR_DESC& input_tensor_desc_ref =
+      input_desc_bundle.get_tensor_desc();
 
   // Create output tensor descriptors
-  std::vector<DML_BUFFER_TENSOR_DESC> output_buffer_descs;
-  std::vector<DML_TENSOR_DESC> output_tensor_descs;
-  output_buffer_descs.reserve(outputs.size());
-  output_tensor_descs.reserve(outputs.size());
+  std::vector<dml::utils::DmlTensorDescBundle> output_desc_bundles;
+  std::vector<DML_TENSOR_DESC> output_tensor_descs_for_op;
+  output_desc_bundles.reserve(outputs.size());
+  output_tensor_descs_for_op.reserve(outputs.size());
 
-  for (const auto* output : outputs) {
-    output_buffer_descs.push_back(create_buffer_tensor_desc(*output));
-    output_tensor_descs.push_back(
-        create_tensor_desc(output_buffer_descs.back()));
+  for (const auto* output_sv : outputs) {
+    output_desc_bundles.emplace_back(*output_sv);
+    output_tensor_descs_for_op.push_back(
+        output_desc_bundles.back().get_tensor_desc());
   }
 
   // Create SPLIT operator descriptor
   DML_SPLIT_OPERATOR_DESC split_desc = {};
-  split_desc.InputTensor = &input_tensor_desc;
+  split_desc.InputTensor = &input_tensor_desc_ref;
   split_desc.OutputCount = static_cast<UINT>(outputs.size());
-  split_desc.OutputTensors = output_tensor_descs.data();
+  split_desc.OutputTensors = output_tensor_descs_for_op.data();
   split_desc.Axis = static_cast<UINT>(axis);
 
   DML_OPERATOR_DESC op_desc = {};
@@ -182,23 +131,30 @@ void Split::compute(const StorageView& input,
   auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
   // Create input binding
-  DML_BUFFER_BINDING input_buffer_binding = create_buffer_binding(input);
-  DML_BINDING_DESC input_binding_desc =
-      create_binding_desc(input_buffer_binding);
+  DML_BUFFER_BINDING input_buffer_binding_storage =
+      dml::utils::create_buffer_binding(
+          reinterpret_cast<ID3D12Resource*>(const_cast<void*>(input.buffer())),
+          0, input.size() * input.item_size());
+  DML_BINDING_DESC input_binding_desc_for_op =
+      dml::utils::create_binding_desc(&input_buffer_binding_storage);
 
   // Create output bindings
-  std::vector<DML_BUFFER_BINDING> output_buffer_bindings;
-  std::vector<DML_BINDING_DESC> output_binding_descs;
-  output_buffer_bindings.reserve(outputs.size());
-  output_binding_descs.reserve(outputs.size());
+  std::vector<DML_BUFFER_BINDING> output_buffer_bindings_storage;  // Keep alive
+  std::vector<DML_BINDING_DESC> output_binding_descs_for_op;
+  output_buffer_bindings_storage.reserve(outputs.size());
+  output_binding_descs_for_op.reserve(outputs.size());
 
-  for (const auto* output : outputs) {
-    output_buffer_bindings.push_back(create_buffer_binding(*output));
-    output_binding_descs.push_back(
-        create_binding_desc(output_buffer_bindings.back()));
+  for (const auto* output_sv : outputs) {
+    output_buffer_bindings_storage.push_back(dml::utils::create_buffer_binding(
+        reinterpret_cast<ID3D12Resource*>(
+            const_cast<void*>(output_sv->buffer())),
+        0, output_sv->size() * output_sv->item_size()));
+    output_binding_descs_for_op.push_back(dml::utils::create_binding_desc(
+        &output_buffer_bindings_storage.back()));
   }
 
-  compiled_op->Execute({input_binding_desc}, output_binding_descs);
+  compiled_op->Execute({input_binding_desc_for_op},
+                       output_binding_descs_for_op);
 }
 
 template <Device D, typename T>
@@ -210,12 +166,14 @@ void Slide::compute(const StorageView& input,
   auto* device = dml::get_device();
 
   // Create input tensor descriptor
-  DML_BUFFER_TENSOR_DESC input_buffer_desc = create_buffer_tensor_desc(input);
-  DML_TENSOR_DESC input_tensor_desc = create_tensor_desc(input_buffer_desc);
+  dml::utils::DmlTensorDescBundle input_desc_bundle(input);
+  const DML_TENSOR_DESC& input_tensor_desc_ref =
+      input_desc_bundle.get_tensor_desc();
 
   // Create output tensor descriptor
-  DML_BUFFER_TENSOR_DESC output_buffer_desc = create_buffer_tensor_desc(output);
-  DML_TENSOR_DESC output_tensor_desc = create_tensor_desc(output_buffer_desc);
+  dml::utils::DmlTensorDescBundle output_desc_bundle(output);
+  const DML_TENSOR_DESC& output_tensor_desc_ref =
+      output_desc_bundle.get_tensor_desc();
 
   // Calculate slice parameters
   std::vector<UINT> offsets(input.rank(), 0);
@@ -233,8 +191,8 @@ void Slide::compute(const StorageView& input,
 
   // Create SLICE operator descriptor
   DML_SLICE_OPERATOR_DESC slice_desc = {};
-  slice_desc.InputTensor = &input_tensor_desc;
-  slice_desc.OutputTensor = &output_tensor_desc;
+  slice_desc.InputTensor = &input_tensor_desc_ref;
+  slice_desc.OutputTensor = &output_tensor_desc_ref;
   slice_desc.DimensionCount = static_cast<UINT>(input.rank());
   slice_desc.Offsets = offsets.data();
   slice_desc.Sizes = sizes.data();
@@ -248,16 +206,23 @@ void Slide::compute(const StorageView& input,
   auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
   // Create input binding
-  DML_BUFFER_BINDING input_buffer_binding = create_buffer_binding(input);
-  DML_BINDING_DESC input_binding_desc =
-      create_binding_desc(input_buffer_binding);
+  DML_BUFFER_BINDING input_buffer_binding_storage =
+      dml::utils::create_buffer_binding(
+          reinterpret_cast<ID3D12Resource*>(const_cast<void*>(input.buffer())),
+          0, input.size() * input.item_size());
+  DML_BINDING_DESC input_binding_desc_for_op =
+      dml::utils::create_binding_desc(&input_buffer_binding_storage);
 
   // Create output binding
-  DML_BUFFER_BINDING output_buffer_binding = create_buffer_binding(output);
-  DML_BINDING_DESC output_binding_desc =
-      create_binding_desc(output_buffer_binding);
+  DML_BUFFER_BINDING output_buffer_binding_storage =
+      dml::utils::create_buffer_binding(
+          reinterpret_cast<ID3D12Resource*>(output.buffer()), 0,
+          output.size() * output.item_size());
+  DML_BINDING_DESC output_binding_desc_for_op =
+      dml::utils::create_binding_desc(&output_buffer_binding_storage);
 
-  compiled_op->Execute({input_binding_desc}, {output_binding_desc});
+  compiled_op->Execute({input_binding_desc_for_op},
+                       {output_binding_desc_for_op});
 }
 
 // Explicit template instantiations for DirectML

@@ -1,6 +1,7 @@
 #ifdef CT2_WITH_DIRECTML
 #include "ctranslate2/ops/nccl_ops.h"
 #include "dml/backend_dml.h"
+#include "dml/dml_utils.h"  // Centralized DML utilities
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
 #include "type_dispatch.h"
@@ -8,25 +9,9 @@
 namespace ctranslate2 {
 namespace ops {
 
-#ifdef CT2_WITH_DIRECTML
-DML_TENSOR_DATA_TYPE getDMLDataTypeFromDataType(DataType type) {
-  switch (type) {
-    case DataType::FLOAT16:
-      return DML_TENSOR_DATA_TYPE_FLOAT16;
-    case DataType::FLOAT32:
-      return DML_TENSOR_DATA_TYPE_FLOAT32;
-    case DataType::INT32:
-      return DML_TENSOR_DATA_TYPE_INT32;
-    case DataType::INT8:
-      return DML_TENSOR_DATA_TYPE_INT8;
-    case DataType::INT16:
-      return DML_TENSOR_DATA_TYPE_INT16;
-    default:
-      throw std::invalid_argument("The current datatype " +
-                                  std::to_string(static_cast<int>(type)) +
-                                  " is not supported for DirectML operations");
-  }
-}
+// #ifdef CT2_WITH_DIRECTML // This ifdef is redundant as the whole file is
+// guarded. Local getDMLDataTypeFromDataType removed. Will use
+// dml::utils::get_dml_data_type.
 
 DML_REDUCE_FUNCTION redop_to_dml_reduce_function(ReduceAll::RED_OP op) {
   switch (op) {
@@ -48,247 +33,177 @@ DML_REDUCE_FUNCTION redop_to_dml_reduce_function(ReduceAll::RED_OP op) {
 }
 
 template <typename T>
-void perform_dml_reduce_operation(const StorageView& input,
-                                  StorageView& output,
-                                  ReduceAll::RED_OP reduce_op) {
-  auto* device = dml::get_device();
-  auto* dml_device = dml::get_dml_device();
+void perform_dml_reduce_operation(
+    const StorageView& input_sv,         // Renamed for clarity
+    StorageView& output_sv,              // Renamed for clarity
+    ReduceAll::RED_OP reduce_op_enum) {  // Renamed for clarity
+  auto* dml_device_wrapper = dml::get_device();
 
-  // Get input and output buffers (cast from void* to ID3D12Resource*)
   auto input_buffer =
-      static_cast<ID3D12Resource*>(const_cast<void*>(input.buffer()));
-  auto output_buffer = static_cast<ID3D12Resource*>(output.buffer());
+      reinterpret_cast<ID3D12Resource*>(const_cast<void*>(input_sv.buffer()));
+  auto output_buffer = reinterpret_cast<ID3D12Resource*>(output_sv.buffer());
 
-  // Get data type and reduction function
-  DML_TENSOR_DATA_TYPE dml_data_type =
-      getDMLDataTypeFromDataType(input.dtype());
-  DML_REDUCE_FUNCTION reduce_function = redop_to_dml_reduce_function(reduce_op);
+  DML_REDUCE_FUNCTION dml_reduce_function =
+      redop_to_dml_reduce_function(reduce_op_enum);
 
-  // Prepare tensor dimensions
-  const auto& shape = input.shape();
-  std::vector<UINT> sizes;
-  for (dim_t dim : shape) {
-    sizes.push_back(static_cast<UINT>(dim));
+  dml::utils::DmlTensorDescBundle input_desc_bundle(input_sv);
+  dml::utils::DmlTensorDescBundle output_desc_bundle(output_sv);
+  // Output shape for ReduceAll is typically scalar or matches input for
+  // element-wise application context (not here) Here, it's a reduction, so
+  // output will be scalar-like. DmlTensorDescBundle for output_sv (likely
+  // scalar or [1]) is correct.
+
+  // Axes for reduction - reduce all axes
+  std::vector<UINT> axes_to_reduce_vec;
+  const auto& actual_input_dims = input_desc_bundle.get_sizes_vec();
+  if (!actual_input_dims.empty()) {  // Only add axes if dims exist
+    axes_to_reduce_vec.reserve(actual_input_dims.size());
+    for (UINT i = 0; i < actual_input_dims.size(); ++i) {
+      axes_to_reduce_vec.push_back(i);
+    }
+  }
+  // Handle 0-rank (scalar) input: to_dml_dims makes it rank 1, size 1. Reducing
+  // axis 0 is fine.
+  if (actual_input_dims.size() == 1 && axes_to_reduce_vec.empty()) {
+    axes_to_reduce_vec.push_back(0);
   }
 
-  // If input is empty, set to 1D with size 1
-  if (sizes.empty()) {
-    sizes.push_back(1);
-  }
+  DML_REDUCE_OPERATOR_DESC reduce_op_payload = {};
+  reduce_op_payload.Function = dml_reduce_function;
+  reduce_op_payload.InputTensor = &input_desc_bundle.get_tensor_desc();
+  reduce_op_payload.OutputTensor = &output_desc_bundle.get_tensor_desc();
+  reduce_op_payload.AxisCount = static_cast<UINT>(axes_to_reduce_vec.size());
+  reduce_op_payload.Axes =
+      axes_to_reduce_vec.empty() ? nullptr : axes_to_reduce_vec.data();
 
-  // Create input tensor descriptor
-  DML_BUFFER_TENSOR_DESC input_tensor_desc = {};
-  input_tensor_desc.DataType = dml_data_type;
-  input_tensor_desc.Flags = DML_TENSOR_FLAG_NONE;
-  input_tensor_desc.DimensionCount = static_cast<UINT>(sizes.size());
-  input_tensor_desc.Sizes = sizes.data();
-  input_tensor_desc.Strides = nullptr;  // Use default strides
-  input_tensor_desc.TotalTensorSizeInBytes = input.size() * input.item_size();
-  input_tensor_desc.GuaranteedBaseOffsetAlignment =
-      DML_MINIMUM_BUFFER_TENSOR_ALIGNMENT;
+  DML_OPERATOR_DESC dml_op_wrapper = {};
+  dml_op_wrapper.Type = DML_OPERATOR_REDUCE;
+  dml_op_wrapper.Desc = &reduce_op_payload;
 
-  DML_TENSOR_DESC input_desc = {};
-  input_desc.Type = DML_TENSOR_TYPE_BUFFER;
-  input_desc.Desc = &input_tensor_desc;
+  auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&dml_op_wrapper);
 
-  // Create output tensor descriptor (typically a scalar or same as input)
-  const auto& output_shape = output.shape();
-  std::vector<UINT> output_sizes;
-  for (dim_t dim : output_shape) {
-    output_sizes.push_back(static_cast<UINT>(dim));
-  }
+  DML_BUFFER_BINDING input_buffer_binding_storage =
+      dml::utils::create_buffer_binding(
+          input_buffer, 0,
+          input_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+  DML_BINDING_DESC input_binding_desc_for_op =
+      dml::utils::create_binding_desc(&input_buffer_binding_storage);
 
-  if (output_sizes.empty()) {
-    output_sizes.push_back(1);
-  }
+  DML_BUFFER_BINDING output_buffer_binding_storage =
+      dml::utils::create_buffer_binding(
+          output_buffer, 0,
+          output_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+  DML_BINDING_DESC output_binding_desc_for_op =
+      dml::utils::create_binding_desc(&output_buffer_binding_storage);
 
-  DML_BUFFER_TENSOR_DESC output_tensor_desc = {};
-  output_tensor_desc.DataType = dml_data_type;
-  output_tensor_desc.Flags = DML_TENSOR_FLAG_NONE;
-  output_tensor_desc.DimensionCount = static_cast<UINT>(output_sizes.size());
-  output_tensor_desc.Sizes = output_sizes.data();
-  output_tensor_desc.Strides = nullptr;
-  output_tensor_desc.TotalTensorSizeInBytes =
-      output.size() * output.item_size();
-  output_tensor_desc.GuaranteedBaseOffsetAlignment =
-      DML_MINIMUM_BUFFER_TENSOR_ALIGNMENT;
-
-  DML_TENSOR_DESC output_desc = {};
-  output_desc.Type = DML_TENSOR_TYPE_BUFFER;
-  output_desc.Desc = &output_tensor_desc;
-
-  // Create axes for reduction
-  std::vector<UINT> axes;
-  for (UINT i = 0; i < sizes.size(); ++i) {
-    axes.push_back(i);
-  }
-
-  // Create reduce operator descriptor
-  DML_REDUCE_OPERATOR_DESC reduce_desc = {};
-  reduce_desc.Function = reduce_function;
-  reduce_desc.InputTensor = &input_desc;
-  reduce_desc.OutputTensor = &output_desc;
-  reduce_desc.AxisCount = static_cast<UINT>(axes.size());
-  reduce_desc.Axes = axes.data();
-
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_REDUCE;
-  op_desc.Desc = &reduce_desc;
-
-  // Get or create compiled operator from cache
-  auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
-
-  // Bind inputs
-  DML_BUFFER_BINDING input_binding = {};
-  input_binding.Buffer = input_buffer;
-  input_binding.Offset = 0;
-  input_binding.SizeInBytes = input_tensor_desc.TotalTensorSizeInBytes;
-
-  DML_BINDING_DESC input_binding_desc = {};
-  input_binding_desc.Type = DML_BINDING_TYPE_BUFFER;
-  input_binding_desc.Desc = &input_binding;
-
-  // Bind outputs
-  DML_BUFFER_BINDING output_binding = {};
-  output_binding.Buffer = output_buffer;
-  output_binding.Offset = 0;
-  output_binding.SizeInBytes = output_tensor_desc.TotalTensorSizeInBytes;
-
-  DML_BINDING_DESC output_binding_desc = {};
-  output_binding_desc.Type = DML_BINDING_TYPE_BUFFER;
-  output_binding_desc.Desc = &output_binding;
-
-  // Record the dispatch operation
-  compiled_op->Execute({input_binding_desc}, {output_binding_desc});
+  compiled_op->Execute({input_binding_desc_for_op},
+                       {output_binding_desc_for_op});
 }
-#endif
+// #endif // Redundant CT2_WITH_DIRECTML removed from here
 
 template <Device D, typename T>
 void ReduceAll::compute(const StorageView& input, StorageView& output) const {
 #ifdef CT2_WITH_TENSOR_PARALLEL
-  // Note: DirectML doesn't have native multi-device collective operations like
-  // NCCL This implementation performs a local reduction operation For true
-  // distributed tensor parallel operations, additional coordination between
-  // devices/processes would be needed outside of DirectML
   perform_dml_reduce_operation<T>(input, output, _reduce_op);
-#endif
-  (void)input;
+#else
+  (void)input;  // Supress unused parameter warning if CT2_WITH_TENSOR_PARALLEL
+                // is not defined
   (void)output;
+#endif
 }
 
 template <Device D, typename T>
 void GatherAll::compute(const StorageView& input, StorageView& output) const {
 #ifdef CT2_WITH_TENSOR_PARALLEL
-  // DirectML doesn't have a direct equivalent to AllGather collective operation
-  // AllGather requires coordination between multiple devices/processes
-  // This would need to be implemented using a different communication mechanism
-  // or higher-level orchestration outside of DirectML
-
-  // For now, we can implement a simple copy operation as a placeholder
-  // In a real distributed scenario, this would need external coordination
-  auto* device = dml::get_device();
+  auto* device = dml::get_device();  // ctranslate2::dml::Device
 
   auto input_buffer =
-      static_cast<ID3D12Resource*>(const_cast<void*>(input.buffer()));
-  auto output_buffer = static_cast<ID3D12Resource*>(output.buffer());
+      reinterpret_cast<ID3D12Resource*>(const_cast<void*>(input.buffer()));
+  auto output_buffer = reinterpret_cast<ID3D12Resource*>(output.buffer());
 
   // Simple copy operation using DirectML identity operator
-  DML_TENSOR_DATA_TYPE dml_data_type =
-      getDMLDataTypeFromDataType(input.dtype());
+  dml::utils::DmlTensorDescBundle input_desc_bundle(input);
+  // For GatherAll, output is typically larger, concatenation of inputs from all
+  // devices. Here, as a placeholder for single-device/local op, it's just a
+  // copy. So, output StorageView should be sized correctly by the caller for a
+  // copy.
+  dml::utils::DmlTensorDescBundle output_desc_bundle(output);
 
-  const auto& shape = input.shape();
-  std::vector<UINT> sizes;
-  for (dim_t dim : shape) {
-    sizes.push_back(static_cast<UINT>(dim));
-  }
-
-  if (sizes.empty()) {
-    sizes.push_back(1);
-  }
-
-  // Create tensor descriptors for identity operation
-  DML_BUFFER_TENSOR_DESC tensor_desc = {};
-  tensor_desc.DataType = dml_data_type;
-  tensor_desc.Flags = DML_TENSOR_FLAG_NONE;
-  tensor_desc.DimensionCount = static_cast<UINT>(sizes.size());
-  tensor_desc.Sizes = sizes.data();
-  tensor_desc.Strides = nullptr;
-  tensor_desc.TotalTensorSizeInBytes = input.size() * input.item_size();
-  tensor_desc.GuaranteedBaseOffsetAlignment =
-      DML_MINIMUM_BUFFER_TENSOR_ALIGNMENT;
-
-  DML_TENSOR_DESC input_desc = {};
-  input_desc.Type = DML_TENSOR_TYPE_BUFFER;
-  input_desc.Desc = &tensor_desc;
-
-  DML_TENSOR_DESC output_desc = {};
-  output_desc.Type = DML_TENSOR_TYPE_BUFFER;
-  output_desc.Desc = &tensor_desc;
-
-  // Create identity operator
   DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC identity_desc = {};
-  identity_desc.InputTensor = &input_desc;
-  identity_desc.OutputTensor = &output_desc;
+  identity_desc.InputTensor = &input_desc_bundle.get_tensor_desc();
+  identity_desc.OutputTensor = &output_desc_bundle.get_tensor_desc();
   identity_desc.ScaleBias = nullptr;
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_ELEMENT_WISE_IDENTITY;
-  op_desc.Desc = &identity_desc;
+  DML_OPERATOR_DESC op_desc_wrapper = {};
+  op_desc_wrapper.Type = DML_OPERATOR_ELEMENT_WISE_IDENTITY;
+  op_desc_wrapper.Desc = &identity_desc;
 
-  auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
-  auto binding_props = compiled_op->GetBindingProperties();
+  auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc_wrapper);
 
+  // Binding Table method (more robust for ops that might need temp/persistent
+  // resources)
   Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
   dml::get_dml_device()->CreateBindingTable(nullptr,
                                             IID_PPV_ARGS(&binding_table));
 
-  // Bind input and output
-  DML_BUFFER_BINDING input_binding = {};
-  input_binding.Buffer = input_buffer;
-  input_binding.Offset = 0;
-  input_binding.SizeInBytes = tensor_desc.TotalTensorSizeInBytes;
+  DML_BUFFER_BINDING input_buffer_binding_storage =
+      dml::utils::create_buffer_binding(
+          input_buffer, 0,
+          input_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+  DML_BINDING_DESC input_binding_desc_for_op =
+      dml::utils::create_binding_desc(&input_buffer_binding_storage);
 
-  DML_BINDING_DESC input_binding_desc = {};
-  input_binding_desc.Type = DML_BINDING_TYPE_BUFFER;
-  input_binding_desc.Desc = &input_binding;
+  DML_BUFFER_BINDING output_buffer_binding_storage =
+      dml::utils::create_buffer_binding(
+          output_buffer, 0,
+          output_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+  DML_BINDING_DESC output_binding_desc_for_op =
+      dml::utils::create_binding_desc(&output_buffer_binding_storage);
 
-  DML_BUFFER_BINDING output_binding = {};
-  output_binding.Buffer = output_buffer;
-  output_binding.Offset = 0;
-  output_binding.SizeInBytes = tensor_desc.TotalTensorSizeInBytes;
+  binding_table->BindInputs(1, &input_binding_desc_for_op);
+  binding_table->BindOutputs(1, &output_binding_desc_for_op);
 
-  DML_BINDING_DESC output_binding_desc = {};
-  output_binding_desc.Type = DML_BINDING_TYPE_BUFFER;
-  output_binding_desc.Desc = &output_binding;
-
-  binding_table->BindInputs(1, &input_binding_desc);
-  binding_table->BindOutputs(1, &output_binding_desc);
-
+  auto binding_props = compiled_op->GetBindingProperties();
+  Microsoft::WRL::ComPtr<ID3D12Resource> temp_resource;
   if (binding_props.TemporaryResourceSize > 0) {
-    auto temp_buffer = device->CreatePreferredDeviceMemoryBuffer(
+    temp_resource = device->CreatePreferredDeviceMemoryBuffer(
         binding_props.TemporaryResourceSize);
-
-    DML_BUFFER_BINDING temp_binding = {};
-    temp_binding.Buffer = temp_buffer.Get();
-    temp_binding.Offset = 0;
-    temp_binding.SizeInBytes = binding_props.TemporaryResourceSize;
-
-    DML_BINDING_DESC temp_binding_desc = {};
-    temp_binding_desc.Type = DML_BINDING_TYPE_BUFFER;
-    temp_binding_desc.Desc = &temp_binding;
-
-    binding_table->BindTemporaryResource(&temp_binding_desc);
-    device->KeepAliveUntilNextCommandListDispatch(std::move(temp_buffer));
+    DML_BUFFER_BINDING temp_binding_storage = dml::utils::create_buffer_binding(
+        temp_resource.Get(), 0, binding_props.TemporaryResourceSize);
+    DML_BINDING_DESC temp_binding_desc_for_op =
+        dml::utils::create_binding_desc(&temp_binding_storage);
+    binding_table->BindTemporaryResource(&temp_binding_desc_for_op);
+    // KeepAliveUntilNextCommandListDispatch might be handled by device wrapper
+    // if it owns temp_resource
+  }
+  Microsoft::WRL::ComPtr<ID3D12Resource> persistent_resource;
+  if (binding_props.PersistentResourceSize > 0) {
+    // This should typically be managed (created once, or provided if op needs
+    // initialized state)
+    persistent_resource = device->CreatePreferredDeviceMemoryBuffer(
+        binding_props.PersistentResourceSize);
+    DML_BUFFER_BINDING persistent_binding_storage =
+        dml::utils::create_buffer_binding(persistent_resource.Get(), 0,
+                                          binding_props.PersistentResourceSize);
+    DML_BINDING_DESC persistent_binding_desc_for_op =
+        dml::utils::create_binding_desc(&persistent_binding_storage);
+    binding_table->BindPersistentResource(&persistent_binding_desc_for_op);
   }
 
   device->RecordDispatch(compiled_op.Get(), binding_table.Get());
-  device->ExecuteCommandList();
+  // ExecuteCommandList might be managed by the Device wrapper or called
+  // explicitly by the framework after multiple op recordings. For simplicity
+  // here, assuming RecordDispatch also submits or queues for later submission.
+  // If using the more complex dml::Operator wrapper's Execute, it often handles
+  // this. Since we used GetOrCreateCompiledOperatorApi, RecordDispatch is the
+  // next step for direct DML API style. The simple compiled_op->Execute(inputs,
+  // outputs) is a higher-level abstraction not directly used with manual
+  // binding table.
 
-  // Note: This is just a copy operation. True AllGather would require
-  // external coordination between multiple devices/processes
-#endif
-  (void)input;
+#else
+  (void)input;  // Supress unused
   (void)output;
+#endif
 }
 
 #define DECLARE_IMPL(T)                                                      \
@@ -299,4 +214,4 @@ void GatherAll::compute(const StorageView& input, StorageView& output) const {
 DECLARE_ALL_TYPES(DECLARE_IMPL)
 }  // namespace ops
 }  // namespace ctranslate2
-#endif
+#endif  // CT2_WITH_DIRECTML

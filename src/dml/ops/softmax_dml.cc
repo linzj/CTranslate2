@@ -3,6 +3,7 @@
 #include "ctranslate2/ops/softmax.h"
 
 #include "dml/backend_dml.h"
+#include "dml/dml_utils.h"  // Added
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
 
@@ -20,41 +21,23 @@ void SoftMax::compute(const StorageView& input,
   const dim_t depth = input.dim(-1);
   const dim_t batch_size = input.size() / depth;
 
-  // Convert CT2 data type to DML data type
-  DML_TENSOR_DATA_TYPE dml_data_type;
-  if constexpr (std::is_same_v<T, float>) {
-    dml_data_type = DML_TENSOR_DATA_TYPE_FLOAT32;
-  } else if constexpr (std::is_same_v<T, float16_t>) {
-    dml_data_type = DML_TENSOR_DATA_TYPE_FLOAT16;
-  } else {
-    throw std::invalid_argument("Unsupported data type for DirectML SoftMax");
-  }
+  // Tensor descriptors using DmlTensorDescBundle
+  // Softmax is typically applied on the last dimension.
+  // The input is conceptually [batch_size, depth].
+  std::vector<UINT> dml_dims_vec = {static_cast<UINT>(batch_size),
+                                    static_cast<UINT>(depth)};
 
-  // Setup tensor dimensions - reshape to 2D for softmax along last dimension
-  std::vector<UINT> dims = {static_cast<UINT>(batch_size),
-                            static_cast<UINT>(depth)};
+  // DML_TENSOR_DATA_TYPE is derived from input.dtype() inside
+  // DmlTensorDescBundle
+  dml::utils::DmlTensorDescBundle input_desc_bundle(
+      input.dtype(), dml_dims_vec, nullptr, input.size() * sizeof(T));
+  dml::utils::DmlTensorDescBundle output_desc_bundle(
+      output.dtype(), dml_dims_vec, nullptr, output.size() * sizeof(T));
 
-  // Input tensor descriptor
-  DML_BUFFER_TENSOR_DESC input_tensor_desc = {};
-  input_tensor_desc.DataType = dml_data_type;
-  input_tensor_desc.Flags = DML_TENSOR_FLAG_NONE;
-  input_tensor_desc.DimensionCount = 2;
-  input_tensor_desc.Sizes = dims.data();
-  input_tensor_desc.Strides = nullptr;  // Defaults to compact strides
-  input_tensor_desc.TotalTensorSizeInBytes = input.size() * sizeof(T);
-  input_tensor_desc.GuaranteedBaseOffsetAlignment = 0;
-
-  DML_TENSOR_DESC input_desc = {};
-  input_desc.Type = DML_TENSOR_TYPE_BUFFER;
-  input_desc.Desc = &input_tensor_desc;
-
-  // Output tensor descriptor (same as input)
-  DML_BUFFER_TENSOR_DESC output_tensor_desc = input_tensor_desc;
-  output_tensor_desc.TotalTensorSizeInBytes = output.size() * sizeof(T);
-
-  DML_TENSOR_DESC output_desc = {};
-  output_desc.Type = DML_TENSOR_TYPE_BUFFER;
-  output_desc.Desc = &output_tensor_desc;
+  const DML_TENSOR_DESC& dml_input_desc_ref =
+      input_desc_bundle.get_tensor_desc();
+  const DML_TENSOR_DESC& dml_output_desc_ref =
+      output_desc_bundle.get_tensor_desc();
 
   // Create the appropriate operator descriptor
   DML_OPERATOR_DESC op_desc = {};
@@ -66,8 +49,8 @@ void SoftMax::compute(const StorageView& input,
     UINT axis = 1;  // Last dimension in our 2D tensor
 
     DML_ACTIVATION_LOG_SOFTMAX1_OPERATOR_DESC log_softmax_desc = {};
-    log_softmax_desc.InputTensor = &input_desc;
-    log_softmax_desc.OutputTensor = &output_desc;
+    log_softmax_desc.InputTensor = &dml_input_desc_ref;
+    log_softmax_desc.OutputTensor = &dml_output_desc_ref;
     log_softmax_desc.AxisCount = 1;
     log_softmax_desc.Axes = &axis;
 
@@ -78,8 +61,8 @@ void SoftMax::compute(const StorageView& input,
     UINT axis = 1;  // Last dimension in our 2D tensor
 
     DML_ACTIVATION_SOFTMAX1_OPERATOR_DESC softmax_desc = {};
-    softmax_desc.InputTensor = &input_desc;
-    softmax_desc.OutputTensor = &output_desc;
+    softmax_desc.InputTensor = &dml_input_desc_ref;
+    softmax_desc.OutputTensor = &dml_output_desc_ref;
     softmax_desc.AxisCount = 1;
     softmax_desc.Axes = &axis;
 
@@ -90,15 +73,15 @@ void SoftMax::compute(const StorageView& input,
   // Fallback to older operators (no axis support - operates on entire tensor)
   if (_log) {
     DML_ACTIVATION_LOG_SOFTMAX_OPERATOR_DESC log_softmax_desc = {};
-    log_softmax_desc.InputTensor = &input_desc;
-    log_softmax_desc.OutputTensor = &output_desc;
+    log_softmax_desc.InputTensor = &dml_input_desc_ref;
+    log_softmax_desc.OutputTensor = &dml_output_desc_ref;
 
     op_desc.Type = DML_OPERATOR_ACTIVATION_LOG_SOFTMAX;
     op_desc.Desc = &log_softmax_desc;
   } else {
     DML_ACTIVATION_SOFTMAX_OPERATOR_DESC softmax_desc = {};
-    softmax_desc.InputTensor = &input_desc;
-    softmax_desc.OutputTensor = &output_desc;
+    softmax_desc.InputTensor = &dml_input_desc_ref;
+    softmax_desc.OutputTensor = &dml_output_desc_ref;
 
     op_desc.Type = DML_OPERATOR_ACTIVATION_SOFTMAX;
     op_desc.Desc = &softmax_desc;
@@ -109,29 +92,29 @@ void SoftMax::compute(const StorageView& input,
   auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
   // Setup input binding
-  DML_BUFFER_BINDING input_binding = {};
-  input_binding.Buffer =
-      static_cast<ID3D12Resource*>(const_cast<void*>(input.buffer()));
-  input_binding.Offset = 0;
-  input_binding.SizeInBytes = input.size() * sizeof(T);
+  // Setup bindings using dml::utils
+  DML_BUFFER_BINDING input_buffer_binding_storage =
+      dml::utils::create_buffer_binding(
+          reinterpret_cast<ID3D12Resource*>(const_cast<void*>(input.buffer())),
+          0,
+          input_desc_bundle.get_buffer_desc()
+              .TotalTensorSizeInBytes);  // This line should now work
+  DML_BINDING_DESC input_binding_desc_for_op =
+      dml::utils::create_binding_desc(&input_buffer_binding_storage);
 
-  DML_BINDING_DESC input_binding_desc = {};
-  input_binding_desc.Type = DML_BINDING_TYPE_BUFFER;
-  input_binding_desc.Desc = &input_binding;
+  DML_BUFFER_BINDING output_buffer_binding_storage =
+      dml::utils::create_buffer_binding(
+          reinterpret_cast<ID3D12Resource*>(output.buffer()), 0,
+          output_desc_bundle.get_buffer_desc()
+              .TotalTensorSizeInBytes);  // This line should now work
+  DML_BINDING_DESC output_binding_desc_for_op =
+      dml::utils::create_binding_desc(&output_buffer_binding_storage);
 
-  // Setup output binding
-  DML_BUFFER_BINDING output_binding = {};
-  output_binding.Buffer = static_cast<ID3D12Resource*>(output.buffer());
-  output_binding.Offset = 0;
-  output_binding.SizeInBytes = output.size() * sizeof(T);
-
-  DML_BINDING_DESC output_binding_desc = {};
-  output_binding_desc.Type = DML_BINDING_TYPE_BUFFER;
-  output_binding_desc.Desc = &output_binding;
-
-  std::vector<DML_BINDING_DESC> input_bindings = {input_binding_desc};
-  std::vector<DML_BINDING_DESC> output_bindings = {output_binding_desc};
-  compiled_op->Execute(input_bindings, output_bindings);
+  std::vector<DML_BINDING_DESC> input_bindings_for_op_vec = {
+      input_binding_desc_for_op};
+  std::vector<DML_BINDING_DESC> output_bindings_for_op_vec = {
+      output_binding_desc_for_op};
+  compiled_op->Execute(input_bindings_for_op_vec, output_bindings_for_op_vec);
 
   // Handle lengths parameter if provided - mask output for out-of-sequence
   // positions

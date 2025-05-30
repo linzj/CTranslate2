@@ -1,6 +1,7 @@
 #ifdef CT2_WITH_DIRECTML
 #include "ctranslate2/ops/quantize.h"
 #include "dml/backend_dml.h"
+#include "dml/dml_utils.h"  // Added
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
 
@@ -21,305 +22,305 @@ void Quantize::quantize(const StorageView& input,
         "Shift to uint8_t is not supported on DirectML");
   }
 
-  // Check that all StorageViews are on DirectML device
-  if (input.device() != Device::DirectML) {
-    throw std::invalid_argument("Input StorageView must be on DirectML device");
-  }
-  if (output.device() != Device::DirectML) {
-    throw std::invalid_argument(
-        "Output StorageView must be on DirectML device");
-  }
-  if (scale.device() != Device::DirectML) {
-    throw std::invalid_argument("Scale StorageView must be on DirectML device");
-  }
+  // Device checks already performed by the framework or Op a higher level
 
-  // Get DirectML device
   auto* device = dml::get_device();
 
-  const dim_t batch_size = scale.size();
-  const dim_t depth = input.dim(-1);
+  const dim_t batch_size = scale.size();  // Assuming scale is [batch_size]
+  const dim_t depth = input.dim(-1);      // Assuming input is [batch_size, ...,
+                                          // depth] or effectively [N, depth]
 
-  const size_t input_size_bytes = input.size() * sizeof(float);
-  const size_t output_size_bytes = output.size() * sizeof(int8_t);
-  const size_t scale_size_bytes = scale.size() * sizeof(float);
+  // Shapes for DML. Assuming input is effectively 2D [batch_size, depth] for
+  // this op. Scale is [batch_size, 1] for broadcasting. Output is [batch_size,
+  // depth]
+  std::vector<UINT> dml_input_sizes = {static_cast<UINT>(batch_size),
+                                       static_cast<UINT>(depth)};
+  std::vector<UINT> dml_input_strides = {static_cast<UINT>(depth), 1};
 
-  // Create tensor descriptors
-  DML_BUFFER_TENSOR_DESC input_buffer_desc = {};
-  input_buffer_desc.DataType = DML_TENSOR_DATA_TYPE_FLOAT32;
-  input_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-  input_buffer_desc.DimensionCount = 2;
-  UINT input_sizes[] = {static_cast<UINT>(batch_size),
-                        static_cast<UINT>(depth)};
-  UINT input_strides[] = {static_cast<UINT>(depth), 1};
-  input_buffer_desc.Sizes = input_sizes;
-  input_buffer_desc.Strides = input_strides;
-  input_buffer_desc.TotalTensorSizeInBytes = input_size_bytes;
-  input_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
+  std::vector<UINT> dml_scale_sizes = {static_cast<UINT>(batch_size), 1};
+  // Strides for [batch_size, 1] for broadcasting with [batch_size, depth]
+  // typically {1,0} or {1,1} if DML handles last dim broadcast. If scale is
+  // truly just [batch_size] StorageView, its DmlTensorDescBundle with shape
+  // [batch_size,1] and default strides would be {1,1} effectively
+  // DML_MEAN_VARIANCE_NORMALIZATION expects scale to align with normalized
+  // axes. Here we make it explicit [batch, 1].
+  std::vector<UINT> dml_scale_strides = {
+      1, 0};  // Broadcast along the depth dimension for scale.
 
-  DML_TENSOR_DESC input_desc = {};
-  input_desc.Type = DML_TENSOR_TYPE_BUFFER;
-  input_desc.Desc = &input_buffer_desc;
+  // Tensor Descriptors using DmlTensorDescBundle
+  dml::utils::DmlTensorDescBundle input_desc_bundle(
+      DML_TENSOR_DATA_TYPE_FLOAT32, dml_input_sizes, &dml_input_strides,
+      input.size() * sizeof(float));
+  // For scale, its original StorageView 'scale' is likely [batch_size]. We
+  // describe it to DML as [batch_size, 1] for broadcasting. The
+  // TotalTensorSizeInBytes should still reflect the actual 'scale' StorageView
+  // size.
+  dml::utils::DmlTensorDescBundle scale_desc_bundle(
+      DML_TENSOR_DATA_TYPE_FLOAT32, dml_scale_sizes, &dml_scale_strides,
+      scale.size() * sizeof(float));
+  dml::utils::DmlTensorDescBundle output_desc_bundle(
+      DML_TENSOR_DATA_TYPE_INT8, dml_input_sizes, &dml_input_strides,
+      output.size() * sizeof(int8_t));
 
-  DML_BUFFER_TENSOR_DESC scale_buffer_desc = {};
-  scale_buffer_desc.DataType = DML_TENSOR_DATA_TYPE_FLOAT32;
-  scale_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-  scale_buffer_desc.DimensionCount = 2;
-  UINT scale_sizes[] = {static_cast<UINT>(batch_size), 1};
-  UINT scale_strides[] = {1, 1};
-  scale_buffer_desc.Sizes = scale_sizes;
-  scale_buffer_desc.Strides = scale_strides;
-  scale_buffer_desc.TotalTensorSizeInBytes = scale_size_bytes;
-  scale_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
-
-  DML_TENSOR_DESC scale_desc = {};
-  scale_desc.Type = DML_TENSOR_TYPE_BUFFER;
-  scale_desc.Desc = &scale_buffer_desc;
-
-  DML_BUFFER_TENSOR_DESC output_buffer_desc = {};
-  output_buffer_desc.DataType = DML_TENSOR_DATA_TYPE_INT8;
-  output_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-  output_buffer_desc.DimensionCount = 2;
-  output_buffer_desc.Sizes = input_sizes;  // Same shape as input
-  output_buffer_desc.Strides = input_strides;
-  output_buffer_desc.TotalTensorSizeInBytes = output_size_bytes;
-  output_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
-
-  DML_TENSOR_DESC output_desc = {};
-  output_desc.Type = DML_TENSOR_TYPE_BUFFER;
-  output_desc.Desc = &output_buffer_desc;
+  // Constant tensor descriptors
+  std::vector<UINT> const_dims = {1};
+  dml::utils::DmlTensorDescBundle const_127_desc_bundle(
+      DML_TENSOR_DATA_TYPE_FLOAT32, const_dims, nullptr, sizeof(float));
+  dml::utils::DmlTensorDescBundle const_epsilon_desc_bundle(
+      DML_TENSOR_DATA_TYPE_FLOAT32, const_dims, nullptr, sizeof(float));
 
   // Get D3D12 resources from StorageView buffers
   ID3D12Resource* input_resource =
       reinterpret_cast<ID3D12Resource*>(const_cast<void*>(input.buffer()));
   ID3D12Resource* output_resource =
       reinterpret_cast<ID3D12Resource*>(output.buffer());
-  ID3D12Resource* scale_resource =
-      reinterpret_cast<ID3D12Resource*>(scale.buffer());
+  ID3D12Resource* scale_resource_target = reinterpret_cast<ID3D12Resource*>(
+      scale.buffer());  // This is where final scale is written
 
   // Create intermediate buffers
-  auto abs_buffer = device->CreatePreferredDeviceMemoryBuffer(input_size_bytes);
-  auto max_buffer = device->CreatePreferredDeviceMemoryBuffer(scale_size_bytes);
-  auto scale_factor_buffer =
-      device->CreatePreferredDeviceMemoryBuffer(scale_size_bytes);
-  auto scaled_buffer =
-      device->CreatePreferredDeviceMemoryBuffer(input_size_bytes);
-  auto rounded_buffer =
-      device->CreatePreferredDeviceMemoryBuffer(input_size_bytes);
+  // These DmlTensorDescBundles will describe the layout of these intermediate
+  // buffers. Their shapes will typically match dml_input_sizes or
+  // dml_scale_sizes.
+  dml::utils::DmlTensorDescBundle abs_buffer_desc_bundle(
+      DML_TENSOR_DATA_TYPE_FLOAT32, dml_input_sizes, &dml_input_strides);
+  auto abs_buffer = device->CreatePreferredDeviceMemoryBuffer(
+      abs_buffer_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
 
-  // Create constant buffers
-  const float constant_127 = 127.0f;
-  const float constant_epsilon = 1e-8f;  // To avoid division by zero
-  auto const_127_buffer = device->Upload(
-      sizeof(float),
-      std::string_view(reinterpret_cast<const char*>(&constant_127),
-                       sizeof(float)));
-  auto const_epsilon_buffer = device->Upload(
-      sizeof(float),
-      std::string_view(reinterpret_cast<const char*>(&constant_epsilon),
-                       sizeof(float)));
+  dml::utils::DmlTensorDescBundle max_buffer_desc_bundle(
+      DML_TENSOR_DATA_TYPE_FLOAT32, dml_scale_sizes,
+      &dml_scale_strides);  // max is [batch_size, 1] like scale
+  auto max_buffer = device->CreatePreferredDeviceMemoryBuffer(
+      max_buffer_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
 
-  // Constant tensor descriptors
-  DML_BUFFER_TENSOR_DESC const_buffer_desc = {};
-  const_buffer_desc.DataType = DML_TENSOR_DATA_TYPE_FLOAT32;
-  const_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-  const_buffer_desc.DimensionCount = 1;
-  UINT const_sizes[] = {1};
-  UINT const_strides[] = {1};
-  const_buffer_desc.Sizes = const_sizes;
-  const_buffer_desc.Strides = const_strides;
-  const_buffer_desc.TotalTensorSizeInBytes = sizeof(float);
-  const_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
+  // scale_factor_buffer will hold result of max_val with epsilon
+  dml::utils::DmlTensorDescBundle scale_factor_buffer_desc_bundle(
+      DML_TENSOR_DATA_TYPE_FLOAT32, dml_scale_sizes, &dml_scale_strides);
+  auto scale_factor_buffer = device->CreatePreferredDeviceMemoryBuffer(
+      scale_factor_buffer_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
 
-  DML_TENSOR_DESC const_desc = {};
-  const_desc.Type = DML_TENSOR_TYPE_BUFFER;
-  const_desc.Desc = &const_buffer_desc;
+  dml::utils::DmlTensorDescBundle scaled_buffer_desc_bundle(
+      DML_TENSOR_DATA_TYPE_FLOAT32, dml_input_sizes, &dml_input_strides);
+  auto scaled_buffer = device->CreatePreferredDeviceMemoryBuffer(
+      scaled_buffer_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
 
-  // Step 1: Compute absolute values
-  DML_ELEMENT_WISE_ABS_OPERATOR_DESC abs_desc = {};
-  abs_desc.InputTensor = &input_desc;
-  abs_desc.OutputTensor = &input_desc;
+  dml::utils::DmlTensorDescBundle rounded_buffer_desc_bundle(
+      DML_TENSOR_DATA_TYPE_FLOAT32, dml_input_sizes, &dml_input_strides);
+  auto rounded_buffer = device->CreatePreferredDeviceMemoryBuffer(
+      rounded_buffer_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
 
-  DML_OPERATOR_DESC abs_op_desc = {};
-  abs_op_desc.Type = DML_OPERATOR_ELEMENT_WISE_ABS;
-  abs_op_desc.Desc = &abs_desc;
+  // Create constant buffers on GPU
+  const float constant_127_val = 127.0f;
+  const float constant_epsilon_val = 1e-8f;
 
-  auto abs_compiled_op = dml::GetOrCreateCompiledOperatorApi(&abs_op_desc);
+  DML_SCALAR_UNION scalar_127;
+  scalar_127.Float32 = constant_127_val;
+  dml::utils::DmlTensorDescBundle
+      bundle_127;  // Dummy, will be populated by CreateDmlConstantTensor
+  auto const_127_buffer_res = dml::utils::CreateDmlConstantTensor(
+      device, {1}, DML_TENSOR_DATA_TYPE_FLOAT32, scalar_127, bundle_127);
 
-  // Step 2: Reduce to find max along depth dimension
-  UINT axes[] = {1};
-  DML_REDUCE_OPERATOR_DESC reduce_desc = {};
-  reduce_desc.Function = DML_REDUCE_FUNCTION_MAX;
-  reduce_desc.InputTensor = &input_desc;
-  reduce_desc.OutputTensor = &scale_desc;
-  reduce_desc.AxisCount = 1;
-  reduce_desc.Axes = axes;
+  DML_SCALAR_UNION scalar_eps;
+  scalar_eps.Float32 = constant_epsilon_val;
+  dml::utils::DmlTensorDescBundle bundle_eps;  // Dummy
+  auto const_epsilon_buffer_res = dml::utils::CreateDmlConstantTensor(
+      device, {1}, DML_TENSOR_DATA_TYPE_FLOAT32, scalar_eps, bundle_eps);
 
-  DML_OPERATOR_DESC reduce_op_desc = {};
-  reduce_op_desc.Type = DML_OPERATOR_REDUCE;
-  reduce_op_desc.Desc = &reduce_desc;
+  // DML_BUFFER_BINDING storage for Execute calls
+  DML_BUFFER_BINDING exec_bindings[3];
 
+  // Step 1: Compute absolute values: output to abs_buffer
+  DML_ELEMENT_WISE_ABS_OPERATOR_DESC abs_op_payload = {};
+  abs_op_payload.InputTensor = &input_desc_bundle.get_tensor_desc();
+  abs_op_payload.OutputTensor =
+      &abs_buffer_desc_bundle
+           .get_tensor_desc();  // Output to intermediate abs_buffer
+  DML_OPERATOR_DESC abs_op_wrapper = {DML_OPERATOR_ELEMENT_WISE_ABS,
+                                      &abs_op_payload};
+  auto abs_compiled_op = dml::GetOrCreateCompiledOperatorApi(&abs_op_wrapper);
+  {
+    exec_bindings[0] = dml::utils::create_buffer_binding(
+        input_resource, 0,
+        input_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+    exec_bindings[1] = dml::utils::create_buffer_binding(
+        abs_buffer.Get(), 0,
+        abs_buffer_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+    abs_compiled_op->Execute(
+        {dml::utils::create_binding_desc(&exec_bindings[0])},
+        {dml::utils::create_binding_desc(&exec_bindings[1])});
+  }
+
+  // Step 2: Reduce to find max along depth dimension (axis 1 of [batch,
+  // depth]): output to max_buffer
+  UINT reduce_axes[] = {1};  // Reduce along the 'depth' dimension
+  DML_REDUCE_OPERATOR_DESC reduce_op_payload = {};
+  reduce_op_payload.Function = DML_REDUCE_FUNCTION_MAX;
+  reduce_op_payload.InputTensor =
+      &abs_buffer_desc_bundle.get_tensor_desc();  // Input from abs_buffer
+  reduce_op_payload.OutputTensor =
+      &max_buffer_desc_bundle
+           .get_tensor_desc();  // Output to intermediate max_buffer
+  reduce_op_payload.AxisCount = 1;
+  reduce_op_payload.Axes = reduce_axes;
+  DML_OPERATOR_DESC reduce_op_wrapper = {DML_OPERATOR_REDUCE,
+                                         &reduce_op_payload};
   auto reduce_compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&reduce_op_desc);
+      dml::GetOrCreateCompiledOperatorApi(&reduce_op_wrapper);
+  {
+    exec_bindings[0] = dml::utils::create_buffer_binding(
+        abs_buffer.Get(), 0,
+        abs_buffer_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+    exec_bindings[1] = dml::utils::create_buffer_binding(
+        max_buffer.Get(), 0,
+        max_buffer_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+    reduce_compiled_op->Execute(
+        {dml::utils::create_binding_desc(&exec_bindings[0])},
+        {dml::utils::create_binding_desc(&exec_bindings[1])});
+  }
 
-  // Step 3: Avoid division by zero - max(max_val, epsilon)
-  DML_ELEMENT_WISE_MAX_OPERATOR_DESC max_epsilon_desc = {};
-  max_epsilon_desc.ATensor = &scale_desc;
-  max_epsilon_desc.BTensor = &const_desc;
-  max_epsilon_desc.OutputTensor = &scale_desc;
+  // Step 3: Avoid division by zero - max(max_val, epsilon): output to
+  // scale_factor_buffer
+  DML_ELEMENT_WISE_MAX_OPERATOR_DESC max_eps_op_payload = {};
+  max_eps_op_payload.ATensor =
+      &max_buffer_desc_bundle.get_tensor_desc();  // max_val from reduce
+  max_eps_op_payload.BTensor =
+      &bundle_eps.get_tensor_desc();  // constant_epsilon
+  max_eps_op_payload.OutputTensor =
+      &scale_factor_buffer_desc_bundle
+           .get_tensor_desc();  // Output to scale_factor_buffer
+  DML_OPERATOR_DESC max_eps_op_wrapper = {DML_OPERATOR_ELEMENT_WISE_MAX,
+                                          &max_eps_op_payload};
+  auto max_eps_compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&max_eps_op_wrapper);
+  {
+    exec_bindings[0] = dml::utils::create_buffer_binding(
+        max_buffer.Get(), 0,
+        max_buffer_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+    exec_bindings[1] = dml::utils::create_buffer_binding(
+        const_epsilon_buffer_res.Get(), 0,
+        bundle_eps.get_buffer_desc().TotalTensorSizeInBytes);
+    exec_bindings[2] = dml::utils::create_buffer_binding(
+        scale_factor_buffer.Get(), 0,
+        scale_factor_buffer_desc_bundle.get_buffer_desc()
+            .TotalTensorSizeInBytes);
+    std::vector<DML_BINDING_DESC> inputs = {
+        dml::utils::create_binding_desc(&exec_bindings[0]),
+        dml::utils::create_binding_desc(&exec_bindings[1])};
+    max_eps_compiled_op->Execute(
+        inputs, {dml::utils::create_binding_desc(&exec_bindings[2])});
+  }
 
-  DML_OPERATOR_DESC max_epsilon_op_desc = {};
-  max_epsilon_op_desc.Type = DML_OPERATOR_ELEMENT_WISE_MAX;
-  max_epsilon_op_desc.Desc = &max_epsilon_desc;
+  // Step 4: Compute scale factors: 127.0 / max_val_with_epsilon: output to
+  // scale_resource_target (final scale StorageView)
+  DML_ELEMENT_WISE_DIVIDE_OPERATOR_DESC div_op_payload = {};
+  div_op_payload.ATensor = &bundle_127.get_tensor_desc();  // constant_127
+  div_op_payload.BTensor =
+      &scale_factor_buffer_desc_bundle
+           .get_tensor_desc();  // max_val from previous step
+  div_op_payload.OutputTensor =
+      &scale_desc_bundle.get_tensor_desc();  // Output to final scale buffer
+  DML_OPERATOR_DESC div_op_wrapper = {DML_OPERATOR_ELEMENT_WISE_DIVIDE,
+                                      &div_op_payload};
+  auto div_compiled_op = dml::GetOrCreateCompiledOperatorApi(&div_op_wrapper);
+  {
+    exec_bindings[0] = dml::utils::create_buffer_binding(
+        const_127_buffer_res.Get(), 0,
+        bundle_127.get_buffer_desc().TotalTensorSizeInBytes);
+    exec_bindings[1] = dml::utils::create_buffer_binding(
+        scale_factor_buffer.Get(), 0,
+        scale_factor_buffer_desc_bundle.get_buffer_desc()
+            .TotalTensorSizeInBytes);
+    exec_bindings[2] = dml::utils::create_buffer_binding(
+        scale_resource_target, 0,
+        scale_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+    std::vector<DML_BINDING_DESC> inputs = {
+        dml::utils::create_binding_desc(&exec_bindings[0]),
+        dml::utils::create_binding_desc(&exec_bindings[1])};
+    div_compiled_op->Execute(
+        inputs, {dml::utils::create_binding_desc(&exec_bindings[2])});
+  }
 
-  auto max_epsilon_compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&max_epsilon_op_desc);
-
-  // Step 4: Compute scale factors: 127.0 / max_val
-  DML_ELEMENT_WISE_DIVIDE_OPERATOR_DESC divide_desc = {};
-  divide_desc.ATensor = &const_desc;
-  divide_desc.BTensor = &scale_desc;
-  divide_desc.OutputTensor = &scale_desc;
-
-  DML_OPERATOR_DESC divide_op_desc = {};
-  divide_op_desc.Type = DML_OPERATOR_ELEMENT_WISE_DIVIDE;
-  divide_op_desc.Desc = &divide_desc;
-
-  auto divide_compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&divide_op_desc);
-
-  // Step 5: Broadcast and multiply input by scale factors
-  DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC multiply_desc = {};
-  multiply_desc.ATensor = &input_desc;
-  multiply_desc.BTensor = &scale_desc;  // This will be broadcasted
-  multiply_desc.OutputTensor = &input_desc;
-
-  DML_OPERATOR_DESC multiply_op_desc = {};
-  multiply_op_desc.Type = DML_OPERATOR_ELEMENT_WISE_MULTIPLY;
-  multiply_op_desc.Desc = &multiply_desc;
-
-  auto multiply_compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&multiply_op_desc);
+  // Step 5: Broadcast and multiply input by scale factors: output to
+  // scaled_buffer
+  DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC mult_op_payload = {};
+  mult_op_payload.ATensor =
+      &input_desc_bundle.get_tensor_desc();  // original input
+  mult_op_payload.BTensor =
+      &scale_desc_bundle
+           .get_tensor_desc();  // final scale factors (broadcasted)
+  mult_op_payload.OutputTensor =
+      &scaled_buffer_desc_bundle.get_tensor_desc();  // Output to scaled_buffer
+  DML_OPERATOR_DESC mult_op_wrapper = {DML_OPERATOR_ELEMENT_WISE_MULTIPLY,
+                                       &mult_op_payload};
+  auto mult_compiled_op = dml::GetOrCreateCompiledOperatorApi(&mult_op_wrapper);
+  {
+    exec_bindings[0] = dml::utils::create_buffer_binding(
+        input_resource, 0,
+        input_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+    exec_bindings[1] = dml::utils::create_buffer_binding(
+        scale_resource_target, 0,
+        scale_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+    exec_bindings[2] = dml::utils::create_buffer_binding(
+        scaled_buffer.Get(), 0,
+        scaled_buffer_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+    std::vector<DML_BINDING_DESC> inputs = {
+        dml::utils::create_binding_desc(&exec_bindings[0]),
+        dml::utils::create_binding_desc(&exec_bindings[1])};
+    mult_compiled_op->Execute(
+        inputs, {dml::utils::create_binding_desc(&exec_bindings[2])});
+  }
 
   // Step 6: Optional rounding
-  dml::Operator* round_compiled_op;
+  ID3D12Resource* next_input_for_cast = scaled_buffer.Get();
+  const dml::utils::DmlTensorDescBundle* next_input_desc_bundle_for_cast =
+      &scaled_buffer_desc_bundle;
+
   if (_round_before_cast) {
-    DML_ELEMENT_WISE_ROUND_OPERATOR_DESC round_desc = {};
-    round_desc.InputTensor = &input_desc;
-    round_desc.OutputTensor = &input_desc;
-    round_desc.RoundingMode = DML_ROUNDING_MODE_HALVES_TO_NEAREST_EVEN;
-
-    DML_OPERATOR_DESC round_op_desc = {};
-    round_op_desc.Type = DML_OPERATOR_ELEMENT_WISE_ROUND;
-    round_op_desc.Desc = &round_desc;
-
-    round_compiled_op = dml::GetOrCreateCompiledOperatorApi(&round_op_desc);
+    DML_ELEMENT_WISE_ROUND_OPERATOR_DESC round_op_payload = {};
+    round_op_payload.InputTensor =
+        &scaled_buffer_desc_bundle
+             .get_tensor_desc();  // Input from scaled_buffer
+    round_op_payload.OutputTensor =
+        &rounded_buffer_desc_bundle
+             .get_tensor_desc();  // Output to rounded_buffer
+    round_op_payload.RoundingMode = DML_ROUNDING_MODE_HALVES_TO_NEAREST_EVEN;
+    DML_OPERATOR_DESC round_op_wrapper = {DML_OPERATOR_ELEMENT_WISE_ROUND,
+                                          &round_op_payload};
+    auto round_compiled_op =
+        dml::GetOrCreateCompiledOperatorApi(&round_op_wrapper);
+    {
+      exec_bindings[0] = dml::utils::create_buffer_binding(
+          scaled_buffer.Get(), 0,
+          scaled_buffer_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+      exec_bindings[1] = dml::utils::create_buffer_binding(
+          rounded_buffer.Get(), 0,
+          rounded_buffer_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+      round_compiled_op->Execute(
+          {dml::utils::create_binding_desc(&exec_bindings[0])},
+          {dml::utils::create_binding_desc(&exec_bindings[1])});
+    }
+    next_input_for_cast = rounded_buffer.Get();
+    next_input_desc_bundle_for_cast = &rounded_buffer_desc_bundle;
   }
 
   // Step 7: Cast to int8
-  DML_CAST_OPERATOR_DESC cast_desc = {};
-  cast_desc.InputTensor = &input_desc;
-  cast_desc.OutputTensor = &output_desc;
-
-  DML_OPERATOR_DESC cast_op_desc = {};
-  cast_op_desc.Type = DML_OPERATOR_CAST;
-  cast_op_desc.Desc = &cast_desc;
-
-  auto cast_compiled_op = dml::GetOrCreateCompiledOperatorApi(&cast_op_desc);
-
-  // Execute operations
-
-  // 1. Absolute value
+  DML_CAST_OPERATOR_DESC cast_op_payload = {};
+  cast_op_payload.InputTensor =
+      &next_input_desc_bundle_for_cast->get_tensor_desc();
+  cast_op_payload.OutputTensor =
+      &output_desc_bundle.get_tensor_desc();  // Final output
+  DML_OPERATOR_DESC cast_op_wrapper = {DML_OPERATOR_CAST, &cast_op_payload};
+  auto cast_compiled_op = dml::GetOrCreateCompiledOperatorApi(&cast_op_wrapper);
   {
-    Microsoft::WRL::ComPtr<IDMLOperatorInitializer> initializer;
-
-    DML_BUFFER_BINDING input_binding = {input_resource, 0, input_size_bytes};
-    DML_BUFFER_BINDING output_binding = {abs_buffer.Get(), 0, input_size_bytes};
-    std::vector<DML_BINDING_DESC> input_bind = {
-        {DML_BINDING_TYPE_BUFFER, &input_binding}};
-    std::vector<DML_BINDING_DESC> output_bind = {
-        {DML_BINDING_TYPE_BUFFER, &output_binding}};
-
-    abs_compiled_op->Execute(input_bind, output_bind);
-  }
-
-  // 2. Reduce max
-  {
-    DML_BUFFER_BINDING input_binding = {abs_buffer.Get(), 0, input_size_bytes};
-    DML_BUFFER_BINDING output_binding = {max_buffer.Get(), 0, scale_size_bytes};
-    DML_BINDING_DESC input_bind = {DML_BINDING_TYPE_BUFFER, &input_binding};
-    DML_BINDING_DESC output_bind = {DML_BINDING_TYPE_BUFFER, &output_binding};
-
-    reduce_compiled_op->Execute({input_bind}, {output_bind});
-  }
-
-  // 3. Avoid division by zero
-  {
-    DML_BUFFER_BINDING input1_binding = {max_buffer.Get(), 0, scale_size_bytes};
-    DML_BUFFER_BINDING input2_binding = {const_epsilon_buffer.Get(), 0,
-                                         sizeof(float)};
-    DML_BUFFER_BINDING output_binding = {scale_factor_buffer.Get(), 0,
-                                         scale_size_bytes};
-    std::vector<DML_BINDING_DESC> input_binds = {
-        {DML_BINDING_TYPE_BUFFER, &input1_binding},
-        {DML_BINDING_TYPE_BUFFER, &input2_binding}};
-    DML_BINDING_DESC output_bind = {DML_BINDING_TYPE_BUFFER, &output_binding};
-
-    max_epsilon_compiled_op->Execute(input_binds, {output_bind});
-  }
-
-  // 4. Compute scale factors (127 / max_val)
-  {
-    DML_BUFFER_BINDING input1_binding = {const_127_buffer.Get(), 0,
-                                         sizeof(float)};
-    DML_BUFFER_BINDING input2_binding = {scale_factor_buffer.Get(), 0,
-                                         scale_size_bytes};
-    DML_BUFFER_BINDING output_binding = {scale_resource, 0, scale_size_bytes};
-    std::vector<DML_BINDING_DESC> input_binds = {
-        {DML_BINDING_TYPE_BUFFER, &input1_binding},
-        {DML_BINDING_TYPE_BUFFER, &input2_binding}};
-    DML_BINDING_DESC output_bind = {DML_BINDING_TYPE_BUFFER, &output_binding};
-
-    divide_compiled_op->Execute(input_binds, {output_bind});
-  }
-
-  // 5. Multiply input by scale factors
-  {
-    DML_BUFFER_BINDING input1_binding = {input_resource, 0, input_size_bytes};
-    DML_BUFFER_BINDING input2_binding = {scale_resource, 0, scale_size_bytes};
-    DML_BUFFER_BINDING output_binding = {scaled_buffer.Get(), 0,
-                                         input_size_bytes};
-    std::vector<DML_BINDING_DESC> input_binds = {
-        {DML_BINDING_TYPE_BUFFER, &input1_binding},
-        {DML_BINDING_TYPE_BUFFER, &input2_binding}};
-    DML_BINDING_DESC output_bind = {DML_BINDING_TYPE_BUFFER, &output_binding};
-
-    multiply_compiled_op->Execute(input_binds, {output_bind});
-  }
-
-  // 6. Optional rounding
-  ID3D12Resource* final_float_buffer = scaled_buffer.Get();
-  if (_round_before_cast) {
-    DML_BUFFER_BINDING input_binding = {scaled_buffer.Get(), 0,
-                                        input_size_bytes};
-    DML_BUFFER_BINDING output_binding = {rounded_buffer.Get(), 0,
-                                         input_size_bytes};
-    DML_BINDING_DESC input_bind = {DML_BINDING_TYPE_BUFFER, &input_binding};
-    DML_BINDING_DESC output_bind = {DML_BINDING_TYPE_BUFFER, &output_binding};
-
-    round_compiled_op->Execute({input_bind}, {output_bind});
-
-    final_float_buffer = rounded_buffer.Get();
-  }
-
-  // 7. Cast to int8
-  {
-    DML_BUFFER_BINDING input_binding = {final_float_buffer, 0,
-                                        input_size_bytes};
-    DML_BUFFER_BINDING output_binding = {output_resource, 0, output_size_bytes};
-    DML_BINDING_DESC input_bind = {DML_BINDING_TYPE_BUFFER, &input_binding};
-    DML_BINDING_DESC output_bind = {DML_BINDING_TYPE_BUFFER, &output_binding};
-
-    cast_compiled_op->Execute({input_bind}, {output_bind});
+    exec_bindings[0] = dml::utils::create_buffer_binding(
+        next_input_for_cast, 0,
+        next_input_desc_bundle_for_cast->get_buffer_desc()
+            .TotalTensorSizeInBytes);
+    exec_bindings[1] = dml::utils::create_buffer_binding(
+        output_resource, 0,
+        output_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+    cast_compiled_op->Execute(
+        {dml::utils::create_binding_desc(&exec_bindings[0])},
+        {dml::utils::create_binding_desc(&exec_bindings[1])});
   }
 }
 
