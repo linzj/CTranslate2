@@ -10,6 +10,7 @@
 
 // DirectML specific forward declarations and uses (guarded by CT2_WITH_DIRECTML)
 #ifdef CT2_WITH_DIRECTML
+#  include "ctranslate2/utils.h"
 #  include "dml/backend_dml.h"
 #endif
 
@@ -160,7 +161,7 @@ namespace ctranslate2 {
       cudaDeviceSynchronize();
     }
 #elif defined(CT2_WITH_DIRECTML)
-    else if (device == Device::DirectML) {
+    if (device == Device::DirectML) {
       // DirectML synchronization: This is usually done by ensuring the command list is executed
       // and GPU work is flushed. This will be implemented in dml/backend_dml.cc once CommandListExecutor is ready.
       (void)index; // Suppress unused variable warning for now.
@@ -177,7 +178,7 @@ namespace ctranslate2 {
       cudaStreamSynchronize(cuda::get_cuda_stream());
     }
 #elif defined(CT2_WITH_DIRECTML)
-    else if (device == Device::DirectML) {
+    if (device == Device::DirectML) {
       // DirectML does not have a "stream" concept directly analogous to CUDA streams.
       // Synchronization for DML operations would happen at the command list submission level,
       // handled by a dedicated executor, which is not yet implemented.
