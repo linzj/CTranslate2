@@ -76,6 +76,20 @@ void DMLOperatorCache::SerializeBufferTensorDesc(
   append_bytes(key_stream, buffer_desc->GuaranteedBaseOffsetAlignment);
 }
 
+// Helper function to serialize DML_SCALE_BIAS (defined as a static free
+// function in the namespace)
+static void SerializeScaleBias(std::ostringstream& key_stream,
+                               const DML_SCALE_BIAS* scale_bias) {
+  if (!scale_bias) {
+    append_bytes(
+        key_stream,
+        (uint64_t)0xABABABABABABABABULL);  // Placeholder for null ScaleBias
+    return;
+  }
+  append_bytes(key_stream, scale_bias->Scale);
+  append_bytes(key_stream, scale_bias->Bias);
+}
+
 void DMLOperatorCache::SerializeTensorDesc(std::ostringstream& key_stream,
                                            const DML_TENSOR_DESC* tensor_desc) {
   if (!tensor_desc) {
@@ -103,14 +117,11 @@ void DMLOperatorCache::SerializeTensorDesc(std::ostringstream& key_stream,
   }
 }
 
-std::string DMLOperatorCache::GenerateCacheKey(const DML_OPERATOR_DESC* op_desc,
-                                               DML_EXECUTION_FLAGS flags) {
-  std::ostringstream key_stream;
-  // No need for std::hex or std::setfill if appending raw bytes.
-
-  append_bytes(key_stream, op_desc->Type);
-  append_bytes(key_stream, flags);
-
+// Private helper method to serialize the operator-specific description part of
+// the key.
+void DMLOperatorCache::GenerateCacheKeyForDesc(
+    std::ostringstream& key_stream,
+    const DML_OPERATOR_DESC* op_desc) {
   // Serialize the specific operator description based on its type.
   // This switch must cover ALL operator types used in your application for
   // correct caching.
@@ -120,11 +131,7 @@ std::string DMLOperatorCache::GenerateCacheKey(const DML_OPERATOR_DESC* op_desc,
           op_desc->Desc);
       SerializeTensorDesc(key_stream, desc->InputTensor);
       SerializeTensorDesc(key_stream, desc->OutputTensor);
-      // Note: DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC also has an optional
-      // const DML_SCALE_BIAS* ScaleBias. If you use it, it must be part of the
-      // key. For simplicity, assuming it's not used or always null. if
-      // (desc->ScaleBias) { /* serialize ScaleBias */ } else { /* placeholder
-      // for null ScaleBias */ }
+      SerializeScaleBias(key_stream, desc->ScaleBias);
       break;
     }
     case DML_OPERATOR_GEMM: {
@@ -143,13 +150,15 @@ std::string DMLOperatorCache::GenerateCacheKey(const DML_OPERATOR_DESC* op_desc,
       append_bytes(key_stream, desc->TransB);
       append_bytes(key_stream, desc->Alpha);
       append_bytes(key_stream, desc->Beta);
-      // Note: DML_GEMM_OPERATOR_DESC also has an optional const
-      // DML_OPERATOR_DESC* FusedActivation. If used, this FusedActivation
-      // (which is another DML_OPERATOR_DESC) must be recursively serialized.
-      // This adds complexity. For simplicity here, assuming it's not used or
-      // always null. if (desc->FusedActivation) { /* recursively call
-      // GenerateCacheKey or similar for FusedActivation */ } else { /*
-      // placeholder for null FusedActivation */ }
+      if (desc->FusedActivation) {
+        append_bytes(key_stream, desc->FusedActivation->Type);
+        GenerateCacheKeyForDesc(key_stream,
+                                desc->FusedActivation);  // Recursive call
+      } else {
+        append_bytes(key_stream,
+                     (uint64_t)0xF1F1F1F1F1F1F1F1ULL);  // Placeholder for null
+                                                        // FusedActivation
+      }
       break;
     }
     case DML_OPERATOR_REDUCE: {
@@ -179,8 +188,12 @@ std::string DMLOperatorCache::GenerateCacheKey(const DML_OPERATOR_DESC* op_desc,
         case DML_TENSOR_DATA_TYPE_FLOAT32:
           append_bytes(key_stream, desc->Value.Float32);
           break;
-        case DML_TENSOR_DATA_TYPE_FLOAT16:
+        case DML_TENSOR_DATA_TYPE_FLOAT16:  // Stored as UInt16 in
+                                            // DML_SCALAR_UNION
           append_bytes(key_stream, desc->Value.UInt16);
+          break;
+        case DML_TENSOR_DATA_TYPE_FLOAT64:
+          append_bytes(key_stream, desc->Value.Float64);
           break;
         case DML_TENSOR_DATA_TYPE_UINT64:
           append_bytes(key_stream, desc->Value.UInt64);
@@ -206,6 +219,9 @@ std::string DMLOperatorCache::GenerateCacheKey(const DML_OPERATOR_DESC* op_desc,
         case DML_TENSOR_DATA_TYPE_INT8:
           append_bytes(key_stream, desc->Value.Int8);
           break;
+        // Note: DML_TENSOR_DATA_TYPE_UINT4 and DML_TENSOR_DATA_TYPE_INT4 are
+        // not directly represented in DML_SCALAR_UNION as distinct members. The
+        // default fallback handles other cases by serializing raw bytes.
         default:
           // Fallback for unlisted types, serialize the raw union bytes. This is
           // less precise.
@@ -279,6 +295,8 @@ std::string DMLOperatorCache::GenerateCacheKey(const DML_OPERATOR_DESC* op_desc,
           static_cast<const DML_ELEMENT_WISE_EXP_OPERATOR_DESC*>(op_desc->Desc);
       SerializeTensorDesc(key_stream, desc->InputTensor);
       SerializeTensorDesc(key_stream, desc->OutputTensor);
+      // DML_ELEMENT_WISE_EXP_OPERATOR_DESC from DirectML.h has ScaleBias.
+      SerializeScaleBias(key_stream, desc->ScaleBias);
       break;
     }
     case DML_OPERATOR_ELEMENT_WISE_LOG: {
@@ -286,6 +304,7 @@ std::string DMLOperatorCache::GenerateCacheKey(const DML_OPERATOR_DESC* op_desc,
           static_cast<const DML_ELEMENT_WISE_LOG_OPERATOR_DESC*>(op_desc->Desc);
       SerializeTensorDesc(key_stream, desc->InputTensor);
       SerializeTensorDesc(key_stream, desc->OutputTensor);
+      SerializeScaleBias(key_stream, desc->ScaleBias);
       break;
     }
     case DML_OPERATOR_ELEMENT_WISE_SIN: {
@@ -293,6 +312,7 @@ std::string DMLOperatorCache::GenerateCacheKey(const DML_OPERATOR_DESC* op_desc,
           static_cast<const DML_ELEMENT_WISE_SIN_OPERATOR_DESC*>(op_desc->Desc);
       SerializeTensorDesc(key_stream, desc->InputTensor);
       SerializeTensorDesc(key_stream, desc->OutputTensor);
+      SerializeScaleBias(key_stream, desc->ScaleBias);
       break;
     }
     case DML_OPERATOR_ELEMENT_WISE_COS: {
@@ -300,6 +320,7 @@ std::string DMLOperatorCache::GenerateCacheKey(const DML_OPERATOR_DESC* op_desc,
           static_cast<const DML_ELEMENT_WISE_COS_OPERATOR_DESC*>(op_desc->Desc);
       SerializeTensorDesc(key_stream, desc->InputTensor);
       SerializeTensorDesc(key_stream, desc->OutputTensor);
+      SerializeScaleBias(key_stream, desc->ScaleBias);
       break;
     }
     case DML_OPERATOR_ARGMAX: {
@@ -317,10 +338,195 @@ std::string DMLOperatorCache::GenerateCacheKey(const DML_OPERATOR_DESC* op_desc,
       append_bytes(key_stream, desc->AxisDirection);
       break;
     }
-    case DML_OPERATOR_SCATTER: {
-      // As per your context code; modern DML might
-      // use DML_SCATTER_ND or DML_SCATTER_ELEMENTS
-      auto desc = static_cast<const DML_SCATTER_OPERATOR_DESC*>(op_desc->Desc);
+    // Removed DML_OPERATOR_SCATTER case to avoid duplication with
+    // DML_OPERATOR_SCATTER_ELEMENTS as they share the same enum value (94) in
+    // the current DML headers. DML_OPERATOR_SCATTER_ELEMENTS is used in the ops
+    // files.
+
+    // Newly added operator types
+    case DML_OPERATOR_ELEMENT_WISE_ADD1: {
+      auto desc = static_cast<const DML_ELEMENT_WISE_ADD1_OPERATOR_DESC*>(
+          op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->ATensor);
+      SerializeTensorDesc(key_stream, desc->BTensor);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      if (desc->FusedActivation) {
+        append_bytes(key_stream, desc->FusedActivation->Type);
+        GenerateCacheKeyForDesc(key_stream,
+                                desc->FusedActivation);  // Recursive call
+      } else {
+        append_bytes(key_stream,
+                     (uint64_t)0xF1F1F1F1F1F1F1F1ULL);  // Placeholder for null
+                                                        // FusedActivation
+      }
+      break;
+    }
+    case DML_OPERATOR_ELEMENT_WISE_DIVIDE: {
+      auto desc = static_cast<const DML_ELEMENT_WISE_DIVIDE_OPERATOR_DESC*>(
+          op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->ATensor);
+      SerializeTensorDesc(key_stream, desc->BTensor);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      break;
+    }
+    case DML_OPERATOR_ELEMENT_WISE_NEGATE: {
+      auto desc = static_cast<const DML_ELEMENT_WISE_NEGATE_OPERATOR_DESC*>(
+          op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputTensor);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      break;
+    }
+    case DML_OPERATOR_ELEMENT_WISE_ABS: {
+      auto desc =
+          static_cast<const DML_ELEMENT_WISE_ABS_OPERATOR_DESC*>(op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputTensor);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      SerializeScaleBias(key_stream, desc->ScaleBias);
+      break;
+    }
+    case DML_OPERATOR_ELEMENT_WISE_ROUND: {
+      auto desc = static_cast<const DML_ELEMENT_WISE_ROUND_OPERATOR_DESC*>(
+          op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputTensor);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      append_bytes(key_stream, desc->RoundingMode);
+      break;
+    }
+    case DML_OPERATOR_CONVOLUTION: {
+      auto desc =
+          static_cast<const DML_CONVOLUTION_OPERATOR_DESC*>(op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputTensor);
+      SerializeTensorDesc(key_stream, desc->FilterTensor);
+      SerializeTensorDesc(
+          key_stream,
+          desc->BiasTensor);  // Handles null via SerializeTensorDesc
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      append_bytes(key_stream, desc->Mode);
+      append_bytes(key_stream, desc->Direction);
+      append_bytes(key_stream, desc->DimensionCount);
+      append_bytes_array(key_stream, desc->Strides,
+                         desc->DimensionCount * sizeof(UINT));
+      append_bytes_array(key_stream, desc->Dilations,
+                         desc->DimensionCount * sizeof(UINT));
+      append_bytes_array(key_stream, desc->StartPadding,
+                         desc->DimensionCount * sizeof(UINT));
+      append_bytes_array(key_stream, desc->EndPadding,
+                         desc->DimensionCount * sizeof(UINT));
+      append_bytes_array(key_stream, desc->OutputPadding,
+                         desc->DimensionCount * sizeof(UINT));
+      append_bytes(key_stream, desc->GroupCount);
+      if (desc->FusedActivation) {
+        append_bytes(key_stream, desc->FusedActivation->Type);
+        GenerateCacheKeyForDesc(key_stream,
+                                desc->FusedActivation);  // Recursive call
+      } else {
+        append_bytes(key_stream,
+                     (uint64_t)0xF1F1F1F1F1F1F1F1ULL);  // Placeholder for null
+                                                        // FusedActivation
+      }
+      break;
+    }
+    case DML_OPERATOR_MEAN_VARIANCE_NORMALIZATION2: {
+      auto desc =
+          static_cast<const DML_MEAN_VARIANCE_NORMALIZATION2_OPERATOR_DESC*>(
+              op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputTensor);
+      SerializeTensorDesc(key_stream, desc->ScaleTensor);  // Handles null
+      SerializeTensorDesc(key_stream, desc->BiasTensor);   // Handles null
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      append_bytes(key_stream, desc->AxisCount);
+      append_bytes_array(key_stream, desc->Axes,
+                         desc->AxisCount * sizeof(UINT));
+      append_bytes(key_stream, desc->UseMean);
+      append_bytes(key_stream, desc->UseVariance);
+      append_bytes(key_stream, desc->Epsilon);
+      if (desc->FusedActivation) {
+        append_bytes(key_stream, desc->FusedActivation->Type);
+        GenerateCacheKeyForDesc(key_stream,
+                                desc->FusedActivation);  // Recursive call
+      } else {
+        append_bytes(key_stream,
+                     (uint64_t)0xF1F1F1F1F1F1F1F1ULL);  // Placeholder for null
+                                                        // FusedActivation
+      }
+      break;
+    }
+    case DML_OPERATOR_JOIN: {
+      auto desc = static_cast<const DML_JOIN_OPERATOR_DESC*>(op_desc->Desc);
+      append_bytes(key_stream, desc->InputCount);
+      for (UINT i = 0; i < desc->InputCount; ++i) {
+        SerializeTensorDesc(key_stream, desc->InputTensors + i);
+      }
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      append_bytes(key_stream, desc->Axis);
+      break;
+    }
+    case DML_OPERATOR_SPLIT: {
+      auto desc = static_cast<const DML_SPLIT_OPERATOR_DESC*>(op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputTensor);
+      append_bytes(key_stream, desc->OutputCount);
+      for (UINT i = 0; i < desc->OutputCount; ++i) {
+        SerializeTensorDesc(key_stream, desc->OutputTensors + i);
+      }
+      append_bytes(key_stream, desc->Axis);
+      break;
+    }
+    case DML_OPERATOR_SLICE: {
+      auto desc = static_cast<const DML_SLICE_OPERATOR_DESC*>(op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputTensor);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      append_bytes(key_stream, desc->DimensionCount);
+      append_bytes_array(key_stream, desc->Offsets,
+                         desc->DimensionCount * sizeof(UINT));
+      append_bytes_array(key_stream, desc->Sizes,
+                         desc->DimensionCount * sizeof(UINT));
+      append_bytes_array(key_stream, desc->Strides,
+                         desc->DimensionCount * sizeof(UINT));
+      break;
+    }
+    case DML_OPERATOR_SLICE1: {
+      auto desc = static_cast<const DML_SLICE1_OPERATOR_DESC*>(op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputTensor);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      append_bytes(key_stream, desc->DimensionCount);
+      append_bytes_array(key_stream, desc->InputWindowOffsets,
+                         desc->DimensionCount * sizeof(UINT));
+      append_bytes_array(key_stream, desc->InputWindowSizes,
+                         desc->DimensionCount * sizeof(UINT));
+      append_bytes_array(key_stream, desc->InputWindowStrides,
+                         desc->DimensionCount * sizeof(INT));
+      break;
+    }
+    case DML_OPERATOR_TILE: {
+      auto desc = static_cast<const DML_TILE_OPERATOR_DESC*>(op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputTensor);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      append_bytes(key_stream, desc->RepeatsCount);
+      append_bytes_array(key_stream, desc->Repeats,
+                         desc->RepeatsCount * sizeof(UINT));
+      break;
+    }
+    case DML_OPERATOR_GATHER: {
+      auto desc = static_cast<const DML_GATHER_OPERATOR_DESC*>(op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputTensor);
+      SerializeTensorDesc(key_stream, desc->IndicesTensor);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      append_bytes(key_stream, desc->Axis);
+      append_bytes(key_stream, desc->IndexDimensions);
+      break;
+    }
+    case DML_OPERATOR_GATHER_ELEMENTS: {
+      auto desc =
+          static_cast<const DML_GATHER_ELEMENTS_OPERATOR_DESC*>(op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputTensor);
+      SerializeTensorDesc(key_stream, desc->IndicesTensor);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      append_bytes(key_stream, desc->Axis);
+      break;
+    }
+    case DML_OPERATOR_SCATTER_ELEMENTS: {
+      auto desc =
+          static_cast<const DML_SCATTER_ELEMENTS_OPERATOR_DESC*>(op_desc->Desc);
       SerializeTensorDesc(key_stream, desc->InputTensor);
       SerializeTensorDesc(key_stream, desc->IndicesTensor);
       SerializeTensorDesc(key_stream, desc->UpdatesTensor);
@@ -328,25 +534,208 @@ std::string DMLOperatorCache::GenerateCacheKey(const DML_OPERATOR_DESC* op_desc,
       append_bytes(key_stream, desc->Axis);
       break;
     }
-    // ... Add other DML_OPERATOR_TYPE cases as needed ...
+    case DML_OPERATOR_TOP_K1: {
+      auto desc = static_cast<const DML_TOP_K1_OPERATOR_DESC*>(op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputTensor);
+      SerializeTensorDesc(key_stream, desc->OutputValueTensor);
+      SerializeTensorDesc(key_stream, desc->OutputIndexTensor);
+      append_bytes(key_stream, desc->Axis);
+      append_bytes(key_stream, desc->K);
+      append_bytes(key_stream, desc->AxisDirection);
+      break;
+    }
+    case DML_OPERATOR_ACTIVATION_GELU: {
+      auto desc =
+          static_cast<const DML_ACTIVATION_GELU_OPERATOR_DESC*>(op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputTensor);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      break;
+    }
+    case DML_OPERATOR_ACTIVATION_SWISH: {
+      auto desc =
+          static_cast<const DML_ACTIVATION_SWISH_OPERATOR_DESC*>(op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputTensor);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      append_bytes(key_stream, desc->SigmoidInputScale);
+      break;
+    }
+    case DML_OPERATOR_ACTIVATION_IDENTITY: {
+      // For DML_ACTIVATION_IDENTITY_OPERATOR_DESC
+      auto desc = static_cast<const DML_ACTIVATION_IDENTITY_OPERATOR_DESC*>(
+          op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputTensor);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      break;
+    }
+    case DML_OPERATOR_ACTIVATION_SOFTMAX: {  // Older version, no axis
+      auto desc = static_cast<const DML_ACTIVATION_SOFTMAX_OPERATOR_DESC*>(
+          op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputTensor);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      break;
+    }
+    case DML_OPERATOR_ACTIVATION_LOG_SOFTMAX: {  // Older version, no axis
+      auto desc = static_cast<const DML_ACTIVATION_LOG_SOFTMAX_OPERATOR_DESC*>(
+          op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputTensor);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      break;
+    }
+    case DML_OPERATOR_ACTIVATION_SOFTMAX1: {  // Newer version with axis
+      auto desc = static_cast<const DML_ACTIVATION_SOFTMAX1_OPERATOR_DESC*>(
+          op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputTensor);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      append_bytes(key_stream, desc->AxisCount);
+      append_bytes_array(key_stream, desc->Axes,
+                         desc->AxisCount * sizeof(UINT));
+      break;
+    }
+    case DML_OPERATOR_ACTIVATION_LOG_SOFTMAX1: {  // Newer version with axis
+      auto desc = static_cast<const DML_ACTIVATION_LOG_SOFTMAX1_OPERATOR_DESC*>(
+          op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputTensor);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      append_bytes(key_stream, desc->AxisCount);
+      append_bytes_array(key_stream, desc->Axes,
+                         desc->AxisCount * sizeof(UINT));
+      break;
+    }
+    case DML_OPERATOR_RANDOM_GENERATOR: {
+      auto desc =
+          static_cast<const DML_RANDOM_GENERATOR_OPERATOR_DESC*>(op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputStateTensor);  // Handles null
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      SerializeTensorDesc(key_stream, desc->OutputStateTensor);  // Handles null
+      append_bytes(key_stream, desc->Type);
+      break;
+    }
+    case DML_OPERATOR_FILL_VALUE_SEQUENCE: {
+      auto desc = static_cast<const DML_FILL_VALUE_SEQUENCE_OPERATOR_DESC*>(
+          op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      append_bytes(key_stream, desc->ValueDataType);
+      // Serialize ValueStart and ValueDelta based on ValueDataType
+      // This is similar to DML_OPERATOR_FILL_VALUE_CONSTANT's Value
+      // serialization
+      switch (desc->ValueDataType) {
+        case DML_TENSOR_DATA_TYPE_FLOAT32:
+          append_bytes(key_stream, desc->ValueStart.Float32);
+          append_bytes(key_stream, desc->ValueDelta.Float32);
+          break;
+        case DML_TENSOR_DATA_TYPE_FLOAT16:  // Stored as UInt16
+          append_bytes(key_stream, desc->ValueStart.UInt16);
+          append_bytes(key_stream, desc->ValueDelta.UInt16);
+          break;
+        case DML_TENSOR_DATA_TYPE_FLOAT64:
+          append_bytes(key_stream, desc->ValueStart.Float64);
+          append_bytes(key_stream, desc->ValueDelta.Float64);
+          break;
+        case DML_TENSOR_DATA_TYPE_UINT64:
+          append_bytes(key_stream, desc->ValueStart.UInt64);
+          append_bytes(key_stream, desc->ValueDelta.UInt64);
+          break;
+        case DML_TENSOR_DATA_TYPE_INT64:
+          append_bytes(key_stream, desc->ValueStart.Int64);
+          append_bytes(key_stream, desc->ValueDelta.Int64);
+          break;
+        case DML_TENSOR_DATA_TYPE_UINT32:
+          append_bytes(key_stream, desc->ValueStart.UInt32);
+          append_bytes(key_stream, desc->ValueDelta.UInt32);
+          break;
+        case DML_TENSOR_DATA_TYPE_INT32:
+          append_bytes(key_stream, desc->ValueStart.Int32);
+          append_bytes(key_stream, desc->ValueDelta.Int32);
+          break;
+        case DML_TENSOR_DATA_TYPE_UINT16:
+          append_bytes(key_stream, desc->ValueStart.UInt16);
+          append_bytes(key_stream, desc->ValueDelta.UInt16);
+          break;
+        case DML_TENSOR_DATA_TYPE_INT16:
+          append_bytes(key_stream, desc->ValueStart.Int16);
+          append_bytes(key_stream, desc->ValueDelta.Int16);
+          break;
+        case DML_TENSOR_DATA_TYPE_UINT8:
+          append_bytes(key_stream, desc->ValueStart.UInt8);
+          append_bytes(key_stream, desc->ValueDelta.UInt8);
+          break;
+        case DML_TENSOR_DATA_TYPE_INT8:
+          append_bytes(key_stream, desc->ValueStart.Int8);
+          append_bytes(key_stream, desc->ValueDelta.Int8);
+          break;
+        default:
+          // Fallback for unlisted types, serialize the raw union bytes.
+          append_bytes_array(key_stream, &desc->ValueStart,
+                             sizeof(DML_SCALAR_UNION));
+          append_bytes_array(key_stream, &desc->ValueDelta,
+                             sizeof(DML_SCALAR_UNION));
+          break;
+      }
+      break;
+    }
+    case DML_OPERATOR_ELEMENT_WISE_LOGICAL_GREATER_THAN_OR_EQUAL: {
+      auto desc = static_cast<
+          const DML_ELEMENT_WISE_LOGICAL_GREATER_THAN_OR_EQUAL_OPERATOR_DESC*>(
+          op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->ATensor);
+      SerializeTensorDesc(key_stream, desc->BTensor);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      break;
+    }
+    case DML_OPERATOR_ELEMENT_WISE_LOGICAL_LESS_THAN: {
+      auto desc =
+          static_cast<const DML_ELEMENT_WISE_LOGICAL_LESS_THAN_OPERATOR_DESC*>(
+              op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->ATensor);
+      SerializeTensorDesc(key_stream, desc->BTensor);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      break;
+    }
+    case DML_OPERATOR_ELEMENT_WISE_IF: {
+      auto desc =
+          static_cast<const DML_ELEMENT_WISE_IF_OPERATOR_DESC*>(op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->ConditionTensor);
+      SerializeTensorDesc(key_stream, desc->ATensor);
+      SerializeTensorDesc(key_stream, desc->BTensor);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      break;
+    }
+    case DML_OPERATOR_CUMULATIVE_SUMMATION: {
+      auto desc = static_cast<const DML_CUMULATIVE_SUMMATION_OPERATOR_DESC*>(
+          op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputTensor);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      append_bytes(key_stream, desc->Axis);
+      append_bytes(key_stream, desc->AxisDirection);
+      append_bytes(key_stream, desc->HasExclusiveSum);
+      break;
+    }
+
     default:
       // This indicates an operator type not explicitly handled by the cache key
       // generation. This can lead to incorrect caching (collisions or missed
       // hits). It's crucial to list all operator types your application uses.
-      // As a fallback, one might try to hash the raw bytes of op_desc->Desc,
-      // but its size is unknown without type information.
-      // For now, append a unique marker for "unhandled type" along with the
-      // type enum.
-      // Fallback marker
-      // Append type again to make it somewhat unique
-      // append_bytes(key_stream, (uint64_t)0xFFFFFFFFFFFFFFFFULL);
-      // append_bytes(key_stream, op_desc->Type);
       throw std::runtime_error(
           "DMLOperatorCache: Unhandled DML_OPERATOR_TYPE in "
           "GenerateCacheKey: " +
           std::to_string(op_desc->Type));
       break;
   }
+  // key_stream.str() is not returned here as this is a helper.
+  // The main GenerateCacheKey will return the final string.
+}
+
+std::string DMLOperatorCache::GenerateCacheKey(const DML_OPERATOR_DESC* op_desc,
+                                               DML_EXECUTION_FLAGS flags) {
+  std::ostringstream key_stream;
+  // No need for std::hex or std::setfill if appending raw bytes.
+
+  append_bytes(key_stream, op_desc->Type);  // Serialize main operator Type
+  append_bytes(key_stream, flags);          // Serialize main operator Flags
+
+  GenerateCacheKeyForDesc(key_stream,
+                          op_desc);  // Serialize operator-specific description
+
   return key_stream.str();
 }
 

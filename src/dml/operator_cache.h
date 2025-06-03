@@ -43,6 +43,9 @@ class DMLOperatorCache {
   std::string GenerateCacheKey(const DML_OPERATOR_DESC* op_desc,
                                DML_EXECUTION_FLAGS flags);
 
+  void GenerateCacheKeyForDesc(std::ostringstream& key_stream,
+                               const DML_OPERATOR_DESC* op_desc);
+
   // Helper to serialize DML_TENSOR_DESC into the key stream.
   void SerializeTensorDesc(std::ostringstream& key_stream,
                            const DML_TENSOR_DESC* tensor_desc);
