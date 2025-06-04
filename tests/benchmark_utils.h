@@ -7,6 +7,8 @@
 #ifdef CT2_WITH_CUDA
 #  include <cuda_runtime.h>
 #  define SYNCHRONIZE cudaDeviceSynchronize()
+#elif defined(CT2_WITH_DIRECTML)
+#  define SYNCHRONIZE synchronize_device(Device::DirectML, 0)
 #else
 #  define SYNCHRONIZE do {} while (false)
 #endif

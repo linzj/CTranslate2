@@ -30,8 +30,42 @@ void Gather::compute(
   // For 'indices', DML typically expects INT32 or UINT32.
   // Assuming 'indices' StorageView is already INT32 as per typical Gather op
   // usage. DmlTensorDescBundle will use dml::utils::get_dml_data_type.
+  // If indices rank is less than data rank, reshape a copy of indices by
+  // prepending 1s. StorageView's copy constructor/assignment typically results
+  // in an owning copy if the source has data. The reshape method then only
+  // modifies the metadata (_shape) of this copy.
+  // Create a copy to potentially modify its shape.
+
+  const dim_t current_indices_rank = indices.rank();
+  const dim_t target_data_rank = data.rank();
+
+  Shape new_indices_shape = indices.shape();
+  if (current_indices_rank < target_data_rank) {
+    const size_t num_dims_to_prepend =
+        static_cast<size_t>(target_data_rank - current_indices_rank);
+    Shape new_shape_tmp(num_dims_to_prepend, 1);
+
+    // Prepend 1s to match data's rank
+    for (dim_t i = 0; i < current_indices_rank; ++i) {
+      new_shape_tmp.push_back(indices.shape()[i]);
+    }
+    new_indices_shape = std::move(new_shape_tmp);
+  }
+  ID3D12Resource* indices_buffer =
+      static_cast<ID3D12Resource*>(const_cast<void*>(indices.buffer()));
+  indices_buffer->AddRef();
+  if (indices.dtype() != DataType::INT32) {
+    throw std::invalid_argument(
+        "Gather indices must be of type INT32, but got " +
+        dtype_name(indices.dtype()));
+  }
+  StorageView indices_for_dml =
+      StorageView(new_indices_shape,
+                  static_cast<int32_t*>(static_cast<void*>(indices_buffer)),
+                  Device::DirectML);
+
   dml::utils::DmlTensorDescBundle data_desc_bundle(data);
-  dml::utils::DmlTensorDescBundle indices_desc_bundle(indices);
+  dml::utils::DmlTensorDescBundle indices_desc_bundle(indices_for_dml);
   dml::utils::DmlTensorDescBundle output_desc_bundle(output);
 
   // Get DML tensor shapes for operator descriptor configuration if needed
@@ -46,29 +80,7 @@ void Gather::compute(
   gather_desc.OutputTensor = &output_desc_bundle.get_tensor_desc();
   gather_desc.Axis = static_cast<UINT>(axis);
 
-  // IndexDimensions: "The number of an N-D input indices tensor that make up
-  // the M-D logical indices tensor..." "This value must be between 1 and
-  // DimensionCount of the indices tensor, inclusive." Typically, for gather
-  // along one axis, if `indices` is purely an index tensor (not sharing batch
-  // dims with `data`), IndexDimensions is the rank of `indices`. If `indices`
-  // has batch dims that align with `data`'s batch dims up to `axis`, then
-  // IndexDimensions should be rank(indices) - batch_dims. Given the constraint
-  // axis == batch_dims, and `indices` are applied at that axis: E.g. data: [B,
-  // S, H], indices: [B, I], axis=1 (S dim), batch_dims=1 (B dim) Here,
-  // `indices` [B,I] implies the `I` part indexes along S. The effective index
-  // rank is 1 (I). So IndexDimensions would be rank(indices) - batch_dims (if
-  // batch_dims is for shared prefix with data) But if indices are (I, J, K) to
-  // pick along axis, then indices_shape.size() is correct. The original
-  // `indices_shape.size()` is often used if `indices` is purely
-  // index-specifying. CTranslate2's Gather logic might need more detailed
-  // mapping here. Sticking with the original `indices_shape.size()` as a
-  // baseline assuming `indices` does not have additional batch dimensions
-  // beyond what DML's Gather inherently handles by tensor alignment for other
-  // axes. If `indices` has rank R, and all R dimensions are used for indexing
-  // at `axis` (e.g. an R-dimensional block of indices), then IndexDimensions
-  // would be R.
-  gather_desc.IndexDimensions =
-      static_cast<UINT>(indices_desc_bundle.get_sizes_vec().size());
+  gather_desc.IndexDimensions = static_cast<UINT>(current_indices_rank);
 
   DML_OPERATOR_DESC op_desc = {};
   op_desc.Type = DML_OPERATOR_GATHER;
@@ -85,8 +97,9 @@ void Gather::compute(
           0, data_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
   DML_BUFFER_BINDING indices_buffer_binding_storage =
       dml::utils::create_buffer_binding(
-          reinterpret_cast<ID3D12Resource*>(
-              const_cast<void*>(indices.buffer())),
+          reinterpret_cast<ID3D12Resource*>(const_cast<void*>(
+              indices_for_dml.buffer())),  // Use buffer from the (potentially
+                                           // reshaped) copy
           0, indices_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
 
   std::vector<DML_BINDING_DESC> input_bindings_for_op = {

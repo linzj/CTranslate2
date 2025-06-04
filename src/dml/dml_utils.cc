@@ -320,7 +320,8 @@ void DmlTensorDescBundle::calculate_strides_and_total_size(
       THROW_INVALID_ARGUMENT(
           "Provided strides_override rank does not match tensor rank.");
     }
-  } else {  // Calculate contiguous strides if no override
+  } else {
+#if 0
     if (rank > 0) {
       internal_strides_vec.resize(rank);
       internal_strides_vec[rank - 1] = 1;
@@ -337,8 +338,8 @@ void DmlTensorDescBundle::calculate_strides_and_total_size(
           break;
         }
       }
-      if (has_zero_dim) {  // if any dim is 0, all strides for that and outer
-                           // become effectively 0.
+      if (has_zero_dim) {
+        // if any dim is 0, all strides for that and outer become effectively 0.
         // This requires careful definition. For total size calc, 0 elements = 0
         // bytes. DML itself might treat strides differently for zero-sized
         // dimensions for broadcasting, but for TotalTensorSizeInBytes for a
@@ -349,6 +350,9 @@ void DmlTensorDescBundle::calculate_strides_and_total_size(
         // Here `internal_strides_vec` is okay.
       }
     }
+#else
+    internal_strides_vec.clear();
+#endif
   }
 
   if (total_size_in_bytes_ref ==

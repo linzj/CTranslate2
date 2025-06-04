@@ -162,9 +162,8 @@ namespace ctranslate2 {
     }
 #elif defined(CT2_WITH_DIRECTML)
     if (device == Device::DirectML) {
-      // DirectML synchronization: This is usually done by ensuring the command list is executed
-      // and GPU work is flushed. This will be implemented in dml/backend_dml.cc once CommandListExecutor is ready.
       (void)index; // Suppress unused variable warning for now.
+      dml::get_device()->ExecuteCommandListAndWait();
     }
 #else
     (void)device;
@@ -179,9 +178,7 @@ namespace ctranslate2 {
     }
 #elif defined(CT2_WITH_DIRECTML)
     if (device == Device::DirectML) {
-      // DirectML does not have a "stream" concept directly analogous to CUDA streams.
-      // Synchronization for DML operations would happen at the command list submission level,
-      // handled by a dedicated executor, which is not yet implemented.
+      dml::get_device()->ExecuteCommandListAndWait();
     }
 #else
     (void)device;

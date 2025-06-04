@@ -64,14 +64,9 @@ Device::Device(IAdapter* adapter,
       m_restoreStablePowerState(setStablePowerState),
       m_useCustomHeaps(preferCustomHeaps) {
   HRESULT hr;
-#if 0
   DML_CREATE_DEVICE_FLAGS dmlCreateDeviceFlags =
       debugLayersEnabled ? DML_CREATE_DEVICE_FLAG_DEBUG
                          : DML_CREATE_DEVICE_FLAG_NONE;
-#else
-  // DML dll does not support debug device.
-  DML_CREATE_DEVICE_FLAGS dmlCreateDeviceFlags = DML_CREATE_DEVICE_FLAG_NONE;
-#endif
 
 #if 0
   if (debugLayersEnabled) {
@@ -1041,9 +1036,10 @@ void Device::ExecuteOperator(
 }
 
 void Device::SetDescriptorHeap(ID3D12DescriptorHeap* descriptorHeap) {
-  if (descriptorHeap != nullptr && descriptorHeap != m_currentDescriptorHeap) {
-    m_currentDescriptorHeap = descriptorHeap;
-
+  if (descriptorHeap != nullptr) {
+    if (descriptorHeap != m_currentDescriptorHeap) {
+      m_currentDescriptorHeap = descriptorHeap;
+    }
     ID3D12DescriptorHeap* descriptorHeaps[] = {descriptorHeap};
     m_commandList->SetDescriptorHeaps(ARRAYSIZE(descriptorHeaps),
                                       descriptorHeaps);

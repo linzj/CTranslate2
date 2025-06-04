@@ -305,33 +305,61 @@ void primitives<Device::DirectML>::indexed_fill(T* x,
 template <>
 template <typename T>
 void primitives<Device::DirectML>::copy(const T* x, T* y, dim_t size) {
-  auto dml_device = dml::get_dml_device();
-
-  DML_BUFFER_TENSOR_DESC input_buffer_desc = {};
-  DML_BUFFER_TENSOR_DESC output_buffer_desc = {};
-
-  DML_TENSOR_DESC input_desc =
-      dml::create_tensor_desc<T>(size, input_buffer_desc);
-  DML_TENSOR_DESC output_desc =
-      dml::create_tensor_desc<T>(size, output_buffer_desc);
-
-  DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC identity_desc = {};
-  identity_desc.InputTensor = &input_desc;
-  identity_desc.OutputTensor = &output_desc;
-
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_ELEMENT_WISE_IDENTITY;
-  op_desc.Desc = &identity_desc;
-
-  dml::Operator* compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  // The 'size' parameter indicates the number of elements of type T.
+  // It's implicitly handled by ensuring that 'x' and 'y' point to
+  // ID3D12Resource buffers that are appropriately sized for the copy operation.
+  // CopyResource copies the entire resource contents.
+  (void)size;  // Size is not directly used by CopyResource but informs buffer
+               // allocation.
 
   auto dxdevice = dml::get_device();
+  // This call is expected to provide a command list that is ready for
+  // recording. It will be closed and executed by
+  // dxdevice->ExecuteCommandList().
+  auto command_list = dxdevice->GetCommandList();
 
-  std::vector<ID3D12Resource*> inputs = {
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x))};
-  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(y)};
-  compiled_op->Execute(inputs, outputs);
+  ID3D12Resource* src_resource =
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x));
+  ID3D12Resource* dst_resource = reinterpret_cast<ID3D12Resource*>(y);
+
+  D3D12_RESOURCE_BARRIER barriers[2];
+
+  // Transition source resource from UNORDERED_ACCESS to COPY_SOURCE
+  barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  barriers[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+  barriers[0].Transition.pResource = src_resource;
+  barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+  barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+
+  // Transition destination resource from UNORDERED_ACCESS to COPY_DEST
+  barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  barriers[1].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+  barriers[1].Transition.pResource = dst_resource;
+  barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+  barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+
+  command_list->ResourceBarrier(2, barriers);
+
+  // Perform the copy
+  command_list->CopyResource(dst_resource, src_resource);
+
+  // Transition source resource back to UNORDERED_ACCESS
+  barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+  // Transition destination resource back to UNORDERED_ACCESS
+  barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+  barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+  command_list->ResourceBarrier(2, barriers);
+
+  // Execute the command list.
+  // The DXDevice::ExecuteCommandList method is expected to handle closing the
+  // command list, submitting it to the command queue, and waiting for GPU
+  // completion.
+  dxdevice->ExecuteCommandList();
 }
 
 template <>
