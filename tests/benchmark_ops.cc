@@ -7,13 +7,53 @@
 using namespace ctranslate2;
 
 void benchmark_gather(Device device) {
-  StorageView data({512, 512}, DataType::FLOAT32, device);
-  std::vector<int32_t> input_v(250);
-  std::iota(input_v.begin(), input_v.end(), 0);
-  StorageView input({static_cast<dim_t>(input_v.size())}, input_v, device);
-  StorageView output(device);
-  const ops::Gather gather_op;
-  BENCHMARK(gather_op(data, input, output), 100000);
+  constexpr const bool kCheckCorrectness = false;
+  if (!kCheckCorrectness) {
+    StorageView data({512, 512}, DataType::FLOAT32, device);
+    std::vector<int32_t> input_v(250);
+    std::iota(input_v.begin(), input_v.end(), 0);
+    StorageView input({static_cast<dim_t>(input_v.size())}, input_v, device);
+    StorageView output(device);
+    const ops::Gather gather_op;
+    BENCHMARK(gather_op(data, input, output), 100000);
+  } else {
+    StorageView output_cpu;
+    std::vector<float> data_v(512 * 512);
+    std::iota(data_v.begin(), data_v.end(), 0.0f);
+    StorageView data({512, 512}, data_v, device);
+    StorageView data_cpu_check;
+    data_cpu_check.copy_from(data, true);
+    if (memcmp(data_cpu_check.data<float>(), data_v.data(),
+               data_cpu_check.size() * sizeof(float)) != 0) {
+      throw std::runtime_error("Data mismatch between CPU and device");
+    }
+    std::vector<int32_t> input_v(250);
+    std::iota(input_v.begin(), input_v.end(), 0);
+    StorageView input({static_cast<dim_t>(input_v.size())}, input_v, device);
+    StorageView input_cpu_check(DataType::INT32, Device::CPU);
+    input_cpu_check.copy_from(input, true);
+    if (memcmp(input_cpu_check.data<int32_t>(), input_v.data(),
+               input_cpu_check.size() * sizeof(int32_t)) != 0) {
+      throw std::runtime_error("Input mismatch between CPU and device");
+    }
+    StorageView output(DataType::FLOAT32, device);
+    const ops::Gather gather_op;
+    gather_op(data, input, output);
+    output_cpu.copy_from(output, true);
+    {
+      StorageView data_cpu({512, 512}, data_v, Device::CPU);
+      StorageView input_cpu({static_cast<dim_t>(input_v.size())}, input_v,
+                            Device::CPU);
+      StorageView output_cpu2(Device::CPU);
+      const ops::Gather gather_op;
+      gather_op(data_cpu, input_cpu, output_cpu2);
+      if (memcmp(output_cpu.data<float>(), output_cpu2.data<float>(),
+                 output_cpu.size() * sizeof(float)) != 0) {
+        throw std::runtime_error(
+            "Gather output mismatch between CPU and device");
+      }
+    }
+  }
 }
 
 void benchmark_transpose(Device device) {

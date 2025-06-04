@@ -2098,7 +2098,8 @@ void cross_device_primitives<Device::CPU, Device::DirectML>::copy(const T* x,
                                                                   dim_t size) {
   auto device = dml::get_device();
   std::string_view data(reinterpret_cast<const char*>(x), size * sizeof(T));
-  device->Upload(data.size(), data);
+  device->Upload(data.size(), data,
+                 reinterpret_cast<ID3D12Resource*>(const_cast<T*>(y)));
 }
 
 template <>

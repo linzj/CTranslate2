@@ -544,18 +544,32 @@ Microsoft::WRL::ComPtr<ID3D12Resource> Device::Upload(uint64_t totalSize,
   }
 
   ComPtr<ID3D12Resource> buffer;
-  ComPtr<ID3D12Resource> uploadBuffer;
-  ComPtr<ID3D12Resource> resourceToMap;
 
   if (m_useCustomHeaps) {
     buffer = CreateCustomBuffer(totalSize);
-    resourceToMap = data.empty() ? nullptr : buffer;
   } else {
     buffer = CreateDefaultBuffer(totalSize);
-    uploadBuffer = data.empty() ? nullptr : CreateUploadBuffer(totalSize);
-    uploadBuffer->SetName(L"Device::Upload");
-    resourceToMap = uploadBuffer;
   }
+
+  Upload(totalSize, data, buffer.Get(), name);
+  return buffer;
+}
+
+Microsoft::WRL::ComPtr<ID3D12Resource> Device::Upload(uint64_t totalSize,
+                                                      std::string_view data,
+                                                      ID3D12Resource* buffer,
+                                                      std::wstring_view name) {
+  if (data.size() > totalSize) {
+    throw std::invalid_argument(
+        "Attempting to upload more data than the size of the buffer");
+  }
+
+  ComPtr<ID3D12Resource> uploadBuffer;
+  ComPtr<ID3D12Resource> resourceToMap;
+
+  uploadBuffer = data.empty() ? nullptr : CreateUploadBuffer(totalSize);
+  uploadBuffer->SetName(L"Device::Upload");
+  resourceToMap = uploadBuffer;
 
   if (!name.empty()) {
     buffer->SetName(name.data());
@@ -569,11 +583,11 @@ Microsoft::WRL::ComPtr<ID3D12Resource> Device::Upload(uint64_t totalSize,
 
     if (resourceToMap == uploadBuffer) {
       D3D12_RESOURCE_BARRIER barriers[] = {CD3DX12_RESOURCE_BARRIER::Transition(
-          buffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+          buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
           D3D12_RESOURCE_STATE_COPY_DEST)};
 
       m_commandList->ResourceBarrier(_countof(barriers), barriers);
-      m_commandList->CopyResource(buffer.Get(), uploadBuffer.Get());
+      m_commandList->CopyResource(buffer, uploadBuffer.Get());
       std::swap(barriers[0].Transition.StateBefore,
                 barriers[0].Transition.StateAfter);
       m_commandList->ResourceBarrier(_countof(barriers), barriers);

@@ -183,6 +183,11 @@ class Device {
                                                 std::string_view data,
                                                 std::wstring_view name = {});
 
+  Microsoft::WRL::ComPtr<ID3D12Resource> Upload(uint64_t totalSize,
+                                                std::string_view data,
+                                                ID3D12Resource* dst,
+                                                std::wstring_view name = {});
+
   std::vector<std::byte> Download(Microsoft::WRL::ComPtr<ID3D12Resource>);
   void Download(Microsoft::WRL::ComPtr<ID3D12Resource>,
                 void* data,

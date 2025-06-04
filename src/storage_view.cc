@@ -421,8 +421,9 @@ namespace ctranslate2 {
           cross_device_primitives<Device::CPU, Device::CUDA>::copy(
               data, this->data<T>(), size);
       }
+      #endif
 #if defined(CT2_WITH_DIRECTML)
-      else if (_device == Device::DirectML || device == Device::DirectML) {
+      if (_device == Device::DirectML || device == Device::DirectML) {
         if (device == Device::DirectML)
           cross_device_primitives<Device::DirectML, Device::CPU>::copy(
               data, this->data<T>(), size);
@@ -431,9 +432,8 @@ namespace ctranslate2 {
               data, this->data<T>(), size);
       }
 #endif
-#endif  // CT2_WITH_CUDA || CT2_WITH_DIRECTML
     } else
-#endif
+#endif  // CT2_WITH_CUDA || CT2_WITH_DIRECTML
     {
       DEVICE_DISPATCH(device, primitives<D>::copy(data, this->data<T>(), size));
     }
