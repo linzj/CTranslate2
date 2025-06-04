@@ -169,7 +169,7 @@ Device::Device(IAdapter* adapter,
   THROW_IF_FAILED(m_d3d->CheckFeatureSupport(
       D3D12_FEATURE_FEATURE_LEVELS, &featureLevels, sizeof(featureLevels)));
 
-  m_descriptorPool = std::make_unique<DescriptorPool>(m_d3d.Get(), 1024 * 1024);
+  m_descriptorPool = std::make_unique<DescriptorPool>(m_d3d.Get(), 256);
 #if 0
   // Custom heaps are optional for MCDM devices, so we also need to check for
   // support.

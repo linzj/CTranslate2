@@ -1,10 +1,10 @@
+// #pragma clang optimize off
 #ifdef CT2_WITH_DIRECTML
 
 // Moved dxmodule.h and dxdevice.h to be before backend_dml.h
 #include "common.h"
 #include "dxdevice.h"  // Defines ctranslate2::dml::Device
 #include "dxmodule.h"  // For D3d12Module and DmlModule
-
 
 #include <spdlog/spdlog.h>
 #include "backend_dml.h"  // Self header
@@ -17,13 +17,72 @@
 #include <windows.h>
 #include <wrl/client.h>
 
+#include <algorithm>  // Required for std::sort
 #include <memory>
 #include <string>
+#include <vector>  // Required for std::vector
 
 using Microsoft::WRL::ComPtr;
 
 namespace ctranslate2 {
 namespace dml {
+
+// Anonymous namespace for adapter selection policy
+namespace {
+class AdapterSelectionPolicy {
+ public:
+  struct AdapterInfo {
+    ComPtr<IDXGIAdapter1> adapter;
+    DXGI_ADAPTER_DESC1 desc;
+    bool is_dedicated_adapter;
+    bool is_amd;
+
+    // Custom comparison for sorting: dedicated adapters first, then AMD
+    bool operator<(const AdapterInfo& other) const {
+      // Prioritize dedicated adapters (true > false)
+      if (is_dedicated_adapter != other.is_dedicated_adapter) {
+        return is_dedicated_adapter > other.is_dedicated_adapter;
+      }
+      // Then prioritize AMD (true > false)
+      return is_amd > other.is_amd;
+    }
+  };
+
+  static bool IsDedicatedAdapter(IDXGIAdapter1* adapter,
+                                 std::shared_ptr<D3d12Module> d3d12_module) {
+    // First check if it's a software adapter
+    DXGI_ADAPTER_DESC1 desc;
+    HRESULT hr = adapter->GetDesc1(&desc);
+    if (FAILED(hr) || (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) {
+      return false;  // Software adapters are not dedicated
+    }
+
+    // Create a temporary D3D12 device to check architecture
+    ComPtr<ID3D12Device> temp_device;
+    hr = d3d12_module->CreateDevice(
+        adapter, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device),
+        reinterpret_cast<void**>(temp_device.GetAddressOf()));
+
+    if (FAILED(hr)) {
+      return false;  // Cannot create device, assume not dedicated
+    }
+
+    // Check if the adapter has UMA (Unified Memory Architecture)
+    D3D12_FEATURE_DATA_ARCHITECTURE arch = {};
+    hr = temp_device->CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE, &arch,
+                                          sizeof(arch));
+
+    if (FAILED(hr)) {
+      // If we can't check architecture, fall back to memory check
+      return desc.DedicatedVideoMemory > 0;
+    }
+
+    // If UMA is true, then it's not a dedicated graphics adapter
+    // If UMA is false, then it is a dedicated graphics adapter
+    return !arch.UMA;
+  }
+};
+}  // namespace
 
 // Global Device object and Modules
 static std::unique_ptr<Device> g_device;
@@ -94,41 +153,51 @@ bool has_directml_device() {
     THROW_IF_FAILED(
         g_pfn_CreateDXGIFactory2(0, IID_PPV_ARGS(factory.GetAddressOf())));
 
-    // 4. Enumerate Adapters
-    ComPtr<IDXGIAdapter1> selected_adapter;
+    // 4. Enumerate Adapters and select based on policy
+
+    std::vector<AdapterSelectionPolicy::AdapterInfo> viable_adapters;
+    ComPtr<IDXGIAdapter1> current_adapter;
+
     for (UINT adapter_idx = 0;
          factory->EnumAdapters1(adapter_idx,
-                                selected_adapter.ReleaseAndGetAddressOf()) !=
+                                current_adapter.ReleaseAndGetAddressOf()) !=
          DXGI_ERROR_NOT_FOUND;
          ++adapter_idx) {
       DXGI_ADAPTER_DESC1 desc;
-      THROW_IF_FAILED(selected_adapter->GetDesc1(&desc));
+      THROW_IF_FAILED(current_adapter->GetDesc1(&desc));
 
       if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) {
         continue;  // Skip software adapter
       }
 
       // Basic check: Can a D3D12 device be tentatively created on this adapter?
-      // The Device constructor will do the actual full D3D and DML device
-      // creation. Here we're just checking adapter viability before
-      // constructing the main Device object.
-      ComPtr<ID3D12Device> temp_d3d_device;
+      // This is a prerequisite for any adapter to be considered.
       HRESULT hr_check_d3d = g_d3d12_module->CreateDevice(
-          selected_adapter.Get(), D3D_FEATURE_LEVEL_11_0,
-          __uuidof(ID3D12Device),
+          current_adapter.Get(), D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device),
           nullptr);  // Pass nullptr for ppDevice to just check support
 
       if (SUCCEEDED(hr_check_d3d)) {
-        // Found a suitable hardware adapter, break and use this one
-        break;
+        AdapterSelectionPolicy::AdapterInfo info;
+        info.adapter = current_adapter;
+        info.desc = desc;
+        info.is_dedicated_adapter = AdapterSelectionPolicy::IsDedicatedAdapter(
+            current_adapter.Get(), g_d3d12_module);
+        // AMD Vendor ID: 0x1002
+        info.is_amd = (desc.VendorId == 0x1002);
+        viable_adapters.push_back(std::move(info));
       }
-      selected_adapter.Reset();  // Try next adapter
     }
 
-    if (!selected_adapter) {
+    if (viable_adapters.empty()) {
       SPDLOG_WARN("No suitable D3D12 capable hardware adapter found.");
       return false;
     }
+
+    // Sort adapters based on the defined policy
+    std::sort(viable_adapters.begin(), viable_adapters.end());
+
+    // Select the best adapter after sorting
+    ComPtr<IDXGIAdapter1> selected_adapter = viable_adapters[0].adapter;
 
     // 5. Create the main Device object
     // Sensible defaults for Device constructor parameters.

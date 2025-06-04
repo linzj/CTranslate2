@@ -123,7 +123,11 @@ int main(int argc, char* argv[]) {
   }
 
   std::string op = argv[1];
-  Device device = std::string(argv[2]) == "cuda" ? Device::CUDA : Device::CPU;
+  std::string device_str = argv[2];
+  Device device = device_str == "cuda" ? Device::CUDA : Device::CPU;
+  if (device_str == "directml") {
+    device = Device::DirectML;
+  }
   std::string dtype_str = argc > 3 ? argv[3] : "float32";
   DataType dtype = DataType::FLOAT32;
   if (dtype_str == "int16")
