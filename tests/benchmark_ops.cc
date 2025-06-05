@@ -676,6 +676,7 @@ void benchmark_gemm(Device device, DataType dtype) {
                                                   "GEMM Output", error_log);
 
     if (total_mismatches > 0) {
+      std::cerr << error_log.str() << std::endl;
       throw std::runtime_error("GEMM output mismatch for input dtype " +
                                dtype_str_local(dtype) + " (output dtype " +
                                dtype_str_local(output_dtype_check) +

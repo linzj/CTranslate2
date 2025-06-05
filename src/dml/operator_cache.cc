@@ -774,7 +774,8 @@ Operator* DMLOperatorCache::GetOrCreateCompiledOperator(
   Microsoft::WRL::ComPtr<IDMLCompiledOperator> compiled_operator;
   THROW_IF_FAILED(dml_device->CompileOperator(
       dml_operator.Get(), flags, IID_PPV_ARGS(&compiled_operator)));
-  compiled_operator->SetName(name);
+  if (name)
+    compiled_operator->SetName(name);
   std::unique_ptr<Operator> operator_obj =
       std::make_unique<Operator>(device, std::move(compiled_operator));
 

@@ -1009,8 +1009,8 @@ void primitives<Device::DirectML>::gemm(bool a_is_packed,
     op_desc.Type = DML_OPERATOR_GEMM;
     op_desc.Desc = &gemm_desc;
 
-    dml::Operator* compiled_op =
-        dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+    dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+        &op_desc, DML_EXECUTION_FLAG_NONE, L"gemm");
 
     auto dxdevice = dml::get_device();
 
@@ -1020,6 +1020,8 @@ void primitives<Device::DirectML>::gemm(bool a_is_packed,
 
     if (beta != 0.0f) {
       inputs.push_back(reinterpret_cast<ID3D12Resource*>(c));
+    } else {
+      inputs.push_back(nullptr);
     }
 
     std::vector<ID3D12Resource*> outputs = {

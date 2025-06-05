@@ -462,7 +462,10 @@ DmlBufferBindingBundle::DmlBufferBindingBundle(ID3D12Resource* resource,
                                                UINT64 size_in_bytes)
     : buffer_binding_{resource, offset, size_in_bytes},
       type_(DML_BINDING_TYPE_BUFFER) {
-  if (size_in_bytes == 0) {
+  if (resource == nullptr) {
+    type_ = DML_BINDING_TYPE_NONE;
+  }
+  if (size_in_bytes == 0 && resource) {
     D3D12_RESOURCE_DESC desc = resource->GetDesc();
     if (desc.Format != DXGI_FORMAT_UNKNOWN) {
       THROW_INVALID_ARGUMENT(
