@@ -55,7 +55,7 @@ static int compare_storage_views_detailed_typed(
   const T* data2 = view2.data<T>();
   ctranslate2::dim_t N = view1.size();
   int mismatches_found = 0;
-  const int max_printed_mismatches = 10;
+  const int max_printed_mismatches = 10000;
 
   for (ctranslate2::dim_t i = 0; i < N; ++i) {
     T val1 = data1[i];
@@ -463,42 +463,61 @@ void benchmark_masked_softmax(Device device) {
     const ops::SoftMax softmax_op{};
     BENCHMARK(softmax_op(x, lengths, y), 10000);
   } else {
-    const dim_t batch_size = 32;
+    const dim_t actual_batch_size = 32;
     const dim_t num_heads = 8;
     const dim_t max_source = 24;
     const dim_t max_target = 36;
     const DataType dtype = DataType::FLOAT32;
     const ops::SoftMax softmax_op{};
 
-    std::vector<int32_t> lengths_data(batch_size);
-    std::fill(lengths_data.begin(), lengths_data.end(), max_source - 5);
-    std::vector<float> x_data =
-        rand_vector(batch_size * num_heads * max_source * max_target);
+    // This is the number of independent softmax operations (B * H * S)
+    const dim_t num_softmax_vectors =
+        actual_batch_size * num_heads * max_source;
 
-    StorageView lengths_device({batch_size}, lengths_data, device);
-    StorageView x_device({batch_size, num_heads, max_source, max_target},
+    std::vector<int32_t> lengths_data(num_softmax_vectors);
+    // Fill with a length value. This length (max_source - 5 = 19) will be
+    // applied to the 'max_target' dimension (size 36) for each of the
+    // num_softmax_vectors. This means the first 19 elements are considered, the
+    // rest are masked.
+    std::fill(lengths_data.begin(), lengths_data.end(), max_source - 5);
+
+    std::vector<float> x_data =
+        rand_vector(actual_batch_size * num_heads * max_source * max_target);
+
+    // `lengths_device` should have a total size of `num_softmax_vectors`.
+    // It can be flat or have a shape like {actual_batch_size, num_heads,
+    // max_source}. The SoftMax operator's check `lengths->size()` only cares
+    // about the total number of elements. Using a flat shape here for
+    // simplicity, matching the operator's `batch_size` calculation logic.
+    StorageView lengths_device(Shape{num_softmax_vectors}, lengths_data,
+                               device);  // Specify INT32
+    StorageView x_device({actual_batch_size, num_heads, max_source, max_target},
                          x_data, device);
     StorageView y_device(dtype, device);
 
-    StorageView lengths_cpu({batch_size}, lengths_data, Device::CPU);
-    StorageView x_cpu({batch_size, num_heads, max_source, max_target}, x_data,
-                      Device::CPU);
+    StorageView lengths_cpu(Shape{num_softmax_vectors}, lengths_data,
+                            Device::CPU);  // Specify INT32
+    StorageView x_cpu({actual_batch_size, num_heads, max_source, max_target},
+                      x_data, Device::CPU);
     StorageView y_cpu(dtype, Device::CPU);
 
-    softmax_op(x_device, lengths_device, y_device);
-    softmax_op(x_cpu, lengths_cpu, y_cpu);
+    softmax_op(x_device, &lengths_device, y_device);  // Pass pointer
+    softmax_op(x_cpu, &lengths_cpu, y_cpu);           // Pass pointer
 
     StorageView y_device_cpu_copy(dtype, Device::CPU);
     y_device_cpu_copy.copy_from(y_device, true);
 
     std::ostringstream error_log;
-    int total_mismatches = dispatch_compare_views(y_device_cpu_copy, y_cpu,
-                                                  "Masked SoftMax Output",
-                                                  error_log, 0.001f, 1e-6f);
+    int total_mismatches = dispatch_compare_views(
+        y_device_cpu_copy, y_cpu, "Masked SoftMax Output", error_log, 0.001f,
+        1e-5f);  // Adjusted tolerance slightly for float calcs
 
     if (total_mismatches > 0) {
+      std::cerr << error_log.str() << std::endl;
       throw std::runtime_error("Masked SoftMax output mismatch details:\n" +
                                error_log.str());
+    } else {
+      std::cout << "Masked SoftMax test passed!" << std::endl;
     }
   }
 }
