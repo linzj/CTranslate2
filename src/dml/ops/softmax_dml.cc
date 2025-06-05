@@ -41,14 +41,15 @@ void SoftMax::compute(const StorageView& input,
 
   // Create the appropriate operator descriptor
   DML_OPERATOR_DESC op_desc = {};
+  DML_ACTIVATION_LOG_SOFTMAX1_OPERATOR_DESC log_softmax_desc = {};
+  DML_ACTIVATION_SOFTMAX1_OPERATOR_DESC softmax_desc = {};
+  UINT axis = 1;  // Last dimension in our 2D tensor
 
 // Use the newer softmax operators that support axis specification
 #if DML_TARGET_VERSION >= 0x5100
   if (_log) {
     // Log softmax operator with axis support
-    UINT axis = 1;  // Last dimension in our 2D tensor
 
-    DML_ACTIVATION_LOG_SOFTMAX1_OPERATOR_DESC log_softmax_desc = {};
     log_softmax_desc.InputTensor = &dml_input_desc_ref;
     log_softmax_desc.OutputTensor = &dml_output_desc_ref;
     log_softmax_desc.AxisCount = 1;
@@ -58,9 +59,7 @@ void SoftMax::compute(const StorageView& input,
     op_desc.Desc = &log_softmax_desc;
   } else {
     // Regular softmax operator with axis support
-    UINT axis = 1;  // Last dimension in our 2D tensor
 
-    DML_ACTIVATION_SOFTMAX1_OPERATOR_DESC softmax_desc = {};
     softmax_desc.InputTensor = &dml_input_desc_ref;
     softmax_desc.OutputTensor = &dml_output_desc_ref;
     softmax_desc.AxisCount = 1;
@@ -72,14 +71,12 @@ void SoftMax::compute(const StorageView& input,
 #else
   // Fallback to older operators (no axis support - operates on entire tensor)
   if (_log) {
-    DML_ACTIVATION_LOG_SOFTMAX_OPERATOR_DESC log_softmax_desc = {};
     log_softmax_desc.InputTensor = &dml_input_desc_ref;
     log_softmax_desc.OutputTensor = &dml_output_desc_ref;
 
     op_desc.Type = DML_OPERATOR_ACTIVATION_LOG_SOFTMAX;
     op_desc.Desc = &log_softmax_desc;
   } else {
-    DML_ACTIVATION_SOFTMAX_OPERATOR_DESC softmax_desc = {};
     softmax_desc.InputTensor = &dml_input_desc_ref;
     softmax_desc.OutputTensor = &dml_output_desc_ref;
 
