@@ -3,6 +3,7 @@
 #include "command_queue.h"
 #include "common.h"
 #include "descriptor_pool.h"
+#include "dml/dml_utils.h"
 
 #include <assert.h>
 #include <dxgi1_6.h>
@@ -1023,30 +1024,24 @@ void Device::ExecuteOperator(
     const std::vector<ID3D12Resource*>& input_resources,
     const std::vector<ID3D12Resource*>& output_resources,
     ID3D12Resource* persistent_resource) {
-  DML_BINDING_DESC persistent_binding_desc = {};
+  // Use DmlBufferBindingBundle for the optional persistent resource.
+  utils::DmlBufferBindingBundle persistent_binding_bundle;
   if (persistent_resource) {
-    DML_BUFFER_BINDING persist_binding =
-        create_buffer_binding(persistent_resource);
-    persistent_binding_desc = create_binding_desc(persist_binding);
+    persistent_binding_bundle =
+        utils::DmlBufferBindingBundle(persistent_resource);
   }
+  DML_BINDING_DESC persistent_binding_desc =
+      persistent_binding_bundle.get_desc();
 
-  std::vector<DML_BINDING_DESC> input_binding_descs;
-  input_binding_descs.reserve(input_resources.size());
-  for (auto* resource : input_resources) {
-    input_binding_descs.push_back(
-        create_binding_desc(create_buffer_binding(resource)));
-  }
-
-  std::vector<DML_BINDING_DESC> output_binding_descs;
-  output_binding_descs.reserve(output_resources.size());
-  for (auto* resource : output_resources) {
-    output_binding_descs.push_back(
-        create_binding_desc(create_buffer_binding(resource)));
-  }
+  // Use DmlBindingArrayBundle for input and output resources.
+  // These bundles will manage the underlying DmlBufferBindingBundle objects
+  // and provide a vector of DML_BINDING_DESC.
+  utils::DmlBindingArrayBundle input_array_bundle(input_resources);
+  utils::DmlBindingArrayBundle output_array_bundle(output_resources);
 
   ExecuteOperator(compiled_op, persistent_binding_desc,
-                  std::move(input_binding_descs),
-                  std::move(output_binding_descs));
+                  input_array_bundle.get_descs(),
+                  output_array_bundle.get_descs());
 }
 
 void Device::SetDescriptorHeap(ID3D12DescriptorHeap* descriptorHeap) {

@@ -144,6 +144,133 @@ inline DML_BINDING_DESC create_binding_desc(
   return {DML_BINDING_TYPE_BUFFER, buffer_binding_ptr};
 }
 
+// Manages a DML_BUFFER_BINDING and provides a DML_BINDING_DESC for it.
+// This helps ensure the DML_BUFFER_BINDING outlives the DML_BINDING_DESC
+// that might be stored or used elsewhere temporarily.
+class DmlBufferBindingBundle {
+ public:
+  // Default constructor for cases where a binding might be optional
+  DmlBufferBindingBundle() : buffer_binding_{}, type_(DML_BINDING_TYPE_NONE) {}
+
+  // Constructor for a valid buffer binding
+  DmlBufferBindingBundle(
+      ID3D12Resource* resource,
+      UINT64 offset = 0,
+      UINT64 size_in_bytes = 0  // if 0, we will deduce from tensor desc
+  );
+
+  // Returns a DML_BINDING_DESC.
+  // The DML_BUFFER_BINDING is managed by this class instance.
+  DML_BINDING_DESC get_desc() const {
+    if (type_ == DML_BINDING_TYPE_BUFFER) {
+      return {DML_BINDING_TYPE_BUFFER, &buffer_binding_};
+    }
+    return {DML_BINDING_TYPE_NONE, nullptr};
+  }
+
+  // Returns a const pointer to the internal DML_BUFFER_BINDING.
+  // Useful if direct access to the DML_BUFFER_BINDING is needed,
+  // but get_desc() is preferred for creating DML_BINDING_DESC.
+  const DML_BUFFER_BINDING* get_buffer_binding_ptr() const {
+    return (type_ == DML_BINDING_TYPE_BUFFER) ? &buffer_binding_ : nullptr;
+  }
+
+  // Returns the type of the binding.
+  DML_BINDING_TYPE get_type() const { return type_; }
+
+  // Allow move construction and assignment
+  DmlBufferBindingBundle(DmlBufferBindingBundle&& other) noexcept
+      : buffer_binding_(other.buffer_binding_), type_(other.type_) {
+    // Reset the other to a safe state (optional, but good practice)
+    other.type_ = DML_BINDING_TYPE_NONE;
+    other.buffer_binding_ = {};
+  }
+
+  DmlBufferBindingBundle& operator=(DmlBufferBindingBundle&& other) noexcept {
+    if (this != &other) {
+      buffer_binding_ = other.buffer_binding_;
+      type_ = other.type_;
+      // Reset the other to a safe state
+      other.type_ = DML_BINDING_TYPE_NONE;
+      other.buffer_binding_ = {};
+    }
+    return *this;
+  }
+
+  // Delete copy constructor and copy assignment operator as DML_BINDING_DESC
+  // would point to the original DML_BUFFER_BINDING if copied, which could
+  // lead to dangling pointers if the original is destroyed.
+  // If copying is truly needed, a deep copy mechanism or shared ownership
+  // would be required, but for typical DML binding patterns, moving or
+  // creating new bundles is safer.
+  DmlBufferBindingBundle(const DmlBufferBindingBundle&) = delete;
+  DmlBufferBindingBundle& operator=(const DmlBufferBindingBundle&) = delete;
+
+ private:
+  DML_BUFFER_BINDING buffer_binding_;
+  DML_BINDING_TYPE type_;  // To handle optional/empty bindings gracefully
+};
+
+// Manages a collection of DML_BUFFER_BINDING objects via DmlBufferBindingBundle
+// and provides a way to get a vector of DML_BINDING_DESC.
+// This is useful for input or output arrays in DML operator execution.
+class DmlBindingArrayBundle {
+ public:
+  // Default constructor for an empty array of bindings
+  DmlBindingArrayBundle() = default;
+
+  // Constructor from a vector of D3D12 resources
+  explicit DmlBindingArrayBundle(
+      const std::vector<ID3D12Resource*>& resources) {
+    buffer_binding_bundles_.reserve(resources.size());
+    for (ID3D12Resource* resource : resources) {
+      // Assuming default offset (0) and size (0, to be deduced by DML)
+      // for each resource. If specific offsets/sizes are needed per resource,
+      // a more complex input structure would be required for this constructor.
+      buffer_binding_bundles_.emplace_back(resource);
+    }
+  }
+
+  // Constructor from a vector of DmlBufferBindingBundle (e.g., if already
+  // created)
+  explicit DmlBindingArrayBundle(
+      std::vector<DmlBufferBindingBundle>&& bundles) noexcept
+      : buffer_binding_bundles_(std::move(bundles)) {}
+
+  // Returns a vector of DML_BINDING_DESC.
+  // The DML_BUFFER_BINDING structures are managed by the DmlBufferBindingBundle
+  // instances within this class.
+  std::vector<DML_BINDING_DESC> get_descs() const {
+    std::vector<DML_BINDING_DESC> descs;
+    descs.reserve(buffer_binding_bundles_.size());
+    for (const auto& bundle : buffer_binding_bundles_) {
+      descs.push_back(bundle.get_desc());
+    }
+    return descs;
+  }
+
+  // Returns the number of bindings in the array.
+  size_t size() const { return buffer_binding_bundles_.size(); }
+
+  // Checks if the array of bindings is empty.
+  bool empty() const { return buffer_binding_bundles_.empty(); }
+
+  // Allow move construction and assignment
+  DmlBindingArrayBundle(DmlBindingArrayBundle&& other) noexcept = default;
+  DmlBindingArrayBundle& operator=(DmlBindingArrayBundle&& other) noexcept =
+      default;
+
+  // Delete copy constructor and copy assignment operator.
+  // Similar to DmlBufferBindingBundle, copying could lead to issues if not
+  // handled with deep copies or shared ownership. Moving or creating new
+  // array bundles is generally safer for DML binding patterns.
+  DmlBindingArrayBundle(const DmlBindingArrayBundle&) = delete;
+  DmlBindingArrayBundle& operator=(const DmlBindingArrayBundle&) = delete;
+
+ private:
+  std::vector<DmlBufferBindingBundle> buffer_binding_bundles_;
+};
+
 // --- DML Operator & Resource Creation Utilities ---
 
 // Helper to create a constant tensor on the GPU using

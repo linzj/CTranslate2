@@ -24,7 +24,8 @@ class DMLOperatorCache {
   // operator. Returns a ComPtr to the compiled DML operator.
   Operator* GetOrCreateCompiledOperator(Device* device,
                                         const DML_OPERATOR_DESC* op_desc,
-                                        DML_EXECUTION_FLAGS flags);
+                                        DML_EXECUTION_FLAGS flags,
+                                        PCWSTR name = nullptr);
 
   // Clears all cached operators.
   // Useful if, for example, the DML device is recreated.
@@ -64,7 +65,8 @@ class DMLOperatorCache {
 // available to provide the IDMLDevice.
 Operator* GetOrCreateCompiledOperatorApi(
     const DML_OPERATOR_DESC* op_desc,
-    DML_EXECUTION_FLAGS flags = DML_EXECUTION_FLAG_NONE);
+    DML_EXECUTION_FLAGS flags = DML_EXECUTION_FLAG_NONE,
+    PCWSTR name = nullptr);
 
 }  // namespace dml
 }  // namespace ctranslate2

@@ -457,6 +457,23 @@ Microsoft::WRL::ComPtr<ID3D12Resource> CreateDmlConstantTensor(
   return constant_resource;
 }
 
+DmlBufferBindingBundle::DmlBufferBindingBundle(ID3D12Resource* resource,
+                                               UINT64 offset,
+                                               UINT64 size_in_bytes)
+    : buffer_binding_{resource, offset, size_in_bytes},
+      type_(DML_BINDING_TYPE_BUFFER) {
+  if (size_in_bytes == 0) {
+    D3D12_RESOURCE_DESC desc = resource->GetDesc();
+    if (desc.Format != DXGI_FORMAT_UNKNOWN) {
+      THROW_INVALID_ARGUMENT(
+          "DML buffer binding size cannot be 0 for non-buffer resources.");
+    }
+    UINT64 size_in_byte = desc.Width;
+
+    buffer_binding_.SizeInBytes = size_in_byte;
+  }
+}
+
 }  // namespace utils
 }  // namespace dml
 }  // namespace ctranslate2

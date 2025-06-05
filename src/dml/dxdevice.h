@@ -29,27 +29,6 @@ namespace dml {
 class CommandQueue;
 class DescriptorPool;
 
-// Inline helpers
-inline DML_BUFFER_BINDING create_buffer_binding(ID3D12Resource* resource,
-                                                UINT64 offset = 0,
-                                                UINT64 size = 0) {
-  DML_BUFFER_BINDING binding = {};
-  binding.Buffer = resource;
-  binding.Offset = offset;
-  binding.SizeInBytes =
-      (size == 0 && resource) ? resource->GetDesc().Width : size;
-  return binding;
-}
-
-// Helper to create binding description
-inline DML_BINDING_DESC create_binding_desc(
-    const DML_BUFFER_BINDING& buffer_binding) {
-  DML_BINDING_DESC desc = {};
-  desc.Type = DML_BINDING_TYPE_BUFFER;
-  desc.Desc = &buffer_binding;
-  return desc;
-}
-
 class Device {
  public:
   Device(IAdapter* adapter,  // IAdapter is ::IDXGIAdapter1, should be fine

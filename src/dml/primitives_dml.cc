@@ -1,6 +1,7 @@
 #include "ctranslate2/primitives.h"
 
 #ifdef CT2_WITH_DIRECTML
+#include <spdlog/spdlog.h>
 
 #include <DirectML.h>
 #include <d3d12.h>
@@ -1682,13 +1683,16 @@ void primitives<Device::DirectML>::transpose_4d(const T* a,
   op_desc.Type = DML_OPERATOR_ELEMENT_WISE_IDENTITY;
   op_desc.Desc = &identity_desc;
 
-  dml::Operator* compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+      &op_desc, DML_EXECUTION_FLAG_NONE, L"transpose_4d");
 
   auto dxdevice = dml::get_device();
 
-  std::vector<ID3D12Resource*> inputs = {
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(a))};
+  ID3D12Resource* input_resource =
+      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(a));
+
+  D3D12_RESOURCE_DESC input_desc = input_resource->GetDesc();
+  std::vector<ID3D12Resource*> inputs = {input_resource};
   std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(b)};
 
   compiled_op->Execute(inputs, outputs);

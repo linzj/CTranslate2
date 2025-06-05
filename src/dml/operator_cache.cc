@@ -742,7 +742,8 @@ std::string DMLOperatorCache::GenerateCacheKey(const DML_OPERATOR_DESC* op_desc,
 Operator* DMLOperatorCache::GetOrCreateCompiledOperator(
     Device* device,
     const DML_OPERATOR_DESC* op_desc,
-    DML_EXECUTION_FLAGS flags) {
+    DML_EXECUTION_FLAGS flags,
+    PCWSTR name) {
   std::string key;
   if (kCacheEnabled) {
     key = GenerateCacheKey(op_desc, flags);
@@ -773,6 +774,7 @@ Operator* DMLOperatorCache::GetOrCreateCompiledOperator(
   Microsoft::WRL::ComPtr<IDMLCompiledOperator> compiled_operator;
   THROW_IF_FAILED(dml_device->CompileOperator(
       dml_operator.Get(), flags, IID_PPV_ARGS(&compiled_operator)));
+  compiled_operator->SetName(name);
   std::unique_ptr<Operator> operator_obj =
       std::make_unique<Operator>(device, std::move(compiled_operator));
 
@@ -792,11 +794,12 @@ Operator* DMLOperatorCache::GetOrCreateCompiledOperator(
 
 // Implementation of the global helper function
 Operator* GetOrCreateCompiledOperatorApi(const DML_OPERATOR_DESC* op_desc,
-                                         DML_EXECUTION_FLAGS flags) {
+                                         DML_EXECUTION_FLAGS flags,
+                                         PCWSTR name) {
   // Assumes get_dml_device() is available in ctranslate2::dml namespace
   // and returns the current IDMLDevice*.
   return DMLOperatorCache::instance().GetOrCreateCompiledOperator(
-      get_device(), op_desc, flags);
+      get_device(), op_desc, flags, name);
 }
 
 }  // namespace dml
