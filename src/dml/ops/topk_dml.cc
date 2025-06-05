@@ -50,6 +50,11 @@ void TopK::compute(const StorageView& x,
   dml::utils::DmlTensorDescBundle values_desc_bundle(values);
   dml::utils::DmlTensorDescBundle indices_desc_bundle(indices);
 
+  // Need to reset the dml data type for indices if x is sint32.
+  if (indices.dtype() == ctranslate2::DataType::INT32) {
+    indices_desc_bundle.set_data_type(DML_TENSOR_DATA_TYPE_UINT32);
+  }
+
   const DML_TENSOR_DESC& dml_input_tensor_desc =
       input_desc_bundle.get_tensor_desc();
   const DML_TENSOR_DESC& dml_values_tensor_desc =

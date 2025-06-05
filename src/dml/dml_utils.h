@@ -99,6 +99,10 @@ class DmlTensorDescBundle {
     return internal_strides_vec;
   }
 
+  void set_data_type(DML_TENSOR_DATA_TYPE dml_dtype) {
+    buffer_desc_internal.DataType = dml_dtype;
+  }
+
  private:
   std::vector<UINT> internal_sizes_vec;
   std::vector<UINT> internal_strides_vec;  // May be empty if Strides = nullptr
