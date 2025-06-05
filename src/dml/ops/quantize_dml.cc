@@ -13,315 +13,370 @@ void Quantize::quantize(const StorageView& input,
                         StorageView& output,
                         StorageView& scale) const {
   static_assert(D == Device::DirectML,
-                "This implementation is for DirectML only");
-  static_assert(std::is_same_v<InT, float>, "Input type must be float");
-  static_assert(std::is_same_v<OutT, int8_t>, "Output type must be int8_t");
+                "Device must be DirectML for this specialization.");
+  static_assert(std::is_same_v<InT, float>,
+                "Input type must be float for this DML quantization.");
+  static_assert(std::is_same_v<OutT, int8_t>,
+                "Output type must be int8_t for this DML quantization.");
 
   if (_shift_to_uint8) {
-    throw std::invalid_argument(
-        "Shift to uint8_t is not supported on DirectML");
+    THROW_INVALID_ARGUMENT(
+        "DML Quantize (float->int8_t) currently only supports symmetric "
+        "quantization (where _shift_to_uint8 is false). "
+        "Asymmetric quantization with uint8-style shift is not yet supported "
+        "for DML.");
   }
 
-  // Device checks already performed by the framework or Op a higher level
+  dml::Device* dml_dev = dml::get_device();
+  dml::utils::DmlTensorDescBundle input_desc(input);
 
-  auto* device = dml::get_device();
+  // --- 1. Prepare and Resize Output Scale Tensor ---
+  // Scale will be computed per row along the first dimension (batch_size).
+  // For an input of shape [dim0, dim1, ..., dimN-1], scale will be [dim0, 1,
+  // ..., 1]. Example: Input [B, D] -> Scale [B, 1]. Input [B, S, D] -> Scale
+  // [B, S, 1] (if per row of D) However, CPU version for [B,D] gives scale [B].
+  // For [B,S,D] it depends on how batch_size & depth are passed. Assuming for
+  // [B,D] input, scale is [B]. For DML ops, [B,1] is more convenient. Let's
+  // make the output 'scale' tensor have shape [input.dim(0), 1, ..., 1] with
+  // rank matching input, where all dimensions except the first are 1. The
+  // tiling logic will adapt. Or, more simply, for an input of rank R, scale is
+  // rank R, with input.dim(0) and 1s elsewhere. For a 2D input [B, Depth],
+  // scale shape will be [B, 1].
+  Shape scale_shape_ct;
+  std::vector<UINT> reduce_axes;
+  if (input.rank() == 0) {
+    THROW_INVALID_ARGUMENT("Input tensor cannot be scalar.");
+  }
+  // Scale is computed based on reduction of all axes except the first one(s)
+  // that define a "batch" or "instance". For typical INT8 quantization, scale
+  // is per-row of the last matrix. If input is [Batch, SeqLen, Depth], scale is
+  // often [Batch, SeqLen]. If input is [Batch, Depth], scale is [Batch]. The
+  // CPU kernel `cpu::quantize_s8(..., batch_size, depth, ...)` suggests scale
+  // is [batch_size]. Let's assume scale is per input.dim(0).
 
-  const dim_t batch_size = scale.size();  // Assuming scale is [batch_size]
-  const dim_t depth = input.dim(-1);      // Assuming input is [batch_size, ...,
-                                          // depth] or effectively [N, depth]
+  Shape computed_scale_shape_ct;  // This will be [input.dim(0), 1, ..., 1]
+                                  // matching input rank
+  for (dim_t i = 0; i < input.rank(); ++i) {
+    if (i == 0)
+      computed_scale_shape_ct.push_back(input.dim(i));
+    else
+      computed_scale_shape_ct.push_back(1);
+  }
+  // Axes to reduce: all except the first one.
+  for (dim_t i = 1; i < input.rank(); ++i) {
+    reduce_axes.push_back(static_cast<UINT>(i));
+  }
+  // Special case: input [D], reduce axis 0, scale shape [1]
+  if (input.rank() == 1) {
+    reduce_axes = {0};
+    computed_scale_shape_ct = {1};
+  }
+  // Resize the output 'scale' parameter. This is where computed scales will be
+  // stored.
+  scale.resize(computed_scale_shape_ct);
 
-  // Shapes for DML. Assuming input is effectively 2D [batch_size, depth] for
-  // this op. Scale is [batch_size, 1] for broadcasting. Output is [batch_size,
-  // depth]
-  std::vector<UINT> dml_input_sizes = {static_cast<UINT>(batch_size),
-                                       static_cast<UINT>(depth)};
-  std::vector<UINT> dml_input_strides = {static_cast<UINT>(depth), 1};
+  // --- 2. Compute Scales ---
+  // Storage for intermediate results
+  StorageView abs_input_storage(input.shape(), input.dtype(), Device::DirectML);
+  StorageView abs_max_storage(computed_scale_shape_ct, input.dtype(),
+                              Device::DirectML);  // Will store AMAX
 
-  std::vector<UINT> dml_scale_sizes = {static_cast<UINT>(batch_size), 1};
-  // Strides for [batch_size, 1] for broadcasting with [batch_size, depth]
-  // typically {1,0} or {1,1} if DML handles last dim broadcast. If scale is
-  // truly just [batch_size] StorageView, its DmlTensorDescBundle with shape
-  // [batch_size,1] and default strides would be {1,1} effectively
-  // DML_MEAN_VARIANCE_NORMALIZATION expects scale to align with normalized
-  // axes. Here we make it explicit [batch, 1].
-  std::vector<UINT> dml_scale_strides = {
-      1, 0};  // Broadcast along the depth dimension for scale.
+  // 2a. Absolute value of input: abs_input = abs(input)
+  dml::utils::DmlTensorDescBundle abs_input_desc(abs_input_storage);
+  DML_ELEMENT_WISE_ABS_OPERATOR_DESC abs_op_def = {};
+  abs_op_def.InputTensor = &input_desc.get_tensor_desc();
+  abs_op_def.OutputTensor = &abs_input_desc.get_tensor_desc();
+  DML_OPERATOR_DESC dml_abs_op_desc = {DML_OPERATOR_ELEMENT_WISE_ABS,
+                                       &abs_op_def};
+  dml::Operator* compiled_abs_op =
+      dml::DMLOperatorCache::instance().GetOrCreateCompiledOperator(
+          dml_dev, &dml_abs_op_desc, DML_EXECUTION_FLAG_NONE, L"Quantize_Abs");
+  compiled_abs_op->Execute(
+      {dml::utils::ResourceFromStorageView(input)},
+      {dml::utils::ResourceFromStorageView(abs_input_storage)});
 
-  // Tensor Descriptors using DmlTensorDescBundle
-  dml::utils::DmlTensorDescBundle input_desc_bundle(
-      DML_TENSOR_DATA_TYPE_FLOAT32, dml_input_sizes, &dml_input_strides,
-      input.size() * sizeof(float));
-  // For scale, its original StorageView 'scale' is likely [batch_size]. We
-  // describe it to DML as [batch_size, 1] for broadcasting. The
-  // TotalTensorSizeInBytes should still reflect the actual 'scale' StorageView
-  // size.
-  dml::utils::DmlTensorDescBundle scale_desc_bundle(
-      DML_TENSOR_DATA_TYPE_FLOAT32, dml_scale_sizes, &dml_scale_strides,
-      scale.size() * sizeof(float));
-  dml::utils::DmlTensorDescBundle output_desc_bundle(
-      DML_TENSOR_DATA_TYPE_INT8, dml_input_sizes, &dml_input_strides,
-      output.size() * sizeof(int8_t));
+  // 2b. Reduce to get abs_max_value: abs_max = reduce_max(abs_input) along
+  // feature dimensions
+  dml::utils::DmlTensorDescBundle abs_max_desc(abs_max_storage);
+  DML_REDUCE_OPERATOR_DESC reduce_op_def = {};
+  reduce_op_def.InputTensor = &abs_input_desc.get_tensor_desc();
+  reduce_op_def.OutputTensor =
+      &abs_max_desc.get_tensor_desc();  // Output to abs_max_storage
+  reduce_op_def.Function = DML_REDUCE_FUNCTION_MAX;
+  reduce_op_def.AxisCount = static_cast<UINT>(reduce_axes.size());
+  reduce_op_def.Axes = reduce_axes.data();
+  DML_OPERATOR_DESC dml_reduce_op_desc = {DML_OPERATOR_REDUCE, &reduce_op_def};
+  dml::Operator* compiled_reduce_op =
+      dml::DMLOperatorCache::instance().GetOrCreateCompiledOperator(
+          dml_dev, &dml_reduce_op_desc, DML_EXECUTION_FLAG_NONE,
+          L"Quantize_ReduceMax");
+  compiled_reduce_op->Execute(
+      {dml::utils::ResourceFromStorageView(abs_input_storage)},
+      {dml::utils::ResourceFromStorageView(abs_max_storage)});
 
-  // Constant tensor descriptors
-  std::vector<UINT> const_dims = {1};
-  dml::utils::DmlTensorDescBundle const_127_desc_bundle(
-      DML_TENSOR_DATA_TYPE_FLOAT32, const_dims, nullptr, sizeof(float));
-  dml::utils::DmlTensorDescBundle const_epsilon_desc_bundle(
-      DML_TENSOR_DATA_TYPE_FLOAT32, const_dims, nullptr, sizeof(float));
+  // 2c. Calculate final scale: scale_val = abs_max / 127.0f. Handle abs_max =
+  // 0. If abs_max is 0, scale should be 1.0 to make 0/1.0 = 0. Otherwise,
+  // abs_max/127.0. Create constant tensors for 127.0f, 0.0f, and 1.0f.
+  // These constants are scalars but need DML descriptors that are broadcastable
+  // to the shape of computed_scale_shape_ct.
+  // The StorageView will hold a single scalar value.
+  // The DmlTensorDescBundle will describe it as having the target shape but
+  // with zero strides.
 
-  // Get D3D12 resources from StorageView buffers
-  ID3D12Resource* input_resource =
-      reinterpret_cast<ID3D12Resource*>(const_cast<void*>(input.buffer()));
-  ID3D12Resource* output_resource =
-      reinterpret_cast<ID3D12Resource*>(output.buffer());
-  ID3D12Resource* scale_resource_target = reinterpret_cast<ID3D12Resource*>(
-      scale.buffer());  // This is where final scale is written
+  StorageView const_127_storage({1}, input.dtype(), Device::DirectML);
+  StorageView const_0_storage({1}, input.dtype(), Device::DirectML);
+  StorageView const_1_storage({1}, input.dtype(), Device::DirectML);
 
-  // Create intermediate buffers
-  // These DmlTensorDescBundles will describe the layout of these intermediate
-  // buffers. Their shapes will typically match dml_input_sizes or
-  // dml_scale_sizes.
-  dml::utils::DmlTensorDescBundle abs_buffer_desc_bundle(
-      DML_TENSOR_DATA_TYPE_FLOAT32, dml_input_sizes, &dml_input_strides);
-  auto abs_buffer = device->CreatePreferredDeviceMemoryBuffer(
-      abs_buffer_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+  float val_127 = 127.0f, val_0 = 0.0f, val_1 = 1.0f;
+  const_127_storage.fill(val_127);
+  const_0_storage.fill(val_0);
+  const_1_storage.fill(val_1);
 
-  dml::utils::DmlTensorDescBundle max_buffer_desc_bundle(
-      DML_TENSOR_DATA_TYPE_FLOAT32, dml_scale_sizes,
-      &dml_scale_strides);  // max is [batch_size, 1] like scale
-  auto max_buffer = device->CreatePreferredDeviceMemoryBuffer(
-      max_buffer_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-
-  // scale_factor_buffer will hold result of max_val with epsilon
-  dml::utils::DmlTensorDescBundle scale_factor_buffer_desc_bundle(
-      DML_TENSOR_DATA_TYPE_FLOAT32, dml_scale_sizes, &dml_scale_strides);
-  auto scale_factor_buffer = device->CreatePreferredDeviceMemoryBuffer(
-      scale_factor_buffer_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-
-  dml::utils::DmlTensorDescBundle scaled_buffer_desc_bundle(
-      DML_TENSOR_DATA_TYPE_FLOAT32, dml_input_sizes, &dml_input_strides);
-  auto scaled_buffer = device->CreatePreferredDeviceMemoryBuffer(
-      scaled_buffer_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-
-  dml::utils::DmlTensorDescBundle rounded_buffer_desc_bundle(
-      DML_TENSOR_DATA_TYPE_FLOAT32, dml_input_sizes, &dml_input_strides);
-  auto rounded_buffer = device->CreatePreferredDeviceMemoryBuffer(
-      rounded_buffer_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-
-  // Create constant buffers on GPU
-  const float constant_127_val = 127.0f;
-  const float constant_epsilon_val = 1e-8f;
-
-  DML_SCALAR_UNION scalar_127;
-  scalar_127.Float32 = constant_127_val;
-  dml::utils::DmlTensorDescBundle
-      bundle_127;  // Dummy, will be populated by CreateDmlConstantTensor
-  auto const_127_buffer_res = dml::utils::CreateDmlConstantTensor(
-      device, {1}, DML_TENSOR_DATA_TYPE_FLOAT32, scalar_127, bundle_127);
-
-  DML_SCALAR_UNION scalar_eps;
-  scalar_eps.Float32 = constant_epsilon_val;
-  dml::utils::DmlTensorDescBundle bundle_eps;  // Dummy
-  auto const_epsilon_buffer_res = dml::utils::CreateDmlConstantTensor(
-      device, {1}, DML_TENSOR_DATA_TYPE_FLOAT32, scalar_eps, bundle_eps);
-
-  // DML_BUFFER_BINDING storage for Execute calls
-  DML_BUFFER_BINDING exec_bindings[3];
-
-  // Step 1: Compute absolute values: output to abs_buffer
-  DML_ELEMENT_WISE_ABS_OPERATOR_DESC abs_op_payload = {};
-  abs_op_payload.InputTensor = &input_desc_bundle.get_tensor_desc();
-  abs_op_payload.OutputTensor =
-      &abs_buffer_desc_bundle
-           .get_tensor_desc();  // Output to intermediate abs_buffer
-  DML_OPERATOR_DESC abs_op_wrapper = {DML_OPERATOR_ELEMENT_WISE_ABS,
-                                      &abs_op_payload};
-  auto abs_compiled_op = dml::GetOrCreateCompiledOperatorApi(&abs_op_wrapper);
-  {
-    exec_bindings[0] = dml::utils::create_buffer_binding(
-        input_resource, 0,
-        input_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-    exec_bindings[1] = dml::utils::create_buffer_binding(
-        abs_buffer.Get(), 0,
-        abs_buffer_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-    abs_compiled_op->Execute(
-        {dml::utils::create_binding_desc(&exec_bindings[0])},
-        {dml::utils::create_binding_desc(&exec_bindings[1])});
+  // Prepare DML tensor descriptors for constants with broadcasting
+  DML_TENSOR_DATA_TYPE dml_scalar_dtype =
+      dml::utils::get_dml_data_type(input.dtype());
+  // Convert computed_scale_shape_ct to DML dimensions to define the shape for
+  // broadcasting. The storage_size argument to to_dml_dims is primarily for
+  // handling empty input shapes; for non-empty computed_scale_shape_ct, its
+  // exact value (0 or 1) has less impact here as we are mostly interested in
+  // getting the DML representation of computed_scale_shape_ct. 'true' for
+  // ensure_at_least_1d_for_dml is generally safe as DML tensors are rarely rank
+  // 0.
+  std::vector<UINT> target_dml_dims =
+      dml::utils::to_dml_dims(computed_scale_shape_ct, 1, true);
+  if (target_dml_dims.empty() && !computed_scale_shape_ct.empty()) {
+    // This case should ideally not be hit if to_dml_dims works as expected for
+    // non-empty shapes or if computed_scale_shape_ct is always at least rank 1
+    // from earlier logic. As a fallback if target_dml_dims became unexpectedly
+    // empty for a non-empty source shape:
+    for (dim_t d : computed_scale_shape_ct)
+      target_dml_dims.push_back(static_cast<UINT>(d));
+  }
+  if (target_dml_dims.empty() &&
+      computed_scale_shape_ct
+          .empty()) {  // if input was scalar and computed_scale_shape_ct is {1}
+                       // which to_dml_dims makes {1}
+    // if input.rank() was 0, computed_scale_shape_ct would be {1}.
+    // to_dml_dims({1},1,true) -> {1} this block can be simplified as
+    // to_dml_dims covers it.
   }
 
-  // Step 2: Reduce to find max along depth dimension (axis 1 of [batch,
-  // depth]): output to max_buffer
-  UINT reduce_axes[] = {1};  // Reduce along the 'depth' dimension
-  DML_REDUCE_OPERATOR_DESC reduce_op_payload = {};
-  reduce_op_payload.Function = DML_REDUCE_FUNCTION_MAX;
-  reduce_op_payload.InputTensor =
-      &abs_buffer_desc_bundle.get_tensor_desc();  // Input from abs_buffer
-  reduce_op_payload.OutputTensor =
-      &max_buffer_desc_bundle
-           .get_tensor_desc();  // Output to intermediate max_buffer
-  reduce_op_payload.AxisCount = 1;
-  reduce_op_payload.Axes = reduce_axes;
-  DML_OPERATOR_DESC reduce_op_wrapper = {DML_OPERATOR_REDUCE,
-                                         &reduce_op_payload};
-  auto reduce_compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&reduce_op_wrapper);
-  {
-    exec_bindings[0] = dml::utils::create_buffer_binding(
-        abs_buffer.Get(), 0,
-        abs_buffer_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-    exec_bindings[1] = dml::utils::create_buffer_binding(
-        max_buffer.Get(), 0,
-        max_buffer_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-    reduce_compiled_op->Execute(
-        {dml::utils::create_binding_desc(&exec_bindings[0])},
-        {dml::utils::create_binding_desc(&exec_bindings[1])});
-  }
+  std::vector<UINT> broadcast_strides(target_dml_dims.size(),
+                                      0);  // Strides of 0 for broadcasting
+  UINT64 single_scalar_size_bytes =
+      dml::utils::get_dml_element_size_in_bytes(dml_scalar_dtype);
 
-  // Step 3: Avoid division by zero - max(max_val, epsilon): output to
-  // scale_factor_buffer
-  DML_ELEMENT_WISE_MAX_OPERATOR_DESC max_eps_op_payload = {};
-  max_eps_op_payload.ATensor =
-      &max_buffer_desc_bundle.get_tensor_desc();  // max_val from reduce
-  max_eps_op_payload.BTensor =
-      &bundle_eps.get_tensor_desc();  // constant_epsilon
-  max_eps_op_payload.OutputTensor =
-      &scale_factor_buffer_desc_bundle
-           .get_tensor_desc();  // Output to scale_factor_buffer
-  DML_OPERATOR_DESC max_eps_op_wrapper = {DML_OPERATOR_ELEMENT_WISE_MAX,
-                                          &max_eps_op_payload};
-  auto max_eps_compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&max_eps_op_wrapper);
-  {
-    exec_bindings[0] = dml::utils::create_buffer_binding(
-        max_buffer.Get(), 0,
-        max_buffer_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-    exec_bindings[1] = dml::utils::create_buffer_binding(
-        const_epsilon_buffer_res.Get(), 0,
-        bundle_eps.get_buffer_desc().TotalTensorSizeInBytes);
-    exec_bindings[2] = dml::utils::create_buffer_binding(
-        scale_factor_buffer.Get(), 0,
-        scale_factor_buffer_desc_bundle.get_buffer_desc()
-            .TotalTensorSizeInBytes);
-    std::vector<DML_BINDING_DESC> inputs = {
-        dml::utils::create_binding_desc(&exec_bindings[0]),
-        dml::utils::create_binding_desc(&exec_bindings[1])};
-    max_eps_compiled_op->Execute(
-        inputs, {dml::utils::create_binding_desc(&exec_bindings[2])});
-  }
+  dml::utils::DmlTensorDescBundle const_127_desc(
+      dml_scalar_dtype, target_dml_dims, &broadcast_strides,
+      single_scalar_size_bytes);
+  dml::utils::DmlTensorDescBundle const_0_desc(
+      dml_scalar_dtype, target_dml_dims, &broadcast_strides,
+      single_scalar_size_bytes);
+  dml::utils::DmlTensorDescBundle const_1_desc(
+      dml_scalar_dtype, target_dml_dims, &broadcast_strides,
+      single_scalar_size_bytes);
 
-  // Step 4: Compute scale factors: 127.0 / max_val_with_epsilon: output to
-  // scale_resource_target (final scale StorageView)
-  DML_ELEMENT_WISE_DIVIDE_OPERATOR_DESC div_op_payload = {};
-  div_op_payload.ATensor = &bundle_127.get_tensor_desc();  // constant_127
-  div_op_payload.BTensor =
-      &scale_factor_buffer_desc_bundle
-           .get_tensor_desc();  // max_val from previous step
-  div_op_payload.OutputTensor =
-      &scale_desc_bundle.get_tensor_desc();  // Output to final scale buffer
-  DML_OPERATOR_DESC div_op_wrapper = {DML_OPERATOR_ELEMENT_WISE_DIVIDE,
-                                      &div_op_payload};
-  auto div_compiled_op = dml::GetOrCreateCompiledOperatorApi(&div_op_wrapper);
-  {
-    exec_bindings[0] = dml::utils::create_buffer_binding(
-        const_127_buffer_res.Get(), 0,
-        bundle_127.get_buffer_desc().TotalTensorSizeInBytes);
-    exec_bindings[1] = dml::utils::create_buffer_binding(
-        scale_factor_buffer.Get(), 0,
-        scale_factor_buffer_desc_bundle.get_buffer_desc()
-            .TotalTensorSizeInBytes);
-    exec_bindings[2] = dml::utils::create_buffer_binding(
-        scale_resource_target, 0,
-        scale_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-    std::vector<DML_BINDING_DESC> inputs = {
-        dml::utils::create_binding_desc(&exec_bindings[0]),
-        dml::utils::create_binding_desc(&exec_bindings[1])};
-    div_compiled_op->Execute(
-        inputs, {dml::utils::create_binding_desc(&exec_bindings[2])});
-  }
+  // Intermediate storage for abs_max / 127.0f
+  StorageView scale_if_amax_not_zero_storage(computed_scale_shape_ct,
+                                             input.dtype(), Device::DirectML);
+  dml::utils::DmlTensorDescBundle scale_if_amax_not_zero_desc(
+      scale_if_amax_not_zero_storage);
 
-  // Step 5: Broadcast and multiply input by scale factors: output to
-  // scaled_buffer
-  DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC mult_op_payload = {};
-  mult_op_payload.ATensor =
-      &input_desc_bundle.get_tensor_desc();  // original input
-  mult_op_payload.BTensor =
-      &scale_desc_bundle
-           .get_tensor_desc();  // final scale factors (broadcasted)
-  mult_op_payload.OutputTensor =
-      &scaled_buffer_desc_bundle.get_tensor_desc();  // Output to scaled_buffer
-  DML_OPERATOR_DESC mult_op_wrapper = {DML_OPERATOR_ELEMENT_WISE_MULTIPLY,
-                                       &mult_op_payload};
-  auto mult_compiled_op = dml::GetOrCreateCompiledOperatorApi(&mult_op_wrapper);
-  {
-    exec_bindings[0] = dml::utils::create_buffer_binding(
-        input_resource, 0,
-        input_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-    exec_bindings[1] = dml::utils::create_buffer_binding(
-        scale_resource_target, 0,
-        scale_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-    exec_bindings[2] = dml::utils::create_buffer_binding(
-        scaled_buffer.Get(), 0,
-        scaled_buffer_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-    std::vector<DML_BINDING_DESC> inputs = {
-        dml::utils::create_binding_desc(&exec_bindings[0]),
-        dml::utils::create_binding_desc(&exec_bindings[1])};
-    mult_compiled_op->Execute(
-        inputs, {dml::utils::create_binding_desc(&exec_bindings[2])});
-  }
+  DML_ELEMENT_WISE_DIVIDE_OPERATOR_DESC div_op_def = {};
+  div_op_def.ATensor = &abs_max_desc.get_tensor_desc();    // abs_max_storage
+  div_op_def.BTensor = &const_127_desc.get_tensor_desc();  // 127.0f
+  div_op_def.OutputTensor = &scale_if_amax_not_zero_desc.get_tensor_desc();
+  DML_OPERATOR_DESC dml_div_op_desc = {DML_OPERATOR_ELEMENT_WISE_DIVIDE,
+                                       &div_op_def};
+  dml::Operator* compiled_div_op =
+      dml::DMLOperatorCache::instance().GetOrCreateCompiledOperator(
+          dml_dev, &dml_div_op_desc, DML_EXECUTION_FLAG_NONE,
+          L"Quantize_DivideBy127");
+  compiled_div_op->Execute(
+      {dml::utils::ResourceFromStorageView(abs_max_storage),
+       dml::utils::ResourceFromStorageView(const_127_storage)},
+      {dml::utils::ResourceFromStorageView(scale_if_amax_not_zero_storage)});
 
-  // Step 6: Optional rounding
-  ID3D12Resource* next_input_for_cast = scaled_buffer.Get();
-  const dml::utils::DmlTensorDescBundle* next_input_desc_bundle_for_cast =
-      &scaled_buffer_desc_bundle;
+  // Condition for IF operator: is_amax_zero = (abs_max == 0)
+  StorageView condition_storage(
+      computed_scale_shape_ct,
+      DataType::INT8,  // Store as INT8, DML EQUALS outputs UINT8
+      Device::DirectML);
+  dml::utils::DmlTensorDescBundle condition_desc(condition_storage);
+  condition_desc.set_data_type(
+      DML_TENSOR_DATA_TYPE_UINT8);  // DML_OPERATOR_IF condition can be UINT8
 
-  if (_round_before_cast) {
-    DML_ELEMENT_WISE_ROUND_OPERATOR_DESC round_op_payload = {};
-    round_op_payload.InputTensor =
-        &scaled_buffer_desc_bundle
-             .get_tensor_desc();  // Input from scaled_buffer
-    round_op_payload.OutputTensor =
-        &rounded_buffer_desc_bundle
-             .get_tensor_desc();  // Output to rounded_buffer
-    round_op_payload.RoundingMode = DML_ROUNDING_MODE_HALVES_TO_NEAREST_EVEN;
-    DML_OPERATOR_DESC round_op_wrapper = {DML_OPERATOR_ELEMENT_WISE_ROUND,
-                                          &round_op_payload};
-    auto round_compiled_op =
-        dml::GetOrCreateCompiledOperatorApi(&round_op_wrapper);
-    {
-      exec_bindings[0] = dml::utils::create_buffer_binding(
-          scaled_buffer.Get(), 0,
-          scaled_buffer_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-      exec_bindings[1] = dml::utils::create_buffer_binding(
-          rounded_buffer.Get(), 0,
-          rounded_buffer_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-      round_compiled_op->Execute(
-          {dml::utils::create_binding_desc(&exec_bindings[0])},
-          {dml::utils::create_binding_desc(&exec_bindings[1])});
+  DML_ELEMENT_WISE_LOGICAL_EQUALS_OPERATOR_DESC equals_op_def = {};
+  equals_op_def.ATensor = &abs_max_desc.get_tensor_desc();  // abs_max_storage
+  equals_op_def.BTensor = &const_0_desc.get_tensor_desc();  // 0.0f
+  equals_op_def.OutputTensor = &condition_desc.get_tensor_desc();
+  DML_OPERATOR_DESC dml_equals_op_desc = {
+      DML_OPERATOR_ELEMENT_WISE_LOGICAL_EQUALS, &equals_op_def};
+  dml::Operator* compiled_equals_op =
+      dml::DMLOperatorCache::instance().GetOrCreateCompiledOperator(
+          dml_dev, &dml_equals_op_desc, DML_EXECUTION_FLAG_NONE,
+          L"Quantize_IsAmaxZero");
+  compiled_equals_op->Execute(
+      {dml::utils::ResourceFromStorageView(abs_max_storage),
+       dml::utils::ResourceFromStorageView(const_0_storage)},
+      {dml::utils::ResourceFromStorageView(condition_storage)});
+
+  // IF Operator: scale = is_amax_zero ? 1.0f : (abs_max / 127.0f)
+  // Output of IF goes directly into the 'scale' StorageView.
+  dml::utils::DmlTensorDescBundle scale_desc(scale);  // Final output scale
+
+  DML_ELEMENT_WISE_IF_OPERATOR_DESC if_op_def = {};
+  if_op_def.ConditionTensor = &condition_desc.get_tensor_desc();
+  if_op_def.ATensor =
+      &const_1_desc.get_tensor_desc();  // Tensor of 1.0f (broadcastable) -
+                                        // Corresponds to 'if true'
+  if_op_def.BTensor =
+      &scale_if_amax_not_zero_desc
+           .get_tensor_desc();  // abs_max / 127.0f - Corresponds to 'if false'
+  if_op_def.OutputTensor =
+      &scale_desc.get_tensor_desc();  // Output to final 'scale'
+  DML_OPERATOR_DESC dml_if_op_desc = {DML_OPERATOR_ELEMENT_WISE_IF, &if_op_def};
+  dml::Operator* compiled_if_op =
+      dml::DMLOperatorCache::instance().GetOrCreateCompiledOperator(
+          dml_dev, &dml_if_op_desc, DML_EXECUTION_FLAG_NONE,
+          L"Quantize_SelectScale");
+  compiled_if_op->Execute(
+      {dml::utils::ResourceFromStorageView(condition_storage),
+       dml::utils::ResourceFromStorageView(const_1_storage),
+       dml::utils::ResourceFromStorageView(scale_if_amax_not_zero_storage)},
+      {dml::utils::ResourceFromStorageView(scale)});
+
+  // --- Tile Scale Tensor (using the 'scale' that was just computed) ---
+  // 'scale' now contains the computed scales, with shape e.g. [B, 1] for a 2D
+  // input [B,D].
+  StorageView scale_source_for_tile = scale;  // This is now populated.
+  Shape input_shape_ct = input.shape();
+  Shape scale_shape_ct_original = scale_source_for_tile.shape();
+
+  Shape current_scale_shape_for_tile_op_input = scale_shape_ct_original;
+  // The original code for reshaping scale for tile op might need adjustment if
+  // scale_shape_ct_original is already [B,1,...,1] If scale_shape_ct_original
+  // is [B,1] and input is [B,S,D], we need scale to be [B,1,1] for tiling. The
+  // current computed_scale_shape_ct is [B,1..1] with same rank as input. This
+  // should be fine for the existing tiling logic that pads with 1s at the end
+  // of scale's shape. Let's verify the tiling logic's compatibility with scale
+  // having rank of input but dims as [B,1,...,1]
+
+  // Reshape scale_source_for_tile to match input's rank, padding with 1s at the
+  // end. This part might be redundant if current_scale_shape_for_tile_op_input
+  // already has the correct rank. The current computed_scale_shape_ct is e.g.
+  // [B,1] for input [B,D]. Rank is same. If input is [B,S,D],
+  // computed_scale_shape_ct is [B,1,1]. Rank is same. So, the while loop `while
+  // (current_scale_shape_for_tile_op_input.size() < input_shape_ct.size())`
+  // will not run if scale's rank is already equal to input's rank.
+
+  StorageView scale_view_for_tile_input(scale.dtype(), scale.device());
+  scale_view_for_tile_input.view(
+      const_cast<void*>(scale.buffer()),  // Use buffer from computed 'scale'
+      current_scale_shape_for_tile_op_input);  // Shape is [B,1..1]
+
+  dml::utils::DmlTensorDescBundle scale_tile_input_desc(
+      scale_view_for_tile_input);
+
+  std::vector<UINT> repeats_for_tile(
+      scale_tile_input_desc.get_sizes_vec().size());
+  for (size_t i = 0; i < repeats_for_tile.size(); ++i) {
+    // If current_scale_shape_for_tile_op_input is [B,1,...,1] (rank of input)
+    // and input_shape_ct is [B, D1, ..., DN-1]
+    if (scale_view_for_tile_input.dim(i) ==
+        input_shape_ct[i]) {  // True for i=0 (Batch dim)
+      repeats_for_tile[i] = 1;
+    } else if (scale_view_for_tile_input.dim(i) == 1) {  // True for i > 0
+      repeats_for_tile[i] = static_cast<UINT>(input_shape_ct[i]);
+    } else {
+      THROW_INVALID_ARGUMENT("Scale dimension " + std::to_string(i) + " (" +
+                             std::to_string(scale_view_for_tile_input.dim(i)) +
+                             ") must match input dimension (" +
+                             std::to_string(input_shape_ct[i]) +
+                             ") or be 1 for broadcasting in tile.");
     }
-    next_input_for_cast = rounded_buffer.Get();
-    next_input_desc_bundle_for_cast = &rounded_buffer_desc_bundle;
   }
 
-  // Step 7: Cast to int8
-  DML_CAST_OPERATOR_DESC cast_op_payload = {};
-  cast_op_payload.InputTensor =
-      &next_input_desc_bundle_for_cast->get_tensor_desc();
-  cast_op_payload.OutputTensor =
-      &output_desc_bundle.get_tensor_desc();  // Final output
-  DML_OPERATOR_DESC cast_op_wrapper = {DML_OPERATOR_CAST, &cast_op_payload};
-  auto cast_compiled_op = dml::GetOrCreateCompiledOperatorApi(&cast_op_wrapper);
-  {
-    exec_bindings[0] = dml::utils::create_buffer_binding(
-        next_input_for_cast, 0,
-        next_input_desc_bundle_for_cast->get_buffer_desc()
-            .TotalTensorSizeInBytes);
-    exec_bindings[1] = dml::utils::create_buffer_binding(
-        output_resource, 0,
-        output_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-    cast_compiled_op->Execute(
-        {dml::utils::create_binding_desc(&exec_bindings[0])},
-        {dml::utils::create_binding_desc(&exec_bindings[1])});
+  StorageView tiled_scale_storage(input_shape_ct, scale.dtype(),
+                                  Device::DirectML);
+  dml::utils::DmlTensorDescBundle tiled_scale_output_desc(tiled_scale_storage);
+
+  DML_TILE_OPERATOR_DESC tile_op_def = {};
+  tile_op_def.InputTensor =
+      &scale_tile_input_desc
+           .get_tensor_desc();  // from scale_view_for_tile_input
+  tile_op_def.OutputTensor = &tiled_scale_output_desc.get_tensor_desc();
+  tile_op_def.RepeatsCount = static_cast<UINT>(repeats_for_tile.size());
+  tile_op_def.Repeats = repeats_for_tile.data();
+
+  DML_OPERATOR_DESC dml_tile_op_desc = {DML_OPERATOR_TILE, &tile_op_def};
+  dml::Operator* compiled_tile_op =
+      dml::DMLOperatorCache::instance().GetOrCreateCompiledOperator(
+          dml_dev, &dml_tile_op_desc, DML_EXECUTION_FLAG_NONE,
+          L"TileScaleForQuantize_Computed");
+
+  // The input to tile is the 'scale_view_for_tile_input.buffer()' which holds
+  // computed scales.
+  compiled_tile_op->Execute(
+      {dml::utils::ResourceFromStorageView(
+          scale_view_for_tile_input)},  // Tile input resource is from the view
+                                        // used for descriptor
+      {dml::utils::ResourceFromStorageView(tiled_scale_storage)});
+
+  // --- Quantize Operation using Tiled Scale ---
+  if (output.dtype() != DataType::INT8) {
+    THROW_INVALID_ARGUMENT(
+        "Output StorageView for int8 quantization must have DataType::INT8.");
   }
+  output.resize(
+      input.shape());  // Ensure output is allocated with correct shape
+  dml::utils::DmlTensorDescBundle output_desc(output);
+
+  DML_ELEMENT_WISE_QUANTIZE_LINEAR_OPERATOR_DESC quantize_op_definition{};
+  quantize_op_definition.InputTensor = &input_desc.get_tensor_desc();
+  quantize_op_definition.ScaleTensor =
+      &tiled_scale_output_desc
+           .get_tensor_desc();  // Use the tiled computed scale
+  quantize_op_definition.ZeroPointTensor = nullptr;
+  quantize_op_definition.OutputTensor = &output_desc.get_tensor_desc();
+
+  DML_OPERATOR_DESC dml_quantize_op_desc{
+      DML_OPERATOR_ELEMENT_WISE_QUANTIZE_LINEAR, &quantize_op_definition};
+  dml::Operator* compiled_quantize_op =
+      dml::DMLOperatorCache::instance().GetOrCreateCompiledOperator(
+          dml_dev, &dml_quantize_op_desc, DML_EXECUTION_FLAG_NONE,
+          L"ElementWiseQuantizeLinear_F32_S8_WithComputedTiledScale");
+
+  compiled_quantize_op->Execute(
+      {dml::utils::ResourceFromStorageView(input),
+       dml::utils::ResourceFromStorageView(tiled_scale_storage),
+       nullptr /*ZeroPoint*/},  // ZeroPoint tensor is explicitly null for int8
+                                // symmetric quantization in DML
+      {dml::utils::ResourceFromStorageView(output)});
+  // --- Correct the 'scale' to be its reciprocal for the output parameter ---
+  // The 'scale' StorageView (output parameter) currently holds S_calc (abs_max
+  // / 127.0f or 1.0f). The request is for its final value to be 1/S_calc. The
+  // dml::utils::DmlTensorDescBundle scale_desc(scale) was defined earlier and
+  // describes 'scale'. We use it for both input and output of the RECIP
+  // operator for an in-place modification.
+
+  DML_ELEMENT_WISE_RECIP_OPERATOR_DESC recip_op_def = {};
+  recip_op_def.InputTensor = &scale_desc.get_tensor_desc();
+  recip_op_def.OutputTensor =
+      &scale_desc.get_tensor_desc();  // Output to the same 'scale'
+  recip_op_def.ScaleBias = nullptr;
+
+  DML_OPERATOR_DESC dml_recip_op_desc = {DML_OPERATOR_ELEMENT_WISE_RECIP,
+                                         &recip_op_def};
+  dml::Operator* compiled_recip_op =
+      dml::DMLOperatorCache::instance().GetOrCreateCompiledOperator(
+          dml_dev, &dml_recip_op_desc, DML_EXECUTION_FLAG_NONE,
+          L"Quantize_FinalReciprocalScale");
+
+  compiled_recip_op->Execute({dml::utils::ResourceFromStorageView(
+                                 scale)},  // Input resource from 'scale'
+                             {dml::utils::ResourceFromStorageView(
+                                 scale)});  // Output resource to 'scale'
 }
 
 // Explicit template instantiation

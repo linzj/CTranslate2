@@ -424,14 +424,8 @@ void DmlTensorDescBundle::calculate_strides_and_total_size(
 
 Microsoft::WRL::ComPtr<ID3D12Resource> CreateDmlConstantTensor(
     dml::Device* resolved_ct2_dml_device,
-    const std::vector<UINT>& resolved_dims,
-    DML_TENSOR_DATA_TYPE resolved_dml_tensor_type,
     DML_SCALAR_UNION resolved_scalar_value,
-    DmlTensorDescBundle& bundle_for_constant) {
-  // Initialize the bundle with the details
-  bundle_for_constant =
-      DmlTensorDescBundle(resolved_dml_tensor_type, resolved_dims, nullptr, 0);
-
+    const DmlTensorDescBundle& bundle_for_constant) {
   Microsoft::WRL::ComPtr<ID3D12Resource> constant_resource =
       resolved_ct2_dml_device->CreatePreferredDeviceMemoryBuffer(
           bundle_for_constant.get_buffer_desc().TotalTensorSizeInBytes);
@@ -440,7 +434,7 @@ Microsoft::WRL::ComPtr<ID3D12Resource> CreateDmlConstantTensor(
 
   DML_FILL_VALUE_CONSTANT_OPERATOR_DESC fill_desc{};
   fill_desc.OutputTensor = &bundle_for_constant.get_tensor_desc();
-  fill_desc.ValueDataType = resolved_dml_tensor_type;
+  fill_desc.ValueDataType = bundle_for_constant.get_data_type();
   fill_desc.Value = resolved_scalar_value;
 
   DML_OPERATOR_DESC op_desc = {DML_OPERATOR_FILL_VALUE_CONSTANT, &fill_desc};

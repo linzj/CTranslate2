@@ -99,6 +99,10 @@ class DmlTensorDescBundle {
     return internal_strides_vec;
   }
 
+  DML_TENSOR_DATA_TYPE get_data_type() const {
+    return buffer_desc_internal.DataType;
+  }
+
   void set_data_type(DML_TENSOR_DATA_TYPE dml_dtype) {
     buffer_desc_internal.DataType = dml_dtype;
   }
@@ -282,13 +286,14 @@ class DmlBindingArrayBundle {
 // DML_BUFFER_TENSOR_DESC and DML_TENSOR_DESC. Returns the GPU resource and
 // fills out_bundle with the descriptor bundle.
 Microsoft::WRL::ComPtr<ID3D12Resource> CreateDmlConstantTensor(
-    dml::Device* ct2_dml_device,           // ctranslate2 dml::Device wrapper
-    const std::vector<UINT>& dims,         // Dimensions of the constant tensor
-    DML_TENSOR_DATA_TYPE dml_tensor_type,  // Data type of the tensor
-    DML_SCALAR_UNION scalar_value,         // Scalar value to fill
-    DmlTensorDescBundle& out_bundle        // Output: Bundle containing descs
-);
+    dml::Device* ct2_dml_device,    // ctranslate2 dml::Device wrapper
+    DML_SCALAR_UNION scalar_value,  // Scalar value to fill
+    const DmlTensorDescBundle& out_bundle);
 
+inline ID3D12Resource* ResourceFromStorageView(
+    const StorageView& storage_view) {
+  return static_cast<ID3D12Resource*>(const_cast<void*>(storage_view.buffer()));
+}
 }  // namespace utils
 }  // namespace dml
 }  // namespace ctranslate2

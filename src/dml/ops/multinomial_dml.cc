@@ -141,11 +141,10 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
   {  // Zero Init Philox State
     DML_SCALAR_UNION zero_scalar;
     zero_scalar.UInt32 = 0;
-    dml::utils::DmlTensorDescBundle
-        temp_fill_bundle;  // Will be populated by CreateDmlConstantTensor
-    dml::utils::CreateDmlConstantTensor(
-        device, philox_state_tensor_desc_bundle.get_sizes_vec(),
-        DML_TENSOR_DATA_TYPE_UINT32, zero_scalar, temp_fill_bundle);
+    dml::utils::DmlTensorDescBundle temp_fill_bundle(
+        DML_TENSOR_DATA_TYPE_UINT32,
+        philox_state_tensor_desc_bundle.get_sizes_vec(), nullptr);
+    dml::utils::CreateDmlConstantTensor(device, zero_scalar, temp_fill_bundle);
     // The above only *creates* a constant tensor. To fill state_in_res:
     DML_FILL_VALUE_CONSTANT_OPERATOR_DESC fill_zero_desc = {};
     fill_zero_desc.OutputTensor =
@@ -321,12 +320,11 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
   {
     DML_SCALAR_UNION max_float_scalar;
     max_float_scalar.Float32 = std::numeric_limits<float>::max();
-    dml::utils::DmlTensorDescBundle
-        temp_max_val_bundle;  // For CreateDmlConstantTensor's output param
-    // This will fill max_val_res using the helper.
-    dml::utils::CreateDmlConstantTensor(
-        device, max_val_desc_bundle.get_sizes_vec(),
-        DML_TENSOR_DATA_TYPE_FLOAT32, max_float_scalar, temp_max_val_bundle);
+    dml::utils::DmlTensorDescBundle temp_max_val_bundle(
+        DML_TENSOR_DATA_TYPE_FLOAT32, max_val_desc_bundle.get_sizes_vec(),
+        nullptr);
+    dml::utils::CreateDmlConstantTensor(device, max_float_scalar,
+                                        temp_max_val_bundle);
     // Bind max_val_res which was populated by CreateDmlConstantTensor which
     // created its *own* resource. To use pre-allocated max_val_res:
     DML_FILL_VALUE_CONSTANT_OPERATOR_DESC desc_fill_max = {};

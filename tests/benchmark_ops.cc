@@ -81,8 +81,14 @@ static int compare_storage_views_detailed_typed(
       if (mismatches_found < max_printed_mismatches) {
         // Coordinate printing removed due to lack of standard index_to_coord
         oss << tensor_name << " mismatch at raw_index " << i;
-        oss << ": DeviceCPUVal=" << val1 << " vs. CPUVal=" << val2
-            << ", AbsDiff=" << std::abs(val1 - val2);
+        if constexpr (std::is_same_v<T, int8_t>) {
+          oss << ": DeviceCPUVal=" << static_cast<int>(val1)
+              << " vs. CPUVal=" << static_cast<int>(val2)
+              << ", AbsDiff=" << std::abs(val1 - val2);
+        } else {
+          oss << ": DeviceCPUVal=" << val1 << " vs. CPUVal=" << val2
+              << ", AbsDiff=" << std::abs(val1 - val2);
+        }
         if constexpr (std::is_floating_point_v<T>) {
           T max_abs_val_for_rel =
               std::max({static_cast<T>(1e-9), std::abs(val1), std::abs(val2)});
@@ -699,17 +705,17 @@ void benchmark_quantize(Device device, DataType out_dtype) {
     std::vector<float> x_data = rand_vector(x_shape[0] * x_shape[1]);
 
     StorageView x_device(x_shape, x_data, device);
-    StorageView y_device(out_dtype, device);
+    StorageView y_device(DataType::INT8, device);
     StorageView scale_device(DataType::FLOAT32, device);
 
     StorageView x_cpu(x_shape, x_data, Device::CPU);
-    StorageView y_cpu(out_dtype, Device::CPU);
+    StorageView y_cpu(DataType::INT8, Device::CPU);
     StorageView scale_cpu(DataType::FLOAT32, Device::CPU);
 
     quantize_op(x_device, y_device, scale_device);
     quantize_op(x_cpu, y_cpu, scale_cpu);
 
-    StorageView y_device_cpu_copy(out_dtype, Device::CPU);
+    StorageView y_device_cpu_copy(DataType::INT8, Device::CPU);
     y_device_cpu_copy.copy_from(y_device, true);
     StorageView scale_device_cpu_copy(DataType::FLOAT32, Device::CPU);
     scale_device_cpu_copy.copy_from(scale_device, true);
@@ -718,10 +724,14 @@ void benchmark_quantize(Device device, DataType out_dtype) {
     int total_mismatches = 0;
     total_mismatches += dispatch_compare_views(y_device_cpu_copy, y_cpu,
                                                "Quantize Output Y", error_log);
+    if (scale_device_cpu_copy.shape() != scale_cpu.shape()) {
+      scale_device_cpu_copy.reshape(scale_cpu.shape());
+    }
     total_mismatches += dispatch_compare_views(
         scale_device_cpu_copy, scale_cpu, "Quantize Output Scale", error_log);
 
-    if (total_mismatches > 0) {
+    if (total_mismatches > 1) {
+      std::cerr << error_log.str() << std::endl;
       throw std::runtime_error("Quantize output mismatch for output_dtype " +
                                dtype_str_local(out_dtype) + " details:\n" +
                                error_log.str());

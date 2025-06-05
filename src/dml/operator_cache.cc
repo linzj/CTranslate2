@@ -691,6 +691,15 @@ void DMLOperatorCache::GenerateCacheKeyForDesc(
       SerializeTensorDesc(key_stream, desc->OutputTensor);
       break;
     }
+    case DML_OPERATOR_ELEMENT_WISE_LOGICAL_EQUALS: {
+      auto desc =
+          static_cast<const DML_ELEMENT_WISE_LOGICAL_EQUALS_OPERATOR_DESC*>(
+              op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->ATensor);
+      SerializeTensorDesc(key_stream, desc->BTensor);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      break;
+    }
     case DML_OPERATOR_ELEMENT_WISE_IF: {
       auto desc =
           static_cast<const DML_ELEMENT_WISE_IF_OPERATOR_DESC*>(op_desc->Desc);
@@ -708,6 +717,24 @@ void DMLOperatorCache::GenerateCacheKeyForDesc(
       append_bytes(key_stream, desc->Axis);
       append_bytes(key_stream, desc->AxisDirection);
       append_bytes(key_stream, desc->HasExclusiveSum);
+      break;
+    }
+    case DML_OPERATOR_ELEMENT_WISE_QUANTIZE_LINEAR: {
+      auto desc =
+          static_cast<const DML_ELEMENT_WISE_QUANTIZE_LINEAR_OPERATOR_DESC*>(
+              op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputTensor);
+      SerializeTensorDesc(key_stream, desc->ScaleTensor);
+      SerializeTensorDesc(key_stream, desc->ZeroPointTensor);  // Handles null
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      break;
+    }
+    case DML_OPERATOR_ELEMENT_WISE_RECIP: {
+      auto desc = static_cast<const DML_ELEMENT_WISE_RECIP_OPERATOR_DESC*>(
+          op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputTensor);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      SerializeScaleBias(key_stream, desc->ScaleBias);
       break;
     }
 

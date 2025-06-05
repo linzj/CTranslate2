@@ -225,10 +225,10 @@ void GumbelMax::add_gumbel_noise(const StorageView& x, StorageView& y) const {
   DML_SCALAR_UNION scale_val_scalar;
   scale_val_scalar.Float32 =
       1.0f / static_cast<float>(std::numeric_limits<uint32_t>::max());
-  dml::utils::DmlTensorDescBundle
-      scale_const_desc_bundle;  // To be filled by CreateDmlConstantTensor
+  dml::utils::DmlTensorDescBundle scale_const_desc_bundle(dml_compute_type, {1},
+                                                          nullptr);
   auto scale_const_res = dml::utils::CreateDmlConstantTensor(
-      device, {1}, dml_compute_type, scale_val_scalar, scale_const_desc_bundle);
+      device, scale_val_scalar, scale_const_desc_bundle);
 
   DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC multiply_desc{};
   multiply_desc.ATensor = &uniform_fp32_desc_bundle.get_tensor_desc();
@@ -256,9 +256,10 @@ void GumbelMax::add_gumbel_noise(const StorageView& x, StorageView& y) const {
   // Add epsilon
   DML_SCALAR_UNION eps_val_scalar;
   eps_val_scalar.Float32 = 1e-9f;
-  dml::utils::DmlTensorDescBundle eps_const_desc_bundle;
+  dml::utils::DmlTensorDescBundle eps_const_desc_bundle(dml_compute_type, {1},
+                                                        nullptr);
   auto eps_const_res = dml::utils::CreateDmlConstantTensor(
-      device, {1}, dml_compute_type, eps_val_scalar, eps_const_desc_bundle);
+      device, eps_val_scalar, eps_const_desc_bundle);
 
   DML_ELEMENT_WISE_ADD_OPERATOR_DESC add_eps_desc{};
   add_eps_desc.ATensor = &uniform_fp32_desc_bundle.get_tensor_desc();
