@@ -223,46 +223,35 @@ void GumbelMax::add_gumbel_noise(const StorageView& x, StorageView& y) const {
   scale_val_scalar.Float32 =
       1.0f / static_cast<float>(std::numeric_limits<uint32_t>::max());
 
-  // Use standalone DML_OPERATOR_ACTIVATION_LINEAR for scaling
-  DML_ACTIVATION_LINEAR_OPERATOR_DESC scale_op_payload{};
-  scale_op_payload.InputTensor = &uniform_fp32_desc_bundle.get_tensor_desc();
-  scale_op_payload.OutputTensor =
-      &uniform_fp32_desc_bundle.get_tensor_desc();  // In-place
-  scale_op_payload.Alpha = scale_val_scalar.Float32;
-  scale_op_payload.Beta = 0.0f;
-  DML_OPERATOR_DESC scale_op_desc = {DML_OPERATOR_ACTIVATION_LINEAR,
-                                     &scale_op_payload};
-
-  dml::utils::DmlBufferBindingBundle scale_input_binding(
-      uniform_fp32_resource.Get());
-  dml::utils::DmlBufferBindingBundle scale_output_binding(
-      uniform_fp32_resource.Get());  // In-place
-
-  dml::GetOrCreateCompiledOperatorApi(&scale_op_desc)
-      ->Execute({scale_input_binding.get_desc()},
-                {scale_output_binding.get_desc()});
-
-  // Add epsilon
+  // Apply fused linear transformation: Result = scale_factor * Input +
+  // (epsilon_const * scale_factor) 'eps_val_scalar' (providing epsilon_const =
+  // 1e-9f) is defined here. 'scale_val_scalar' (providing scale_factor = 1.0f /
+  // uint32_max) is defined above (lines 223-225).
   DML_SCALAR_UNION eps_val_scalar;
   eps_val_scalar.Float32 = 1e-9f;
-  // Use standalone DML_OPERATOR_ACTIVATION_LINEAR for adding epsilon
-  DML_ACTIVATION_LINEAR_OPERATOR_DESC add_eps_op_payload = {};
-  add_eps_op_payload.InputTensor = &uniform_fp32_desc_bundle.get_tensor_desc();
-  add_eps_op_payload.OutputTensor =
-      &uniform_fp32_desc_bundle.get_tensor_desc();  // In-place
-  add_eps_op_payload.Alpha = 1.0f;
-  add_eps_op_payload.Beta = eps_val_scalar.Float32;
-  DML_OPERATOR_DESC add_eps_op_desc = {DML_OPERATOR_ACTIVATION_LINEAR,
-                                       &add_eps_op_payload};
 
-  dml::utils::DmlBufferBindingBundle add_eps_input_binding(
+  DML_ACTIVATION_LINEAR_OPERATOR_DESC fused_linear_op_payload = {};
+  fused_linear_op_payload.InputTensor =
+      &uniform_fp32_desc_bundle.get_tensor_desc();
+  fused_linear_op_payload.OutputTensor =
+      &uniform_fp32_desc_bundle.get_tensor_desc();  // In-place
+  fused_linear_op_payload.Alpha =
+      scale_val_scalar.Float32;  // This is 'scale_factor'
+  fused_linear_op_payload.Beta =
+      eps_val_scalar.Float32 *
+      scale_val_scalar.Float32;  // This is 'epsilon_const * scale_factor'
+
+  DML_OPERATOR_DESC fused_linear_op_desc = {DML_OPERATOR_ACTIVATION_LINEAR,
+                                            &fused_linear_op_payload};
+
+  dml::utils::DmlBufferBindingBundle fused_linear_input_binding(
       uniform_fp32_resource.Get());
-  dml::utils::DmlBufferBindingBundle add_eps_output_binding(
+  dml::utils::DmlBufferBindingBundle fused_linear_output_binding(
       uniform_fp32_resource.Get());  // In-place
 
-  dml::GetOrCreateCompiledOperatorApi(&add_eps_op_desc)
-      ->Execute({add_eps_input_binding.get_desc()},
-                {add_eps_output_binding.get_desc()});
+  dml::GetOrCreateCompiledOperatorApi(&fused_linear_op_desc)
+      ->Execute({fused_linear_input_binding.get_desc()},
+                {fused_linear_output_binding.get_desc()});
 
   // Step 2: Compute Logarithm
   DML_ELEMENT_WISE_LOG_OPERATOR_DESC log_desc{};
