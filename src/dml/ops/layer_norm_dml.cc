@@ -88,13 +88,18 @@ void LayerNorm::compute(const StorageView* beta,
 
   // Get D3D12 resources from StorageView buffers
   // StorageView::buffer() returns ID3D12Resource* for DirectML backend
-  auto input_resource =
-      static_cast<ID3D12Resource*>(const_cast<void*>(input.buffer()));
-  auto scale_resource =
-      static_cast<ID3D12Resource*>(const_cast<void*>(gamma->buffer()));
-  auto bias_resource =
-      static_cast<ID3D12Resource*>(const_cast<void*>(beta->buffer()));
-  auto output_resource = static_cast<ID3D12Resource*>(output.buffer());
+  // input and output must share the same buffer.
+  ID3D12Resource* input_resource;
+  std::unique_ptr<StorageView> maybe_input_resource;
+  if (input.buffer() == output.buffer()) {
+    maybe_input_resource = std::make_unique<StorageView>(input);
+    input_resource = dml::utils::ResourceFromStorageView(*maybe_input_resource);
+  } else {
+    input_resource = dml::utils::ResourceFromStorageView(input);
+  }
+  auto scale_resource = dml::utils::ResourceFromStorageView(*gamma);
+  auto bias_resource = dml::utils::ResourceFromStorageView(*beta);
+  auto output_resource = dml::utils::ResourceFromStorageView(output);
 
   // Bind input tensors
   DML_BUFFER_BINDING input_buffer_binding_storage =
