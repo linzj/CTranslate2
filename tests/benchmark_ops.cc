@@ -993,7 +993,9 @@ void benchmark_bias_add(Device device) {
     const Shape bias_shape = {
         value_shape[1]};  // Bias is typically on the last dimension
     const DataType dtype = DataType::FLOAT32;
-    const ops::BiasAdd bias_add_op;  // Default: no activation
+    ctranslate2::ops::ActivationType activation_type =
+        ctranslate2::ops::ActivationType::GELU;
+    const ops::BiasAdd bias_add_op(&activation_type);
 
     std::vector<float> value_data_vec =
         rand_vector(value_shape[0] * value_shape[1]);

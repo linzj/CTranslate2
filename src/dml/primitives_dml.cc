@@ -2096,6 +2096,8 @@ void primitives<Device::DirectML>::gemm_batch_strided(bool transpose_a,
 
   if (beta != 0.0f) {
     inputs.push_back(reinterpret_cast<ID3D12Resource*>(c));
+  } else {
+    inputs.push_back(nullptr);
   }
 
   std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(c)};
