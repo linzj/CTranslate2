@@ -889,7 +889,75 @@ void benchmark_conv1d(Device device) {
         y_device_cpu_copy, y_cpu, "Conv1D Output", error_log, 0.001f, 1e-5f);
 
     if (total_mismatches > 0) {
+      std::cerr << error_log.str() << std::endl;
       throw std::runtime_error("Conv1D output mismatch details:\n" +
+                               error_log.str());
+    }
+  }
+}
+
+void benchmark_gumbel_max(Device device) {
+  const dim_t num_samples =
+      4;  // Number of samples to draw, equivalent to k in TopK
+  if (!kCheckCorrectness) {
+    const dim_t batch_size_bm = 32;
+    const dim_t depth_bm = 1024;  // Example depth/vocab size for benchmark
+    std::vector<float> x_data_bm = rand_vector(batch_size_bm * depth_bm);
+    StorageView x_bm({batch_size_bm, depth_bm}, DataType::FLOAT32, device);
+    // It's good practice to initialize data for ops that compute on values.
+    // Copying from CPU host vector to device.
+    StorageView x_temp_cpu(x_bm.shape(), x_data_bm, Device::CPU);
+    x_bm.copy_from(x_temp_cpu);
+
+    StorageView values_bm(DataType::FLOAT32, device);
+    StorageView indices_bm(DataType::INT32, device);
+    const ops::GumbelMax gumbel_max_op_bm(num_samples);
+    BENCHMARK(gumbel_max_op_bm(x_bm, values_bm, indices_bm),
+              2000);  // Adjust iteration count as needed
+  } else {
+    std::ostringstream error_log;
+    int total_mismatches = 0;
+
+    const dim_t batch_size_corr = 8;
+    const dim_t depth_corr = 100;  // Smaller depth for faster correctness check
+    const Shape input_shape = {batch_size_corr, depth_corr};
+    const DataType dtype =
+        DataType::FLOAT32;  // GumbelMax typically operates on floats
+    const ops::GumbelMax gumbel_max_op(num_samples);
+
+    std::vector<float> x_data_vec =
+        rand_vector(input_shape[0] * input_shape[1]);
+
+    StorageView x_device(input_shape, x_data_vec, device);
+    StorageView values_device(dtype, device);
+    StorageView indices_device(DataType::INT32, device);
+
+    StorageView x_cpu(input_shape, x_data_vec, Device::CPU);
+    StorageView values_cpu(dtype, Device::CPU);
+    StorageView indices_cpu(DataType::INT32, Device::CPU);
+
+    // Perform operation on device
+    gumbel_max_op(x_device, values_device, indices_device);
+
+    // Perform operation on CPU for reference
+    gumbel_max_op(x_cpu, values_cpu, indices_cpu);
+
+    // Copy device results to CPU for comparison
+    StorageView values_device_cpu_copy(values_device.dtype(), Device::CPU);
+    values_device_cpu_copy.copy_from(values_device, true);  // true for sync
+    StorageView indices_device_cpu_copy(indices_device.dtype(), Device::CPU);
+    indices_device_cpu_copy.copy_from(indices_device, true);  // true for sync
+
+    // GumbelMax output values are original values from x at selected indices
+    total_mismatches += dispatch_compare_views(
+        values_device_cpu_copy, values_cpu, "GumbelMax Values", error_log);
+
+    // Indices should match exactly
+    total_mismatches += dispatch_compare_views(
+        indices_device_cpu_copy, indices_cpu, "GumbelMax Indices", error_log);
+
+    if (total_mismatches > 0) {
+      throw std::runtime_error("GumbelMax output mismatch details:\n" +
                                error_log.str());
     }
   }
@@ -936,6 +1004,8 @@ int main(int argc, char* argv[]) {
     benchmark_dequantize(device);
   else if (op == "conv1d")
     benchmark_conv1d(device);
+  else if (op == "gumbel_max")
+    benchmark_gumbel_max(device);
 
   return 0;
 }

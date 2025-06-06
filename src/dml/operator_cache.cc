@@ -559,6 +559,15 @@ void DMLOperatorCache::GenerateCacheKeyForDesc(
       append_bytes(key_stream, desc->SigmoidInputScale);
       break;
     }
+    case DML_OPERATOR_ACTIVATION_LINEAR: {
+      auto desc = static_cast<const DML_ACTIVATION_LINEAR_OPERATOR_DESC*>(
+          op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputTensor);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      append_bytes(key_stream, desc->Alpha);
+      append_bytes(key_stream, desc->Beta);
+      break;
+    }
     case DML_OPERATOR_ACTIVATION_IDENTITY: {
       // For DML_ACTIVATION_IDENTITY_OPERATOR_DESC
       auto desc = static_cast<const DML_ACTIVATION_IDENTITY_OPERATOR_DESC*>(

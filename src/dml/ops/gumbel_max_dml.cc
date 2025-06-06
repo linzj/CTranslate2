@@ -68,21 +68,18 @@ void GumbelMax::add_gumbel_noise(const StorageView& x, StorageView& y) const {
       dml_compute_type, dml_dims_vec, nullptr);
   auto uniform_fp32_resource = device->CreatePreferredDeviceMemoryBuffer(
       uniform_fp32_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-  device->KeepAliveUntilNextCommandListDispatch(uniform_fp32_resource);
 
   // log_uniform_fp32_resource will hold log(uniform_fp32_resource)
   dml::utils::DmlTensorDescBundle log_uniform_fp32_desc_bundle(
       dml_compute_type, dml_dims_vec, nullptr);
   auto log_uniform_fp32_resource = device->CreatePreferredDeviceMemoryBuffer(
       log_uniform_fp32_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-  device->KeepAliveUntilNextCommandListDispatch(log_uniform_fp32_resource);
 
   // gumbel_noise_fp32_resource will hold -log(uniform_fp32_resource)
   dml::utils::DmlTensorDescBundle gumbel_noise_fp32_desc_bundle(
       dml_compute_type, dml_dims_vec, nullptr);
   auto gumbel_noise_fp32_resource = device->CreatePreferredDeviceMemoryBuffer(
       gumbel_noise_fp32_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-  device->KeepAliveUntilNextCommandListDispatch(gumbel_noise_fp32_resource);
 
   bool cast_input_to_fp32 = (dml_input_type != dml_compute_type);
   Microsoft::WRL::ComPtr<ID3D12Resource>
@@ -97,7 +94,6 @@ void GumbelMax::add_gumbel_noise(const StorageView& x, StorageView& y) const {
         dml_compute_type, dml_dims_vec, nullptr);
     x_fp32_intermediate_resource = device->CreatePreferredDeviceMemoryBuffer(
         x_fp32_desc_bundle_ptr->get_buffer_desc().TotalTensorSizeInBytes);
-    device->KeepAliveUntilNextCommandListDispatch(x_fp32_intermediate_resource);
 
     current_x_tensor_desc_for_op_ptr =
         &x_fp32_desc_bundle_ptr->get_tensor_desc();
@@ -122,8 +118,6 @@ void GumbelMax::add_gumbel_noise(const StorageView& x, StorageView& y) const {
             dml_compute_type, dml_dims_vec, nullptr);
     sum_fp32_intermediate_resource = device->CreatePreferredDeviceMemoryBuffer(
         sum_fp32_desc_bundle_ptr->get_buffer_desc().TotalTensorSizeInBytes);
-    device->KeepAliveUntilNextCommandListDispatch(
-        sum_fp32_intermediate_resource);
     target_sum_resource_for_op_ptr = sum_fp32_intermediate_resource.Get();
     target_sum_tensor_desc_for_op_ptr =
         &sum_fp32_desc_bundle_ptr->get_tensor_desc();
@@ -135,9 +129,6 @@ void GumbelMax::add_gumbel_noise(const StorageView& x, StorageView& y) const {
 
   // --- Operator Execution Sequence ---
 
-  DML_BUFFER_BINDING temp_binding_storage[2];  // For Execute calls, ensure
-                                               // DML_BUFFER_BINDING lives
-
   if (cast_input_to_fp32) {
     DML_CAST_OPERATOR_DESC cast_to_fp32_desc{};
     cast_to_fp32_desc.InputTensor = &x_desc_bundle.get_tensor_desc();
@@ -146,16 +137,15 @@ void GumbelMax::add_gumbel_noise(const StorageView& x, StorageView& y) const {
                                            // x_fp32_desc_bundle_ptr->get_tensor_desc()
     DML_OPERATOR_DESC op_desc = {DML_OPERATOR_CAST, &cast_to_fp32_desc};
 
-    temp_binding_storage[0] = dml::utils::create_buffer_binding(
+    dml::utils::DmlBufferBindingBundle input_cast_binding(
         reinterpret_cast<ID3D12Resource*>(const_cast<void*>(x.buffer())), 0,
         x_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-    temp_binding_storage[1] = dml::utils::create_buffer_binding(
+    dml::utils::DmlBufferBindingBundle output_cast_binding(
         current_x_resource_for_op_ptr, 0,
         x_fp32_desc_bundle_ptr->get_buffer_desc().TotalTensorSizeInBytes);
 
     dml::GetOrCreateCompiledOperatorApi(&op_desc)->Execute(
-        {dml::utils::create_binding_desc(&temp_binding_storage[0])},
-        {dml::utils::create_binding_desc(&temp_binding_storage[1])});
+        {input_cast_binding.get_desc()}, {output_cast_binding.get_desc()});
   }
 
   // Step 1.1: Generate Uniform UINT32 Random Numbers
@@ -163,23 +153,29 @@ void GumbelMax::add_gumbel_noise(const StorageView& x, StorageView& y) const {
       DML_TENSOR_DATA_TYPE_UINT32, dml_dims_vec, nullptr);
   auto uniform_uint32_resource = device->CreatePreferredDeviceMemoryBuffer(
       uniform_uint32_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-  device->KeepAliveUntilNextCommandListDispatch(uniform_uint32_resource);
 
-  std::vector<UINT> state_dims_cpu = {4};
+  std::vector<UINT> state_dims_cpu = {
+      6};  // PHILOX_4X32_10 state size is 6 (4 for counter, 2 for key)
   dml::utils::DmlTensorDescBundle state_desc_bundle(DML_TENSOR_DATA_TYPE_UINT32,
                                                     state_dims_cpu, nullptr);
-  auto random_generator_state_resource =
+  // Input state resource (assumed zero-initialized by D3D runtime for the first
+  // call)
+  auto input_random_generator_state_resource =
       device->CreatePreferredDeviceMemoryBuffer(
           state_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-  device->KeepAliveUntilNextCommandListDispatch(
-      random_generator_state_resource);
-  // TODO: Zero-initialize random_generator_state_resource if needed, or provide
-  // actual seed. For now, relying on default heap initialization (likely zero).
-  // A proper FillValueConstant might be safer for explicit zeroing.
+
+  // Output state resource
+  auto output_random_generator_state_resource =
+      device->CreatePreferredDeviceMemoryBuffer(
+          state_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+  // For a sequence of calls, these two resources would be swapped.
+  // TODO: Consider explicit zero-initialization for
+  // input_random_generator_state_resource if relying on default heap
+  // initialization isn't guaranteed or desired.
 
   DML_RANDOM_GENERATOR_OPERATOR_DESC random_op_desc_payload{};
   random_op_desc_payload.InputStateTensor =
-      &state_desc_bundle.get_tensor_desc();
+      &state_desc_bundle.get_tensor_desc();  // Must be non-null
   random_op_desc_payload.OutputTensor =
       &uniform_uint32_desc_bundle.get_tensor_desc();
   random_op_desc_payload.OutputStateTensor =
@@ -188,19 +184,20 @@ void GumbelMax::add_gumbel_noise(const StorageView& x, StorageView& y) const {
   DML_OPERATOR_DESC random_op_desc = {DML_OPERATOR_RANDOM_GENERATOR,
                                       &random_op_desc_payload};
 
-  temp_binding_storage[0] = dml::utils::create_buffer_binding(
-      random_generator_state_resource.Get());  // Input state
-  DML_BUFFER_BINDING output_val_binding =
-      dml::utils::create_buffer_binding(uniform_uint32_resource.Get());
-  DML_BUFFER_BINDING output_state_binding = dml::utils::create_buffer_binding(
-      random_generator_state_resource
-          .Get());  // Output state (updated in-place)
+  // Bind to two separate resources for input and output state
+  dml::utils::DmlBufferBindingBundle random_op_input_state_binding(
+      input_random_generator_state_resource.Get());
+  dml::utils::DmlBufferBindingBundle random_op_output_val_binding(
+      uniform_uint32_resource.Get());
+  dml::utils::DmlBufferBindingBundle random_op_output_state_binding(
+      output_random_generator_state_resource
+          .Get());  // State will be written here
 
   std::vector<DML_BINDING_DESC> random_op_inputs = {
-      dml::utils::create_binding_desc(&temp_binding_storage[0])};
+      random_op_input_state_binding.get_desc()};
   std::vector<DML_BINDING_DESC> random_op_outputs = {
-      dml::utils::create_binding_desc(&output_val_binding),
-      dml::utils::create_binding_desc(&output_state_binding)};
+      random_op_output_val_binding.get_desc(),
+      random_op_output_state_binding.get_desc()};
   dml::GetOrCreateCompiledOperatorApi(&random_op_desc)
       ->Execute(random_op_inputs, random_op_outputs);
 
@@ -213,76 +210,59 @@ void GumbelMax::add_gumbel_noise(const StorageView& x, StorageView& y) const {
   DML_OPERATOR_DESC cast_uint_op_desc = {DML_OPERATOR_CAST,
                                          &cast_uint_to_fp32_desc};
 
-  temp_binding_storage[0] =
-      dml::utils::create_buffer_binding(uniform_uint32_resource.Get());
-  temp_binding_storage[1] =
-      dml::utils::create_buffer_binding(uniform_fp32_resource.Get());
+  dml::utils::DmlBufferBindingBundle cast_uint_input_binding(
+      uniform_uint32_resource.Get());
+  dml::utils::DmlBufferBindingBundle cast_uint_output_binding(
+      uniform_fp32_resource.Get());
   dml::GetOrCreateCompiledOperatorApi(&cast_uint_op_desc)
-      ->Execute({dml::utils::create_binding_desc(&temp_binding_storage[0])},
-                {dml::utils::create_binding_desc(&temp_binding_storage[1])});
+      ->Execute({cast_uint_input_binding.get_desc()},
+                {cast_uint_output_binding.get_desc()});
 
   // Step 1.3: Scale FLOAT32 random numbers to (0, 1]
   DML_SCALAR_UNION scale_val_scalar;
   scale_val_scalar.Float32 =
       1.0f / static_cast<float>(std::numeric_limits<uint32_t>::max());
-  dml::utils::DmlTensorDescBundle scale_const_desc_bundle(dml_compute_type, {1},
-                                                          nullptr);
-  auto scale_const_res = dml::utils::CreateDmlConstantTensor(
-      device, scale_val_scalar, scale_const_desc_bundle);
 
-  DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC multiply_desc{};
-  multiply_desc.ATensor = &uniform_fp32_desc_bundle.get_tensor_desc();
-  multiply_desc.BTensor = &scale_const_desc_bundle.get_tensor_desc();
-  multiply_desc.OutputTensor =
+  // Use standalone DML_OPERATOR_ACTIVATION_LINEAR for scaling
+  DML_ACTIVATION_LINEAR_OPERATOR_DESC scale_op_payload{};
+  scale_op_payload.InputTensor = &uniform_fp32_desc_bundle.get_tensor_desc();
+  scale_op_payload.OutputTensor =
       &uniform_fp32_desc_bundle.get_tensor_desc();  // In-place
-  DML_OPERATOR_DESC mult_op_desc = {DML_OPERATOR_ELEMENT_WISE_MULTIPLY,
-                                    &multiply_desc};
+  scale_op_payload.Alpha = scale_val_scalar.Float32;
+  scale_op_payload.Beta = 0.0f;
+  DML_OPERATOR_DESC scale_op_desc = {DML_OPERATOR_ACTIVATION_LINEAR,
+                                     &scale_op_payload};
 
-  DML_BUFFER_BINDING mult_input_A_binding =
-      dml::utils::create_buffer_binding(uniform_fp32_resource.Get());
-  DML_BUFFER_BINDING mult_input_B_binding =
-      dml::utils::create_buffer_binding(scale_const_res.Get());
-  DML_BUFFER_BINDING mult_output_binding = dml::utils::create_buffer_binding(
+  dml::utils::DmlBufferBindingBundle scale_input_binding(
+      uniform_fp32_resource.Get());
+  dml::utils::DmlBufferBindingBundle scale_output_binding(
       uniform_fp32_resource.Get());  // In-place
 
-  std::vector<DML_BINDING_DESC> mult_inputs = {
-      dml::utils::create_binding_desc(&mult_input_A_binding),
-      dml::utils::create_binding_desc(&mult_input_B_binding)};
-  std::vector<DML_BINDING_DESC> mult_outputs = {
-      dml::utils::create_binding_desc(&mult_output_binding)};
-  dml::GetOrCreateCompiledOperatorApi(&mult_op_desc)
-      ->Execute(mult_inputs, mult_outputs);
+  dml::GetOrCreateCompiledOperatorApi(&scale_op_desc)
+      ->Execute({scale_input_binding.get_desc()},
+                {scale_output_binding.get_desc()});
 
   // Add epsilon
   DML_SCALAR_UNION eps_val_scalar;
   eps_val_scalar.Float32 = 1e-9f;
-  dml::utils::DmlTensorDescBundle eps_const_desc_bundle(dml_compute_type, {1},
-                                                        nullptr);
-  auto eps_const_res = dml::utils::CreateDmlConstantTensor(
-      device, eps_val_scalar, eps_const_desc_bundle);
-
-  DML_ELEMENT_WISE_ADD_OPERATOR_DESC add_eps_desc{};
-  add_eps_desc.ATensor = &uniform_fp32_desc_bundle.get_tensor_desc();
-  add_eps_desc.BTensor = &eps_const_desc_bundle.get_tensor_desc();
-  add_eps_desc.OutputTensor =
+  // Use standalone DML_OPERATOR_ACTIVATION_LINEAR for adding epsilon
+  DML_ACTIVATION_LINEAR_OPERATOR_DESC add_eps_op_payload = {};
+  add_eps_op_payload.InputTensor = &uniform_fp32_desc_bundle.get_tensor_desc();
+  add_eps_op_payload.OutputTensor =
       &uniform_fp32_desc_bundle.get_tensor_desc();  // In-place
-  DML_OPERATOR_DESC add_eps_op_desc = {DML_OPERATOR_ELEMENT_WISE_ADD,
-                                       &add_eps_desc};
+  add_eps_op_payload.Alpha = 1.0f;
+  add_eps_op_payload.Beta = eps_val_scalar.Float32;
+  DML_OPERATOR_DESC add_eps_op_desc = {DML_OPERATOR_ACTIVATION_LINEAR,
+                                       &add_eps_op_payload};
 
-  DML_BUFFER_BINDING add_eps_input_A_binding =
-      dml::utils::create_buffer_binding(uniform_fp32_resource.Get());
-  DML_BUFFER_BINDING add_eps_input_B_binding =
-      dml::utils::create_buffer_binding(eps_const_res.Get());
-  DML_BUFFER_BINDING add_eps_output_binding = dml::utils::create_buffer_binding(
+  dml::utils::DmlBufferBindingBundle add_eps_input_binding(
+      uniform_fp32_resource.Get());
+  dml::utils::DmlBufferBindingBundle add_eps_output_binding(
       uniform_fp32_resource.Get());  // In-place
 
-  std::vector<DML_BINDING_DESC> add_eps_inputs = {
-      dml::utils::create_binding_desc(&add_eps_input_A_binding),
-      dml::utils::create_binding_desc(&add_eps_input_B_binding)};
-  std::vector<DML_BINDING_DESC> add_eps_outputs = {
-      dml::utils::create_binding_desc(&add_eps_output_binding)};
   dml::GetOrCreateCompiledOperatorApi(&add_eps_op_desc)
-      ->Execute(add_eps_inputs, add_eps_outputs);
+      ->Execute({add_eps_input_binding.get_desc()},
+                {add_eps_output_binding.get_desc()});
 
   // Step 2: Compute Logarithm
   DML_ELEMENT_WISE_LOG_OPERATOR_DESC log_desc{};
@@ -290,13 +270,13 @@ void GumbelMax::add_gumbel_noise(const StorageView& x, StorageView& y) const {
   log_desc.OutputTensor = &log_uniform_fp32_desc_bundle.get_tensor_desc();
   DML_OPERATOR_DESC log_op_desc = {DML_OPERATOR_ELEMENT_WISE_LOG, &log_desc};
 
-  temp_binding_storage[0] =
-      dml::utils::create_buffer_binding(uniform_fp32_resource.Get());
-  temp_binding_storage[1] =
-      dml::utils::create_buffer_binding(log_uniform_fp32_resource.Get());
+  dml::utils::DmlBufferBindingBundle log_op_input_binding(
+      uniform_fp32_resource.Get());
+  dml::utils::DmlBufferBindingBundle log_op_output_binding(
+      log_uniform_fp32_resource.Get());
   dml::GetOrCreateCompiledOperatorApi(&log_op_desc)
-      ->Execute({dml::utils::create_binding_desc(&temp_binding_storage[0])},
-                {dml::utils::create_binding_desc(&temp_binding_storage[1])});
+      ->Execute({log_op_input_binding.get_desc()},
+                {log_op_output_binding.get_desc()});
 
   // Step 3: Negate
 #if DML_TARGET_VERSION >= 0x5000 && !defined(CT2_DML_USE_MULTIPLY_FOR_NEGATE)
@@ -308,42 +288,36 @@ void GumbelMax::add_gumbel_noise(const StorageView& x, StorageView& y) const {
   DML_OPERATOR_DESC negate_op_desc = {DML_OPERATOR_ELEMENT_WISE_NEGATE,
                                       &negate_desc_payload};
 
-  temp_binding_storage[0] =
-      dml::utils::create_buffer_binding(log_uniform_fp32_resource.Get());
-  temp_binding_storage[1] =
-      dml::utils::create_buffer_binding(gumbel_noise_fp32_resource.Get());
+  dml::utils::DmlBufferBindingBundle negate_op_input_binding(
+      log_uniform_fp32_resource.Get());
+  dml::utils::DmlBufferBindingBundle negate_op_output_binding(
+      gumbel_noise_fp32_resource.Get());
   dml::GetOrCreateCompiledOperatorApi(&negate_op_desc)
-      ->Execute({dml::utils::create_binding_desc(&temp_binding_storage[0])},
-                {dml::utils::create_binding_desc(&temp_binding_storage[1])});
+      ->Execute({negate_op_input_binding.get_desc()},
+                {negate_op_output_binding.get_desc()});
 #else  // Fallback: Multiply by -1
   DML_SCALAR_UNION m1_val_scalar;
   m1_val_scalar.Float32 = -1.0f;
-  dml::utils::DmlTensorDescBundle m1_const_desc_bundle;
-  auto m1_const_res = dml::utils::CreateDmlConstantTensor(
-      device, {1}, dml_compute_type, m1_val_scalar, m1_const_desc_bundle);
+  // Use standalone DML_OPERATOR_ACTIVATION_LINEAR for negate fallback
+  DML_ACTIVATION_LINEAR_OPERATOR_DESC negate_op_payload = {};
+  negate_op_payload.InputTensor =
+      &log_uniform_fp32_desc_bundle.get_tensor_desc();
+  negate_op_payload.OutputTensor =
+      &gumbel_noise_fp32_desc_bundle
+           .get_tensor_desc();                      // Not in-place for negate
+  negate_op_payload.Alpha = m1_val_scalar.Float32;  // -1.0f
+  negate_op_payload.Beta = 0.0f;
+  DML_OPERATOR_DESC negate_op_desc = {DML_OPERATOR_ACTIVATION_LINEAR,
+                                      &negate_op_payload};
 
-  DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC multiply_m1_desc{};
-  multiply_m1_desc.ATensor = &log_uniform_fp32_desc_bundle.get_tensor_desc();
-  multiply_m1_desc.BTensor = &m1_const_desc_bundle.get_tensor_desc();
-  multiply_m1_desc.OutputTensor =
-      &gumbel_noise_fp32_desc_bundle.get_tensor_desc();
-  DML_OPERATOR_DESC negate_op_desc = {DML_OPERATOR_ELEMENT_WISE_MULTIPLY,
-                                      &multiply_m1_desc};
+  dml::utils::DmlBufferBindingBundle neg_fallback_input_binding(
+      log_uniform_fp32_resource.Get());
+  dml::utils::DmlBufferBindingBundle neg_fallback_output_binding(
+      gumbel_noise_fp32_resource.Get());
 
-  DML_BUFFER_BINDING neg_mult_A_binding =
-      dml::utils::create_buffer_binding(log_uniform_fp32_resource.Get());
-  DML_BUFFER_BINDING neg_mult_B_binding =
-      dml::utils::create_buffer_binding(m1_const_res.Get());
-  DML_BUFFER_BINDING neg_mult_Out_binding =
-      dml::utils::create_buffer_binding(gumbel_noise_fp32_resource.Get());
-
-  std::vector<DML_BINDING_DESC> neg_mult_inputs = {
-      dml::utils::create_binding_desc(&neg_mult_A_binding),
-      dml::utils::create_binding_desc(&neg_mult_B_binding)};
-  std::vector<DML_BINDING_DESC> neg_mult_outputs = {
-      dml::utils::create_binding_desc(&neg_mult_Out_binding)};
   dml::GetOrCreateCompiledOperatorApi(&negate_op_desc)
-      ->Execute(neg_mult_inputs, neg_mult_outputs);
+      ->Execute({neg_fallback_input_binding.get_desc()},
+                {neg_fallback_output_binding.get_desc()});
 #endif
 
   // Step 4: Add Gumbel noise to input x
@@ -354,18 +328,17 @@ void GumbelMax::add_gumbel_noise(const StorageView& x, StorageView& y) const {
   DML_OPERATOR_DESC add_noise_op_desc = {DML_OPERATOR_ELEMENT_WISE_ADD,
                                          &add_noise_desc};
 
-  DML_BUFFER_BINDING add_noise_A_binding =
-      dml::utils::create_buffer_binding(current_x_resource_for_op_ptr);
-  DML_BUFFER_BINDING add_noise_B_binding =
-      dml::utils::create_buffer_binding(gumbel_noise_fp32_resource.Get());
-  DML_BUFFER_BINDING add_noise_Out_binding =
-      dml::utils::create_buffer_binding(target_sum_resource_for_op_ptr);
+  dml::utils::DmlBufferBindingBundle add_noise_A_binding(
+      current_x_resource_for_op_ptr);
+  dml::utils::DmlBufferBindingBundle add_noise_B_binding(
+      gumbel_noise_fp32_resource.Get());
+  dml::utils::DmlBufferBindingBundle add_noise_Out_binding(
+      target_sum_resource_for_op_ptr);
 
   std::vector<DML_BINDING_DESC> add_noise_inputs = {
-      dml::utils::create_binding_desc(&add_noise_A_binding),
-      dml::utils::create_binding_desc(&add_noise_B_binding)};
+      add_noise_A_binding.get_desc(), add_noise_B_binding.get_desc()};
   std::vector<DML_BINDING_DESC> add_noise_outputs = {
-      dml::utils::create_binding_desc(&add_noise_Out_binding)};
+      add_noise_Out_binding.get_desc()};
   dml::GetOrCreateCompiledOperatorApi(&add_noise_op_desc)
       ->Execute(add_noise_inputs, add_noise_outputs);
 
@@ -378,13 +351,13 @@ void GumbelMax::add_gumbel_noise(const StorageView& x, StorageView& y) const {
         &y_desc_bundle.get_tensor_desc();  // Target y tensor (original type)
     DML_OPERATOR_DESC op_desc_cast_back = {DML_OPERATOR_CAST, &cast_back_desc};
 
-    temp_binding_storage[0] =
-        dml::utils::create_buffer_binding(target_sum_resource_for_op_ptr);
-    temp_binding_storage[1] = dml::utils::create_buffer_binding(
+    dml::utils::DmlBufferBindingBundle cast_back_input_binding(
+        target_sum_resource_for_op_ptr);
+    dml::utils::DmlBufferBindingBundle cast_back_output_binding(
         reinterpret_cast<ID3D12Resource*>(y.buffer()));
     dml::GetOrCreateCompiledOperatorApi(&op_desc_cast_back)
-        ->Execute({dml::utils::create_binding_desc(&temp_binding_storage[0])},
-                  {dml::utils::create_binding_desc(&temp_binding_storage[1])});
+        ->Execute({cast_back_input_binding.get_desc()},
+                  {cast_back_output_binding.get_desc()});
   }
 }
 
