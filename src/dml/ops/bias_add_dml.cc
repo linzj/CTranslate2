@@ -53,9 +53,45 @@ void BiasAdd::compute(const StorageView& value,
   DML_OPERATOR_DESC separate_activation_op_desc = {};  // For fallback
 
   if (!_activation_type) {
+    // Create a new DML_TENSOR_DESC for the bias tensor for the operator,
+    // with explicit broadcasting shape and strides, to satisfy operators that
+    // might require identical .Sizes fields despite supporting broadcasting.
+    std::vector<UINT> broadcasted_bias_dims_for_op_vec = {
+        static_cast<UINT>(batch_size), static_cast<UINT>(depth)};
+    // Strides in elements: 0 for batch dim (broadcast), 1 for depth dim
+    // (contiguous)
+    std::vector<UINT> broadcasted_bias_strides_for_op_vec = {0, 1};
+
+    // Get the original DML_BUFFER_TENSOR_DESC for bias to copy properties
+    const DML_BUFFER_TENSOR_DESC* original_bias_buffer_desc_ptr =
+        static_cast<const DML_BUFFER_TENSOR_DESC*>(
+            bias_desc_bundle.get_tensor_desc().Desc);
+
+    DML_BUFFER_TENSOR_DESC broadcasted_dml_bias_buffer_tensor_desc = {};
+    broadcasted_dml_bias_buffer_tensor_desc.DataType =
+        original_bias_buffer_desc_ptr->DataType;
+    broadcasted_dml_bias_buffer_tensor_desc.Flags =
+        original_bias_buffer_desc_ptr->Flags;
+    broadcasted_dml_bias_buffer_tensor_desc.DimensionCount =
+        original_bias_buffer_desc_ptr->DimensionCount;  // Should be 2
+    broadcasted_dml_bias_buffer_tensor_desc.Sizes =
+        broadcasted_bias_dims_for_op_vec.data();
+    broadcasted_dml_bias_buffer_tensor_desc.Strides =
+        broadcasted_bias_strides_for_op_vec.data();
+    // TotalTensorSizeInBytes must reflect the actual (compact) bias buffer size
+    broadcasted_dml_bias_buffer_tensor_desc.TotalTensorSizeInBytes =
+        original_bias_buffer_desc_ptr->TotalTensorSizeInBytes;
+    broadcasted_dml_bias_buffer_tensor_desc.GuaranteedBaseOffsetAlignment =
+        original_bias_buffer_desc_ptr->GuaranteedBaseOffsetAlignment;
+
+    DML_TENSOR_DESC dml_bias_tensor_desc_for_op = {};
+    dml_bias_tensor_desc_for_op.Type = DML_TENSOR_TYPE_BUFFER;
+    dml_bias_tensor_desc_for_op.Desc = &broadcasted_dml_bias_buffer_tensor_desc;
+
     DML_ELEMENT_WISE_ADD_OPERATOR_DESC add_op_payload = {};
     add_op_payload.ATensor = &dml_value_tensor_desc;
-    add_op_payload.BTensor = &dml_bias_tensor_desc;
+    add_op_payload.BTensor =
+        &dml_bias_tensor_desc_for_op;  // Use the new broadcasted desc
     add_op_payload.OutputTensor = &dml_output_tensor_desc;
     DML_OPERATOR_DESC op_desc = {DML_OPERATOR_ELEMENT_WISE_ADD,
                                  &add_op_payload};

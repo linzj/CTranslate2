@@ -7,8 +7,6 @@
 
 #include "ctranslate2/ops/ops.h"
 
-#include <limits>  // Required for std::numeric_limits
-
 namespace {
 constexpr const bool kCheckCorrectness = true;
 
@@ -963,6 +961,72 @@ void benchmark_gumbel_max(Device device) {
   }
 }
 
+void benchmark_bias_add(Device device) {
+  if (!kCheckCorrectness) {
+    const Shape value_shape = {128, 1024};
+    const Shape bias_shape = {1024};
+    const DataType dtype = DataType::FLOAT32;
+
+    StorageView value_device(value_shape, dtype, device);
+    // Initialize with some data if op expects non-zero inputs for realistic
+    // benchmark
+    std::vector<float> value_data_vec =
+        rand_vector(value_shape[0] * value_shape[1]);
+    StorageView value_temp_cpu(value_shape, value_data_vec, Device::CPU);
+    value_device.copy_from(value_temp_cpu);
+
+    StorageView bias_device(bias_shape, dtype, device);
+    std::vector<float> bias_data_vec = rand_vector(bias_shape[0]);
+    StorageView bias_temp_cpu(bias_shape, bias_data_vec, Device::CPU);
+    bias_device.copy_from(bias_temp_cpu);
+
+    StorageView output_device(dtype, device);
+    const ops::BiasAdd bias_add_op;  // Default: no activation
+
+    BENCHMARK(bias_add_op(value_device, bias_device, output_device), 10000);
+
+  } else {
+    std::ostringstream error_log;
+    int total_mismatches = 0;
+
+    const Shape value_shape = {32, 128};
+    const Shape bias_shape = {
+        value_shape[1]};  // Bias is typically on the last dimension
+    const DataType dtype = DataType::FLOAT32;
+    const ops::BiasAdd bias_add_op;  // Default: no activation
+
+    std::vector<float> value_data_vec =
+        rand_vector(value_shape[0] * value_shape[1]);
+    std::vector<float> bias_data_vec = rand_vector(bias_shape[0]);
+
+    // Device path
+    StorageView value_device(value_shape, value_data_vec, device);
+    StorageView bias_device(bias_shape, bias_data_vec, device);
+    StorageView output_device(dtype, device);
+    bias_add_op(value_device, bias_device, output_device);
+
+    // CPU path (reference)
+    StorageView value_cpu(value_shape, value_data_vec, Device::CPU);
+    StorageView bias_cpu(bias_shape, bias_data_vec, Device::CPU);
+    StorageView output_cpu_ref(dtype, Device::CPU);
+    bias_add_op(value_cpu, bias_cpu, output_cpu_ref);
+
+    // Copy device result to CPU for comparison
+    StorageView output_device_cpu_copy(output_device.dtype(), Device::CPU);
+    output_device_cpu_copy.copy_from(output_device, true);  // true for sync
+
+    total_mismatches += dispatch_compare_views(
+        output_device_cpu_copy, output_cpu_ref, "BiasAdd Output", error_log);
+
+    if (total_mismatches > 0) {
+      throw std::runtime_error("BiasAdd output mismatch details:\n" +
+                               error_log.str());
+    } else {
+      std::cout << "BiasAdd test passed!" << std::endl;
+    }
+  }
+}
+
 int main(int argc, char* argv[]) {
   if (argc < 3) {
     std::cerr << "usage: " << argv[0] << " op device [dtype]" << std::endl;
@@ -1006,6 +1070,8 @@ int main(int argc, char* argv[]) {
     benchmark_conv1d(device);
   else if (op == "gumbel_max")
     benchmark_gumbel_max(device);
+  else if (op == "bias_add")
+    benchmark_bias_add(device);
 
   return 0;
 }
