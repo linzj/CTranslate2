@@ -218,24 +218,19 @@ void BiasAdd::compute(const StorageView& value,
           dml::GetOrCreateCompiledOperatorApi(&add_op_desc_separate);
 
       // Execute Add
-      DML_BUFFER_BINDING value_binding_s = dml::utils::create_buffer_binding(
-          reinterpret_cast<ID3D12Resource*>(const_cast<void*>(value.buffer())),
-          0, value_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-      DML_BINDING_DESC value_binding_d =
-          dml::utils::create_binding_desc(&value_binding_s);
-      DML_BUFFER_BINDING bias_binding_s = dml::utils::create_buffer_binding(
-          reinterpret_cast<ID3D12Resource*>(const_cast<void*>(bias.buffer())),
-          0, bias_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-      DML_BINDING_DESC bias_binding_d =
-          dml::utils::create_binding_desc(&bias_binding_s);
-      DML_BUFFER_BINDING output_binding_s_for_add =
-          dml::utils::create_buffer_binding(
-              reinterpret_cast<ID3D12Resource*>(output.buffer()), 0,
-              output_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-      DML_BINDING_DESC output_binding_d_for_add =
-          dml::utils::create_binding_desc(&output_binding_s_for_add);
-      add_compiled_op->Execute({value_binding_d, bias_binding_d},
-                               {output_binding_d_for_add});
+      dml::utils::DmlBufferBindingBundle value_binding_bundle_add(
+          dml::utils::ResourceFromStorageView(value), 0,
+          value_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+      dml::utils::DmlBufferBindingBundle bias_binding_bundle_add(
+          dml::utils::ResourceFromStorageView(bias), 0,
+          bias_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+      dml::utils::DmlBufferBindingBundle output_binding_bundle_add(
+          dml::utils::ResourceFromStorageView(output), 0,
+          output_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+
+      add_compiled_op->Execute({value_binding_bundle_add.get_desc(),
+                                bias_binding_bundle_add.get_desc()},
+                               {output_binding_bundle_add.get_desc()});
 
       // Now `compiled_op_ptr` will be the activation op
       compiled_op_ptr =
@@ -247,35 +242,35 @@ void BiasAdd::compute(const StorageView& value,
   }
 
   // Common binding logic
-  std::vector<DML_BINDING_DESC> final_input_bindings;
-  if (!perform_separate_activation) {  // Case: No activation OR Fused
-                                       // activation
-    DML_BUFFER_BINDING val_b_s = dml::utils::create_buffer_binding(
-        reinterpret_cast<ID3D12Resource*>(const_cast<void*>(value.buffer())), 0,
-        value_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-    DML_BINDING_DESC val_b_d = dml::utils::create_binding_desc(&val_b_s);
-    final_input_bindings.push_back(val_b_d);
+  std::vector<DML_BINDING_DESC> final_input_bindings_descs;
+  dml::utils::DmlBufferBindingBundle final_output_binding_bundle(
+      dml::utils::ResourceFromStorageView(output), 0,
+      output_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+  dml::utils::DmlBufferBindingBundle value_binding_bundle_final(
+      dml::utils::ResourceFromStorageView(value), 0,
+      value_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
 
-    DML_BUFFER_BINDING bias_b_s = dml::utils::create_buffer_binding(
-        reinterpret_cast<ID3D12Resource*>(const_cast<void*>(bias.buffer())), 0,
-        bias_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-    DML_BINDING_DESC bias_b_d = dml::utils::create_binding_desc(&bias_b_s);
-    final_input_bindings.push_back(bias_b_d);
-  } else {  // Case: Separate activation step; input is the result of previous
-            // ADD (now in 'output' buffer)
-    DML_BUFFER_BINDING act_in_s = dml::utils::create_buffer_binding(
-        reinterpret_cast<ID3D12Resource*>(output.buffer()), 0,
-        output_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-    DML_BINDING_DESC act_in_d = dml::utils::create_binding_desc(&act_in_s);
-    final_input_bindings.push_back(act_in_d);
+  dml::utils::DmlBufferBindingBundle bias_binding_bundle_final(
+      dml::utils::ResourceFromStorageView(bias), 0,
+      bias_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+
+  dml::utils::DmlBufferBindingBundle act_input_binding_bundle_final(
+      dml::utils::ResourceFromStorageView(
+          output),  // This is the buffer after ADD operation
+      0, output_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+
+  if (!perform_separate_activation) {
+    final_input_bindings_descs.push_back(value_binding_bundle_final.get_desc());
+    final_input_bindings_descs.push_back(bias_binding_bundle_final.get_desc());
+  } else {
+    // Case: Separate activation step; input is the result of previous
+    // ADD (now in 'output' buffer)
+    final_input_bindings_descs.push_back(
+        act_input_binding_bundle_final.get_desc());
   }
 
-  DML_BUFFER_BINDING final_out_s = dml::utils::create_buffer_binding(
-      reinterpret_cast<ID3D12Resource*>(output.buffer()), 0,
-      output_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-  DML_BINDING_DESC final_out_d = dml::utils::create_binding_desc(&final_out_s);
-
-  compiled_op_ptr->Execute(final_input_bindings, {final_out_d});
+  compiled_op_ptr->Execute(final_input_bindings_descs,
+                           {final_output_binding_bundle.get_desc()});
 }
 
 #define DECLARE_IMPL(T)                                                       \
