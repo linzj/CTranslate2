@@ -178,43 +178,15 @@ void Conv1D::compute(const StorageView& input,
                                     output_bindings_for_op);
 }
 
-// Template specializations for Conv1D::compute for Device::DirectML
-// The primary template compute<Device D, typename T> should correctly dispatch.
-// Explicit specializations might be redundant if the primary template correctly
-// uses dml_data_type. However, if these specializations are intended to add
-// specific checks or logic before calling the primary, they can stay. For this
-// refactoring, assuming the primary template is now correct for both float and
-// float16 using dml::utils. So, the content of these specializations can be
-// simplified or removed if the primary template fully handles it. Let's keep
-// them for now, but ensure they call the primary correctly.
+// Explicit instantiations
+#define DECLARE_CONV1D_DML_IMPL(T)                                             \
+  template void Conv1D::compute<Device::DirectML, T>(                          \
+      const StorageView& input, const StorageView& weight,                     \
+      const StorageView* bias, StorageView& output, const StorageView* qscale) \
+      const;
 
-template <>
-void Conv1D::compute<Device::DirectML, float>(const StorageView& input,
-                                              const StorageView& weight,
-                                              const StorageView* bias,
-                                              StorageView& output,
-                                              const StorageView* qscale) const {
-  // Call the primary template directly, all logic is now there.
-  this->Conv1D::compute<Device::DirectML, float>(input, weight, bias, output,
-                                                 qscale);
-}
-
-template <>
-void Conv1D::compute<Device::DirectML, float16_t>(
-    const StorageView& input,
-    const StorageView& weight,
-    const StorageView* bias,
-    StorageView& output,
-    const StorageView* qscale) const {
-  // Call the primary template directly
-  this->Conv1D::compute<Device::DirectML, float16_t>(input, weight, bias,
-                                                     output, qscale);
-}
-
-// Note: If bfloat16_t is to be supported, a similar specialization would be
-// needed. DML has limited or no native bfloat16 support; it might require
-// conversion to/from float32 or rely on newer DML versions if support is added.
-// For now, only float32 and float16.
+DECLARE_CONV1D_DML_IMPL(float)
+DECLARE_CONV1D_DML_IMPL(float16_t)
 
 }  // namespace ops
 }  // namespace ctranslate2
