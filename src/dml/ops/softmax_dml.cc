@@ -30,6 +30,15 @@ void SoftMax::compute(const StorageView& input,
   const DML_TENSOR_DESC& dml_input_desc_ref =
       input_desc_bundle.get_tensor_desc();
 
+  StorageView input_storage;
+  ID3D12Resource* input_resource = dml::utils::ResourceFromStorageView(input);
+  if (input.buffer() == output.buffer()) {
+    input_storage = std::move(output);
+    StorageView new_output(input_storage.shape(), input_storage.dtype(),
+                           input_storage.device());
+    output = std::move(new_output);
+  }
+
   // dml_output_desc_ref will refer to the final output tensor.
   dml::utils::DmlTensorDescBundle output_desc_bundle(
       output.dtype(), dml_dims_vec, nullptr, output.size() * sizeof(T));
@@ -44,8 +53,8 @@ void SoftMax::compute(const StorageView& input,
 
   DML_BUFFER_BINDING input_buffer_binding_storage =
       dml::utils::create_buffer_binding(
-          reinterpret_cast<ID3D12Resource*>(const_cast<void*>(input.buffer())),
-          0, input_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+          input_resource, 0,
+          input_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
   DML_BINDING_DESC input_binding_desc =
       dml::utils::create_binding_desc(&input_buffer_binding_storage);
   std::vector<DML_BINDING_DESC> softmax_input_bindings = {input_binding_desc};
@@ -78,7 +87,7 @@ void SoftMax::compute(const StorageView& input,
 
     DML_BUFFER_BINDING seq_indices_buffer_binding =
         dml::utils::create_buffer_binding(
-            reinterpret_cast<ID3D12Resource*>(sequence_indices_gpu.buffer()), 0,
+            dml::utils::ResourceFromStorageView(sequence_indices_gpu), 0,
             sequence_indices_desc_bundle.get_buffer_desc()
                 .TotalTensorSizeInBytes);
     DML_BINDING_DESC seq_indices_binding_fill_output =
@@ -118,9 +127,7 @@ void SoftMax::compute(const StorageView& input,
 
     DML_BUFFER_BINDING tiled_seq_indices_buffer_binding_for_tile_output =
         dml::utils::create_buffer_binding(
-            reinterpret_cast<ID3D12Resource*>(
-                tiled_sequence_indices_gpu.buffer()),
-            0,
+            dml::utils::ResourceFromStorageView(tiled_sequence_indices_gpu), 0,
             tiled_sequence_indices_desc_bundle.get_buffer_desc()
                 .TotalTensorSizeInBytes);
     DML_BINDING_DESC tiled_seq_indices_binding_tile_output =
@@ -166,9 +173,7 @@ void SoftMax::compute(const StorageView& input,
     // Binding for the original lengths buffer, using its actual physical size.
     DML_BUFFER_BINDING original_lengths_buffer_binding =
         dml::utils::create_buffer_binding(
-            reinterpret_cast<ID3D12Resource*>(
-                const_cast<void*>(lengths->buffer())),
-            0,
+            dml::utils::ResourceFromStorageView(*lengths), 0,
             lengths_buffer_tensor_desc_for_tile_input
                 .TotalTensorSizeInBytes);  // Size of the physical buffer
     DML_BINDING_DESC dml_binding_for_lengths_tile_input =
@@ -207,7 +212,7 @@ void SoftMax::compute(const StorageView& input,
 
     DML_BUFFER_BINDING tiled_lengths_buffer_binding_for_tile_output =
         dml::utils::create_buffer_binding(
-            reinterpret_cast<ID3D12Resource*>(tiled_lengths_gpu.buffer()), 0,
+            dml::utils::ResourceFromStorageView(tiled_lengths_gpu), 0,
             tiled_lengths_output_desc_bundle.get_buffer_desc()
                 .TotalTensorSizeInBytes);
     DML_BINDING_DESC tiled_lengths_binding_tile_output =
@@ -244,7 +249,7 @@ void SoftMax::compute(const StorageView& input,
 
     DML_BUFFER_BINDING condition_buffer_binding_for_cmp_output =
         dml::utils::create_buffer_binding(
-            reinterpret_cast<ID3D12Resource*>(condition_tensor_gpu.buffer()), 0,
+            dml::utils::ResourceFromStorageView(condition_tensor_gpu), 0,
             condition_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
     DML_BINDING_DESC condition_binding_cmp_output =
         dml::utils::create_binding_desc(
@@ -295,9 +300,7 @@ void SoftMax::compute(const StorageView& input,
 
     DML_BUFFER_BINDING padding_value_buffer_binding =  // Renamed
         dml::utils::create_buffer_binding(
-            reinterpret_cast<ID3D12Resource*>(
-                padding_value_gpu_storage.buffer()),
-            0,
+            dml::utils::ResourceFromStorageView(padding_value_gpu_storage), 0,
             padding_value_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
     DML_BINDING_DESC padding_value_binding_desc =  // Renamed
         dml::utils::create_binding_desc(&padding_value_buffer_binding);
@@ -330,8 +333,7 @@ void SoftMax::compute(const StorageView& input,
 
     DML_BUFFER_BINDING masked_logits_buffer_binding =
         dml::utils::create_buffer_binding(
-            reinterpret_cast<ID3D12Resource*>(masked_logits_storage.buffer()),
-            0,
+            dml::utils::ResourceFromStorageView(masked_logits_storage), 0,
             masked_logits_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
     DML_BINDING_DESC masked_logits_binding_if_output =
         dml::utils::create_binding_desc(&masked_logits_buffer_binding);
@@ -387,7 +389,7 @@ void SoftMax::compute(const StorageView& input,
 
     DML_BUFFER_BINDING final_output_buffer_binding_softmax =
         dml::utils::create_buffer_binding(
-            reinterpret_cast<ID3D12Resource*>(output.buffer()), 0,
+            dml::utils::ResourceFromStorageView(output), 0,
             output_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
     DML_BINDING_DESC final_output_binding_softmax_output =
         dml::utils::create_binding_desc(&final_output_buffer_binding_softmax);
@@ -440,7 +442,7 @@ void SoftMax::compute(const StorageView& input,
 
     DML_BUFFER_BINDING output_buffer_binding_storage =
         dml::utils::create_buffer_binding(
-            reinterpret_cast<ID3D12Resource*>(output.buffer()), 0,
+            dml::utils::ResourceFromStorageView(output), 0,
             output_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
     DML_BINDING_DESC output_binding_desc =
         dml::utils::create_binding_desc(&output_buffer_binding_storage);
