@@ -51,8 +51,7 @@ void Gather::compute(
     }
     new_indices_shape = std::move(new_shape_tmp);
   }
-  ID3D12Resource* indices_buffer =
-      static_cast<ID3D12Resource*>(const_cast<void*>(indices.buffer()));
+  ID3D12Resource* indices_buffer = dml::utils::ResourceFromStorageView(indices);
   indices_buffer->AddRef();
   if (indices.dtype() != DataType::INT32) {
     throw std::invalid_argument(
@@ -93,14 +92,13 @@ void Gather::compute(
   // Keep DML_BUFFER_BINDING structs alive for create_binding_desc
   DML_BUFFER_BINDING data_buffer_binding_storage =
       dml::utils::create_buffer_binding(
-          reinterpret_cast<ID3D12Resource*>(const_cast<void*>(data.buffer())),
-          0, data_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+          dml::utils::ResourceFromStorageView(data), 0,
+          data_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+  // Use buffer from the (potentially reshaped) copy
   DML_BUFFER_BINDING indices_buffer_binding_storage =
       dml::utils::create_buffer_binding(
-          reinterpret_cast<ID3D12Resource*>(const_cast<void*>(
-              indices_for_dml.buffer())),  // Use buffer from the (potentially
-                                           // reshaped) copy
-          0, indices_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+          dml::utils::ResourceFromStorageView(indices_for_dml), 0,
+          indices_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
 
   std::vector<DML_BINDING_DESC> input_bindings_for_op = {
       dml::utils::create_binding_desc(&data_buffer_binding_storage),
@@ -108,7 +106,7 @@ void Gather::compute(
 
   DML_BUFFER_BINDING output_buffer_binding_storage =
       dml::utils::create_buffer_binding(
-          reinterpret_cast<ID3D12Resource*>(output.buffer()), 0,
+          dml::utils::ResourceFromStorageView(output), 0,
           output_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
   std::vector<DML_BINDING_DESC> output_bindings_for_op = {
       dml::utils::create_binding_desc(&output_buffer_binding_storage)};
