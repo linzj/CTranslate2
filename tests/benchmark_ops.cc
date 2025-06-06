@@ -816,10 +816,10 @@ void benchmark_dequantize(Device device) {
     StorageView bias_cpu(bias_shape, bias_data, Device::CPU);
     StorageView y_cpu(DataType::FLOAT32, Device::CPU);
 
-    dequantize_op(x_device, input_scale_device, weight_scale_device,
-                  output_transpose, weight_transpose, y_device, &bias_device);
     dequantize_op(x_cpu, input_scale_cpu, weight_scale_cpu, output_transpose,
                   weight_transpose, y_cpu, &bias_cpu);
+    dequantize_op(x_device, input_scale_device, weight_scale_device,
+                  output_transpose, weight_transpose, y_device, &bias_device);
 
     StorageView y_device_cpu_copy(DataType::FLOAT32, Device::CPU);
     y_device_cpu_copy.copy_from(y_device, true);

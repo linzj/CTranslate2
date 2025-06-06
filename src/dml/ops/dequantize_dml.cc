@@ -169,10 +169,179 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
   // Create tensor descriptors
   // Note: DmlTensorDescBundle is better here to manage lifetimes of underlying
   // dimension/stride vectors
-  dml::utils::DmlTensorDescBundle c_desc_bundle(c);              // INT32
-  dml::utils::DmlTensorDescBundle a_scale_desc_bundle(a_scale);  // FLOAT32
-  dml::utils::DmlTensorDescBundle b_scale_desc_bundle(b_scale);  // FLOAT32
-  dml::utils::DmlTensorDescBundle y_desc_bundle(y);              // FLOAT32
+  dml::utils::DmlTensorDescBundle c_desc_bundle(c);  // INT32
+  dml::utils::DmlTensorDescBundle y_desc_bundle(y);  // FLOAT32
+
+  const std::vector<UINT>& y_dml_sizes = y_desc_bundle.get_sizes_vec();
+  const int y_rank = static_cast<int>(y_dml_sizes.size());
+
+  // Helper to compute strides for a scale tensor to broadcast its data to
+  // y_dml_sizes. The DML tensor using these strides will declare y_dml_sizes as
+  // its .Sizes. Returns std::nullopt if y is scalar (strides are then
+  // implicitly handled by DML or should be {}).
+  auto compute_strides_for_broadcasting_to_y =
+      [&](const StorageView& scale_sv,
+          int target_y_axis_hint) -> std::optional<std::vector<UINT>> {
+    if (y_rank == 0) {  // y is scalar.
+      if (!scale_sv.is_scalar() &&
+          scale_sv.size() != 1) {  // Scale must also be effectively scalar
+        bool all_scale_dims_one = true;
+        for (dim_t dim : scale_sv.shape())
+          if (dim != 1) {
+            all_scale_dims_one = false;
+            break;
+          }
+        if (!all_scale_dims_one) {
+          std::string shape_str = "{";
+          for (size_t i_s = 0; i_s < scale_sv.shape().size(); ++i_s) {
+            shape_str += std::to_string(scale_sv.shape()[i_s]);
+            if (i_s < scale_sv.shape().size() - 1)
+              shape_str += ", ";
+          }
+          shape_str += "}";
+          throw std::runtime_error(
+              "y is scalar, but scale (shape " + shape_str +
+              ") is not effectively scalar for broadcasting.");
+        }
+      }
+      return std::nullopt;  // Strides not applicable or DML implies them for
+                            // scalar output.
+    }
+
+    std::vector<UINT> computed_strides(
+        y_rank, 0);  // Initialize all strides to 0 (broadcast)
+
+    const auto& actual_scale_shape = scale_sv.shape();
+    const int actual_scale_rank = static_cast<int>(actual_scale_shape.size());
+
+    if (scale_sv.is_scalar() || scale_sv.size() == 1) {
+      // All strides in computed_strides remain 0. Correct.
+    } else if (actual_scale_rank == 1 && target_y_axis_hint >= 0 &&
+               target_y_axis_hint < y_rank) {
+      // 1D scale mapped to a specific axis of y.
+      if (actual_scale_shape[0] == y_dml_sizes[target_y_axis_hint]) {
+        computed_strides[target_y_axis_hint] =
+            1;  // Contiguous along this one dimension.
+      } else if (actual_scale_shape[0] == 1) {  // 1D scale of size 1 (shape
+                                                // {1}) Strides remain all 0.
+      } else {
+        throw std::runtime_error(
+            "1D Scale (shape {" + std::to_string(actual_scale_shape[0]) +
+            "}, target axis " + std::to_string(target_y_axis_hint) +
+            ") dimension " + std::to_string(actual_scale_shape[0]) +
+            " does not match y_dim[" + std::to_string(target_y_axis_hint) +
+            "] (size " + std::to_string(y_dml_sizes[target_y_axis_hint]) +
+            ") and is not 1 for broadcasting.");
+      }
+
+    } else {  // Multi-rank scale or 1D without valid hint - align to trailing
+              // dims of y
+      if (actual_scale_rank > y_rank) {
+        bool all_higher_dims_one = true;
+        for (int i = 0; i < actual_scale_rank - y_rank; ++i)
+          if (actual_scale_shape[i] != 1) {
+            all_higher_dims_one = false;
+            break;
+          }
+        if (!all_higher_dims_one) {
+          throw std::runtime_error("Scale rank (" +
+                                   std::to_string(actual_scale_rank) +
+                                   ") > y_rank (" + std::to_string(y_rank) +
+                                   ") and leading scale dimensions are not all "
+                                   "1; cannot broadcast.");
+        }
+        // If here, effectively treat scale as y_rank for stride calculation
+        // using its trailing dims.
+      }
+
+      // Calculate original (contiguous) strides for the *actual* scale shape
+      std::vector<UINT> original_scale_strides(actual_scale_rank);
+      if (actual_scale_rank > 0 &&
+          !actual_scale_shape
+               .empty()) {  // Added !actual_scale_shape.empty() guard
+        original_scale_strides.back() = 1;
+        for (int i = actual_scale_rank - 2; i >= 0; --i) {
+          original_scale_strides[i] =
+              original_scale_strides[i + 1] *
+              static_cast<UINT>(actual_scale_shape[i + 1] == 0
+                                    ? 1
+                                    : actual_scale_shape[i + 1]);
+        }
+      }
+
+      // Map scale's dimensions (from trailing end) to y's dimensions (from
+      // trailing end)
+      int y_dim_idx_iter = y_rank - 1;
+      int scale_dim_idx_iter = actual_scale_rank - 1;
+
+      for (int i = 0; i < std::min(y_rank, actual_scale_rank); ++i) {
+        if (y_dim_idx_iter < 0 || scale_dim_idx_iter < 0)
+          break;
+
+        dim_t current_actual_scale_dim_size =
+            actual_scale_shape[scale_dim_idx_iter];
+        UINT current_y_dim_size = y_dml_sizes[y_dim_idx_iter];
+
+        if (current_actual_scale_dim_size == current_y_dim_size) {
+          if (actual_scale_rank > 0 &&
+              scale_dim_idx_iter <
+                  static_cast<int>(
+                      original_scale_strides.size()))  // Guard access
+            computed_strides[y_dim_idx_iter] =
+                original_scale_strides[scale_dim_idx_iter];
+          else if (actual_scale_rank == 0 &&
+                   current_actual_scale_dim_size ==
+                       1)  // Scalar broadcast to matching 1
+            computed_strides[y_dim_idx_iter] = 0;
+          // else error or unhandled case for scalar mapping.
+
+        } else if (current_actual_scale_dim_size == 1) {
+          computed_strides[y_dim_idx_iter] =
+              0;  // Broadcast this dimension of scale
+        } else {
+          throw std::runtime_error(
+              "Incompatible dimension for trailing alignment. Scale dim " +
+              std::to_string(current_actual_scale_dim_size) +
+              " at original index " + std::to_string(scale_dim_idx_iter) +
+              " (aligning with y_dim " + std::to_string(y_dim_idx_iter) +
+              " of size " + std::to_string(current_y_dim_size) +
+              ") is not 1 and does not match.");
+        }
+        y_dim_idx_iter--;
+        scale_dim_idx_iter--;
+      }
+    }
+    return computed_strides;
+  };
+
+  int a_target_y_axis = (y_rank >= 2) ? (y_rank - 2) : ((y_rank == 1) ? 0 : -1);
+  int b_target_y_axis = (y_rank >= 1) ? (y_rank - 1) : -1;
+
+  std::optional<std::vector<UINT>> a_strides_opt =
+      compute_strides_for_broadcasting_to_y(a_scale, a_target_y_axis);
+  std::vector<UINT> a_strides_data_holder;
+  const std::vector<UINT>* a_strides_vec_ptr =
+      nullptr;  // Changed type from const UINT*
+  if (a_strides_opt && !a_strides_opt->empty()) {
+    a_strides_data_holder = *a_strides_opt;      // Use copy
+    a_strides_vec_ptr = &a_strides_data_holder;  // Pass address of vector
+  }
+  dml::utils::DmlTensorDescBundle a_scale_desc_bundle(
+      a_scale.dtype(), y_dml_sizes, a_strides_vec_ptr,
+      a_scale.size() * a_scale.item_size());
+
+  std::optional<std::vector<UINT>> b_strides_opt =
+      compute_strides_for_broadcasting_to_y(b_scale, b_target_y_axis);
+  std::vector<UINT> b_strides_data_holder;
+  const std::vector<UINT>* b_strides_vec_ptr =
+      nullptr;  // Changed type from const UINT*
+  if (b_strides_opt && !b_strides_opt->empty()) {
+    b_strides_data_holder = *b_strides_opt;      // Use copy
+    b_strides_vec_ptr = &b_strides_data_holder;  // Pass address of vector
+  }
+  dml::utils::DmlTensorDescBundle b_scale_desc_bundle(
+      b_scale.dtype(), y_dml_sizes, b_strides_vec_ptr,
+      b_scale.size() * b_scale.item_size());
 
   // For intermediate tensor used in cast/multiply/divide ops, needs to match
   // y_desc_bundle's properties
@@ -248,32 +417,41 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
         static_cast<ID3D12Resource*>(const_cast<void*>(bias->buffer()));
 
     // Bias tensor
-    // Create DmlTensorDescBundle for bias, ensuring it can broadcast if its
-    // rank is less than intermediate's
-    std::vector<UINT> bias_dml_dims =
-        dml::utils::to_dml_dims(bias->shape(), bias->size());
-    if (bias_dml_dims.size() <
-        intermediate_desc_bundle.get_sizes_vec().size()) {
-      // Simplified broadcasting setup assuming bias is (depth) and intermediate
-      // is (batch, depth) This matches the common case. A more general
-      // broadcasting setup might be complex. For DML ADD, tensors must have
-      // same DimensionCount or one of them is scalar-like and broadcast. If
-      // bias is [depth], intermediate is [batch, depth], make bias [1, depth]
-      if (bias_dml_dims.size() == 1 &&
-          intermediate_desc_bundle.get_sizes_vec().size() == 2) {
-        bias_dml_dims.insert(bias_dml_dims.begin(), 1);
-      }
+    // intermediate_desc_bundle uses y_dml_sizes and has rank y_rank.
+    // Bias descriptor must be compatible using broadcast_sizes and nullptr
+    // strides.
+    int bias_target_y_axis = -1;  // Default for multi-rank bias or scalar bias
+    if (bias->rank() == 1 && y_rank > 0 && !bias->is_scalar() &&
+        bias->size() > 1) {
+      // For a 1D non-scalar bias, typically align with the last dimension of y
+      bias_target_y_axis = y_rank - 1;
     }
-    // Pass nullptr for strides to let DmlTensorDescBundle compute contiguous
-    // ones or use existing ones Ensure total size in bytes uses the original
-    // bias storage.
-    dml::utils::DmlTensorDescBundle bias_desc_bundle(*bias, nullptr);
+    // compute_broadcast_sizes_for_y_shape will handle scalar bias, or
+    // multi-rank bias by aligning trailing dimensions and expecting leading
+    // dimensions to be 1.
+
+    std::optional<std::vector<UINT>> bias_strides_opt =
+        compute_strides_for_broadcasting_to_y(*bias, bias_target_y_axis);
+    std::vector<UINT> bias_strides_data_holder;
+    const std::vector<UINT>* bias_strides_vec_ptr =
+        nullptr;  // Changed type from const UINT*
+    if (bias_strides_opt && !bias_strides_opt->empty()) {
+      bias_strides_data_holder = *bias_strides_opt;  // Use copy
+      bias_strides_vec_ptr =
+          &bias_strides_data_holder;  // Pass address of vector
+    }
+    dml::utils::DmlTensorDescBundle bias_desc_bundle(
+        bias->dtype(),
+        y_dml_sizes,  // Use y's DML shape
+        bias_strides_vec_ptr, bias->size() * bias->item_size());
 
     DML_ELEMENT_WISE_ADD_OPERATOR_DESC bias_add_desc = {};
     bias_add_desc.ATensor =
         &intermediate_desc_bundle
              .get_tensor_desc();  // Result from previous division
-    bias_add_desc.BTensor = &bias_desc_bundle.get_tensor_desc();
+    bias_add_desc.BTensor =
+        &bias_desc_bundle
+             .get_tensor_desc();  // Now uses broadcast-compatible DML sizes
     bias_add_desc.OutputTensor =
         &intermediate_desc_bundle
              .get_tensor_desc();  // Output of Add (in-place on intermediate or
