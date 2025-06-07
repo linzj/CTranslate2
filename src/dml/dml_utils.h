@@ -8,9 +8,38 @@
 namespace ctranslate2 {
 std::string dtype_name(
     DataType type);  // Declaration from ctranslate2/types.h or similar
-}
 
-namespace ctranslate2 {
+template <typename T>
+struct type_to_dtype {};
+template <>
+struct type_to_dtype<float> {
+  static constexpr DataType value = DataType::FLOAT32;
+};
+template <>
+struct type_to_dtype<float16_t> {
+  static constexpr DataType value = DataType::FLOAT16;
+};
+template <>
+struct type_to_dtype<int32_t> {
+  static constexpr DataType value = DataType::INT32;
+};
+template <>
+struct type_to_dtype<int16_t> {
+  static constexpr DataType value = DataType::INT16;
+};
+template <>
+struct type_to_dtype<int8_t> {
+  static constexpr DataType value = DataType::INT8;
+};
+template <>
+struct type_to_dtype<uint8_t> {
+  static constexpr DataType value = DataType::INT8;
+};
+template <>
+struct type_to_dtype<bfloat16_t> {
+  static constexpr DataType value = DataType::BFLOAT16;
+};
+
 namespace dml {
 namespace utils {
 
@@ -317,6 +346,11 @@ Microsoft::WRL::ComPtr<ID3D12Resource> CreateDmlConstantTensor(
 inline ID3D12Resource* ResourceFromStorageView(
     const StorageView& storage_view) {
   return static_cast<ID3D12Resource*>(const_cast<void*>(storage_view.buffer()));
+}
+
+template <typename T>
+inline T* ResourceToBuffer(ID3D12Resource* resource) {
+  return reinterpret_cast<T*>(resource);
 }
 }  // namespace utils
 }  // namespace dml

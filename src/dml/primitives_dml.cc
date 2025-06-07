@@ -384,15 +384,15 @@ T primitives<Device::DirectML>::sum(const T* array, dim_t size) {
   ::ctranslate2::dml::utils::DmlTensorDescBundle input_sum_bundle(
       dml::get_dml_data_type<T>(), input_sum_dims, nullptr);
 
-  std::vector<UINT> output_sum_dims = {1, 1, 1, 1u};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle output_sum_bundle(
-      dml::get_dml_data_type<T>(), output_sum_dims, nullptr);
+  StorageView output_storage({1, 1, 1, 1}, type_to_dtype<T>::value,
+                             Device::DirectML);
+  ::ctranslate2::dml::utils::DmlTensorDescBundle output_bundle(output_storage);
 
   // Use DML reduce sum operation
   DML_REDUCE_OPERATOR_DESC reduce_desc = {};
   reduce_desc.Function = DML_REDUCE_FUNCTION_SUM;
   reduce_desc.InputTensor = &input_sum_bundle.get_tensor_desc();
-  reduce_desc.OutputTensor = &output_sum_bundle.get_tensor_desc();
+  reduce_desc.OutputTensor = &output_bundle.get_tensor_desc();
 
   static const UINT axes[] = {3};  // Reduce along the last dimension
   reduce_desc.AxisCount = 1;
@@ -405,19 +405,13 @@ T primitives<Device::DirectML>::sum(const T* array, dim_t size) {
   dml::Operator* compiled_op =
       dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
-  auto dxdevice = dml::get_device();
-
-  // Create output resource for result
-  ComPtr<ID3D12Resource> output_resource =
-      dxdevice->CreatePreferredDeviceMemoryBuffer(sizeof(T));
-
   std::vector<ID3D12Resource*> inputs = {
       reinterpret_cast<ID3D12Resource*>(const_cast<T*>(array))};
-  std::vector<ID3D12Resource*> outputs = {output_resource.Get()};
+  std::vector<ID3D12Resource*> outputs = {
+      dml::utils::ResourceFromStorageView(output_storage)};
   compiled_op->Execute(inputs, outputs);
 
-  // Return result (would need proper readback)
-  return T{};
+  return output_storage.to(Device::CPU).at<T>({0, 0, 0, 0});
 }
 
 template <>
@@ -429,14 +423,13 @@ dim_t primitives<Device::DirectML>::max_element(const T* array, dim_t size) {
   ::ctranslate2::dml::utils::DmlTensorDescBundle input_maxel_bundle(
       dml::get_dml_data_type<T>(), input_maxel_dims, nullptr);
 
-  std::vector<UINT> output_maxel_dims = {1, 1, 1, 1u};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle output_maxel_bundle(
-      dml::get_dml_data_type<int32_t>(), output_maxel_dims, nullptr);
+  StorageView output_storage({1, 1, 1, 1}, DataType::INT32, Device::DirectML);
+  ::ctranslate2::dml::utils::DmlTensorDescBundle output_bundle(output_storage);
 
   // Use DML argmax operation
   DML_ARGMAX_OPERATOR_DESC argmax_desc = {};
   argmax_desc.InputTensor = &input_maxel_bundle.get_tensor_desc();
-  argmax_desc.OutputTensor = &output_maxel_bundle.get_tensor_desc();
+  argmax_desc.OutputTensor = &output_bundle.get_tensor_desc();
   argmax_desc.AxisCount = 1;
   static const UINT axis = 3;
   argmax_desc.Axes = &axis;
@@ -449,17 +442,13 @@ dim_t primitives<Device::DirectML>::max_element(const T* array, dim_t size) {
   dml::Operator* compiled_op =
       dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
-  auto dxdevice = dml::get_device();
-
-  ComPtr<ID3D12Resource> output_resource =
-      dxdevice->CreatePreferredDeviceMemoryBuffer(sizeof(int32_t));
-
   std::vector<ID3D12Resource*> inputs = {
       reinterpret_cast<ID3D12Resource*>(const_cast<T*>(array))};
-  std::vector<ID3D12Resource*> outputs = {output_resource.Get()};
+  std::vector<ID3D12Resource*> outputs = {
+      dml::utils::ResourceFromStorageView(output_storage)};
   compiled_op->Execute(inputs, outputs);
 
-  return 0;  // Would need proper readback
+  return output_storage.to(Device::CPU).at<int32_t>({0, 0, 0, 0});
 }
 
 template <>
@@ -471,14 +460,14 @@ T primitives<Device::DirectML>::max(const T* array, dim_t size) {
   ::ctranslate2::dml::utils::DmlTensorDescBundle input_maxarr_bundle(
       dml::get_dml_data_type<T>(), input_maxarr_dims, nullptr);
 
-  std::vector<UINT> output_maxarr_dims = {1, 1, 1, 1u};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle output_maxarr_bundle(
-      dml::get_dml_data_type<T>(), output_maxarr_dims, nullptr);
+  StorageView output_storage({1, 1, 1, 1}, type_to_dtype<T>::value,
+                             Device::DirectML);
+  ::ctranslate2::dml::utils::DmlTensorDescBundle output_bundle(output_storage);
 
   DML_REDUCE_OPERATOR_DESC reduce_desc = {};
   reduce_desc.Function = DML_REDUCE_FUNCTION_MAX;
   reduce_desc.InputTensor = &input_maxarr_bundle.get_tensor_desc();
-  reduce_desc.OutputTensor = &output_maxarr_bundle.get_tensor_desc();
+  reduce_desc.OutputTensor = &output_bundle.get_tensor_desc();
 
   static const UINT axes[] = {3};
   reduce_desc.AxisCount = 1;
@@ -491,17 +480,13 @@ T primitives<Device::DirectML>::max(const T* array, dim_t size) {
   dml::Operator* compiled_op =
       dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
-  auto dxdevice = dml::get_device();
-
-  ComPtr<ID3D12Resource> output_resource =
-      dxdevice->CreatePreferredDeviceMemoryBuffer(sizeof(T));
-
   std::vector<ID3D12Resource*> inputs = {
       reinterpret_cast<ID3D12Resource*>(const_cast<T*>(array))};
-  std::vector<ID3D12Resource*> outputs = {output_resource.Get()};
+  std::vector<ID3D12Resource*> outputs = {
+      dml::utils::ResourceFromStorageView(output_storage)};
   compiled_op->Execute(inputs, outputs);
 
-  return T{};
+  return output_storage.to(Device::CPU).at<T>({0, 0, 0, 0});
 }
 
 template <>
