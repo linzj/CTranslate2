@@ -279,6 +279,30 @@ class DmlBindingArrayBundle {
   std::vector<DmlBufferBindingBundle> buffer_binding_bundles_;
 };
 
+// A RAII helper to temporarily reshape a StorageView and restore it on scope
+// exit.
+class ScopedReshape {
+ public:
+  // Reshapes `view` to `new_shape` and stores the original shape.
+  ScopedReshape(StorageView& view, Shape new_shape)
+      : _view(view), _original_shape(view.shape()) {
+    _view.reshape(std::move(new_shape));
+  }
+
+  // Restores the original shape.
+  ~ScopedReshape() { _view.reshape(std::move(_original_shape)); }
+
+  // Disallow copy and move operations to prevent misuse.
+  ScopedReshape(const ScopedReshape&) = delete;
+  ScopedReshape& operator=(const ScopedReshape&) = delete;
+  ScopedReshape(ScopedReshape&&) = delete;
+  ScopedReshape& operator=(ScopedReshape&&) = delete;
+
+ private:
+  StorageView& _view;
+  Shape _original_shape;
+};
+
 // --- DML Operator & Resource Creation Utilities ---
 
 // Helper to create a constant tensor on the GPU using
