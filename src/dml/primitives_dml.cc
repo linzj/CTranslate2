@@ -1240,28 +1240,89 @@ void primitives<Device::DirectML>::min(const T* a,
 template <>
 template <typename T>
 void primitives<Device::DirectML>::gelu(const T* x, T* y, dim_t size) {
-  // DML doesn't have native GELU, would need to implement as composite
-  // operation
-  sigmoid(x, y, size);  // Placeholder
+  auto dml_device = dml::get_dml_device();
+
+  std::vector<UINT> dims = {1, 1, 1, static_cast<UINT>(size)};
+  ::ctranslate2::dml::utils::DmlTensorDescBundle tensor_bundle(
+      dml::get_dml_data_type<T>(), dims, nullptr);
+
+  DML_ACTIVATION_GELU_OPERATOR_DESC gelu_desc = {};
+  gelu_desc.InputTensor = &tensor_bundle.get_tensor_desc();
+  gelu_desc.OutputTensor = &tensor_bundle.get_tensor_desc();
+
+  DML_OPERATOR_DESC op_desc = {};
+  op_desc.Type = DML_OPERATOR_ACTIVATION_GELU;
+  op_desc.Desc = &gelu_desc;
+
+  dml::Operator* compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+
+  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
+  compiled_op->Execute(inputs, outputs);
 }
 
 template <>
 template <typename T>
 void primitives<Device::DirectML>::gelu_tanh(const T* x, T* y, dim_t size) {
-  tanh(x, y, size);  // Placeholder
+  // DirectML has a native GELU operator which is more accurate than the tanh
+  // approximation.
+  gelu(x, y, size);
 }
 
 template <>
 template <typename T>
 void primitives<Device::DirectML>::gelu_sigmoid(const T* x, T* y, dim_t size) {
-  sigmoid(x, y, size);  // Placeholder
+  // Implemented using swish(x) = x * sigmoid(alpha * x) with alpha = 1.702 for
+  // GELU approximation.
+  auto dml_device = dml::get_dml_device();
+
+  std::vector<UINT> dims = {1, 1, 1, static_cast<UINT>(size)};
+  ::ctranslate2::dml::utils::DmlTensorDescBundle tensor_bundle(
+      dml::get_dml_data_type<T>(), dims, nullptr);
+
+  DML_ACTIVATION_SWISH_OPERATOR_DESC swish_desc = {};
+  swish_desc.InputTensor = &tensor_bundle.get_tensor_desc();
+  swish_desc.OutputTensor = &tensor_bundle.get_tensor_desc();
+  swish_desc.SigmoidInputScale = 1.702f;
+
+  DML_OPERATOR_DESC op_desc = {};
+  op_desc.Type = DML_OPERATOR_ACTIVATION_SWISH;
+  op_desc.Desc = &swish_desc;
+
+  dml::Operator* compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+
+  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
+  compiled_op->Execute(inputs, outputs);
 }
 
 template <>
 template <typename T>
 void primitives<Device::DirectML>::swish(const T* x, T* y, dim_t size) {
-  // Swish = x * sigmoid(x), would need composite operation
-  sigmoid(x, y, size);  // Placeholder
+  // swish(x) = x * sigmoid(x)
+  auto dml_device = dml::get_dml_device();
+
+  std::vector<UINT> dims = {1, 1, 1, static_cast<UINT>(size)};
+  ::ctranslate2::dml::utils::DmlTensorDescBundle tensor_bundle(
+      dml::get_dml_data_type<T>(), dims, nullptr);
+
+  DML_ACTIVATION_SWISH_OPERATOR_DESC swish_desc = {};
+  swish_desc.InputTensor = &tensor_bundle.get_tensor_desc();
+  swish_desc.OutputTensor = &tensor_bundle.get_tensor_desc();
+  swish_desc.SigmoidInputScale = 1.0f;
+
+  DML_OPERATOR_DESC op_desc = {};
+  op_desc.Type = DML_OPERATOR_ACTIVATION_SWISH;
+  op_desc.Desc = &swish_desc;
+
+  dml::Operator* compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+
+  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
+  compiled_op->Execute(inputs, outputs);
 }
 
 template <>
