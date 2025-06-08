@@ -139,7 +139,7 @@ void primitives<Device::DirectML>::fill(T* x, T a, dim_t size) {
 
   // For FILL_VALUE_CONSTANT, we don't need input resources
   std::vector<ID3D12Resource*> inputs = {};
-  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(x)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(x)};
   compiled_op->Execute(inputs, outputs);
 }
 
@@ -211,7 +211,7 @@ void primitives<Device::DirectML>::strided_fill(T* x,
   }
 
   std::vector<ID3D12Resource*> inputs = {};
-  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(x)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(x)};
   compiled_op->Execute(inputs, outputs);
 }
 
@@ -230,7 +230,7 @@ void primitives<Device::DirectML>::indexed_fill(T* x,
       dxdevice->CreatePreferredDeviceMemoryBuffer(num_indices * sizeof(T));
 
   // First, fill the values resource with 'a'
-  fill(reinterpret_cast<T*>(values_resource.Get()), a, num_indices);
+  fill(dml::utils::ResourceToBuffer<T>(values_resource.Get()), a, num_indices);
 
   // Now use scatter to place these values at the specified indices
   std::vector<UINT> data_if_dims = {1, 1, 1, 1u};
@@ -273,12 +273,11 @@ void primitives<Device::DirectML>::indexed_fill(T* x,
   }
 
   std::vector<ID3D12Resource*> inputs = {
-      reinterpret_cast<ID3D12Resource*>(x),  // Current data
-      reinterpret_cast<ID3D12Resource*>(
-          const_cast<int32_t*>(indices)),  // Indices
-      values_resource.Get()                // Values to scatter
+      dml::utils::ResourceFromRawBuffer(x),        // Current data
+      dml::utils::ResourceFromRawBuffer(indices),  // Indices
+      values_resource.Get()                        // Values to scatter
   };
-  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(x)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(x)};
   compiled_op->Execute(inputs, outputs);
 }
 
@@ -298,9 +297,8 @@ void primitives<Device::DirectML>::copy(const T* x, T* y, dim_t size) {
   // dxdevice->ExecuteCommandList().
   auto command_list = dxdevice->GetCommandList();
 
-  ID3D12Resource* src_resource =
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x));
-  ID3D12Resource* dst_resource = reinterpret_cast<ID3D12Resource*>(y);
+  ID3D12Resource* src_resource = dml::utils::ResourceFromRawBuffer(x);
+  ID3D12Resource* dst_resource = dml::utils::ResourceFromRawBuffer(y);
 
   D3D12_RESOURCE_BARRIER barriers[2];
 
@@ -369,9 +367,8 @@ void primitives<Device::DirectML>::convert(const U* x, V* y, dim_t size) {
 
   auto dxdevice = dml::get_device();
 
-  std::vector<ID3D12Resource*> inputs = {
-      reinterpret_cast<ID3D12Resource*>(const_cast<U*>(x))};
-  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(y)};
+  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
   compiled_op->Execute(inputs, outputs);
 }
 
@@ -406,7 +403,7 @@ T primitives<Device::DirectML>::sum(const T* array, dim_t size) {
       dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
   std::vector<ID3D12Resource*> inputs = {
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(array))};
+      dml::utils::ResourceFromRawBuffer(array)};
   std::vector<ID3D12Resource*> outputs = {
       dml::utils::ResourceFromStorageView(output_storage)};
   compiled_op->Execute(inputs, outputs);
@@ -443,7 +440,7 @@ dim_t primitives<Device::DirectML>::max_element(const T* array, dim_t size) {
       dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
   std::vector<ID3D12Resource*> inputs = {
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(array))};
+      dml::utils::ResourceFromRawBuffer(array)};
   std::vector<ID3D12Resource*> outputs = {
       dml::utils::ResourceFromStorageView(output_storage)};
   compiled_op->Execute(inputs, outputs);
@@ -481,7 +478,7 @@ T primitives<Device::DirectML>::max(const T* array, dim_t size) {
       dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
   std::vector<ID3D12Resource*> inputs = {
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(array))};
+      dml::utils::ResourceFromRawBuffer(array)};
   std::vector<ID3D12Resource*> outputs = {
       dml::utils::ResourceFromStorageView(output_storage)};
   compiled_op->Execute(inputs, outputs);
@@ -526,13 +523,12 @@ void primitives<Device::DirectML>::add(T a, const T* x, T* y, dim_t size) {
   auto dxdevice = dml::get_device();
 
   // Create constant buffer for scalar
-  ComPtr<ID3D12Resource> scalar_resource =
-      dxdevice->CreatePreferredDeviceMemoryBuffer(sizeof(T));
+  StorageView a_storage(a, Device::DirectML);
 
   std::vector<ID3D12Resource*> inputs = {
-      scalar_resource.Get(),
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x))};
-  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(y)};
+      dml::utils::ResourceFromStorageView(a_storage),
+      dml::utils::ResourceFromRawBuffer(x)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
   compiled_op->Execute(inputs, outputs);
 }
 
@@ -570,10 +566,9 @@ void primitives<Device::DirectML>::add(const T* a,
 
   auto dxdevice = dml::get_device();
 
-  std::vector<ID3D12Resource*> inputs = {
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(a)),
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(b))};
-  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(c)};
+  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(a),
+                                         dml::utils::ResourceFromRawBuffer(b)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(c)};
   compiled_op->Execute(inputs, outputs);
 }
 
@@ -611,10 +606,9 @@ void primitives<Device::DirectML>::sub(const T* a,
 
   auto dxdevice = dml::get_device();
 
-  std::vector<ID3D12Resource*> inputs = {
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(a)),
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(b))};
-  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(c)};
+  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(a),
+                                         dml::utils::ResourceFromRawBuffer(b)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(c)};
   compiled_op->Execute(inputs, outputs);
 }
 
@@ -652,13 +646,12 @@ void primitives<Device::DirectML>::mul(T a, const T* x, T* y, dim_t size) {
   auto dxdevice = dml::get_device();
 
   // Create constant buffer for scalar
-  ComPtr<ID3D12Resource> scalar_resource =
-      dxdevice->CreatePreferredDeviceMemoryBuffer(sizeof(T));
+  StorageView a_storage(a, Device::DirectML);
 
   std::vector<ID3D12Resource*> inputs = {
-      scalar_resource.Get(),
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x))};
-  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(y)};
+      dml::utils::ResourceFromStorageView(a_storage),
+      dml::utils::ResourceFromRawBuffer(x)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
   compiled_op->Execute(inputs, outputs);
 }
 
@@ -696,10 +689,9 @@ void primitives<Device::DirectML>::mul(const T* a,
 
   auto dxdevice = dml::get_device();
 
-  std::vector<ID3D12Resource*> inputs = {
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(a)),
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(b))};
-  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(c)};
+  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(a),
+                                         dml::utils::ResourceFromRawBuffer(b)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(c)};
   compiled_op->Execute(inputs, outputs);
 }
 
@@ -730,9 +722,8 @@ void primitives<Device::DirectML>::relu(const T* x, T* y, dim_t size) {
 
   auto dxdevice = dml::get_device();
 
-  std::vector<ID3D12Resource*> inputs = {
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x))};
-  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(y)};
+  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
   compiled_op->Execute(inputs, outputs);
 }
 
@@ -762,9 +753,8 @@ void primitives<Device::DirectML>::sigmoid(const T* x, T* y, dim_t size) {
 
   auto dxdevice = dml::get_device();
 
-  std::vector<ID3D12Resource*> inputs = {
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x))};
-  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(y)};
+  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
   compiled_op->Execute(inputs, outputs);
 }
 
@@ -794,9 +784,8 @@ void primitives<Device::DirectML>::tanh(const T* x, T* y, dim_t size) {
 
   auto dxdevice = dml::get_device();
 
-  std::vector<ID3D12Resource*> inputs = {
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x))};
-  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(y)};
+  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
   compiled_op->Execute(inputs, outputs);
 }
 
@@ -920,15 +909,15 @@ void primitives<Device::DirectML>::gemm(bool a_is_packed,
     auto dxdevice = dml::get_device();
 
     std::vector<ID3D12Resource*> inputs = {
-        reinterpret_cast<ID3D12Resource*>(const_cast<In*>(a)),
-        reinterpret_cast<ID3D12Resource*>(const_cast<In*>(b))};
+        dml::utils::ResourceFromRawBuffer(a),
+        dml::utils::ResourceFromRawBuffer(b)};
 
     if (beta != 0.0f) {
-      inputs.push_back(reinterpret_cast<ID3D12Resource*>(c));
+      inputs.push_back(dml::utils::ResourceFromRawBuffer(c));
     }
 
     std::vector<ID3D12Resource*> outputs = {
-        reinterpret_cast<ID3D12Resource*>(c)};
+        dml::utils::ResourceFromRawBuffer(c)};
     compiled_op->Execute(inputs, outputs);
 
     // Then add the shift compensation
@@ -961,11 +950,10 @@ void primitives<Device::DirectML>::gemm(bool a_is_packed,
         &add_op_desc, DML_EXECUTION_FLAG_NONE);
 
     std::vector<ID3D12Resource*> add_inputs = {
-        reinterpret_cast<ID3D12Resource*>(c),
-        reinterpret_cast<ID3D12Resource*>(
-            const_cast<Out*>(a_shift_compensation))};
+        dml::utils::ResourceFromRawBuffer(c),
+        dml::utils::ResourceFromRawBuffer(a_shift_compensation)};
     std::vector<ID3D12Resource*> add_outputs = {
-        reinterpret_cast<ID3D12Resource*>(c)};
+        dml::utils::ResourceFromRawBuffer(c)};
     compiled_add_op->Execute(add_inputs, add_outputs);
 
   } else {
@@ -992,17 +980,17 @@ void primitives<Device::DirectML>::gemm(bool a_is_packed,
     auto dxdevice = dml::get_device();
 
     std::vector<ID3D12Resource*> inputs = {
-        reinterpret_cast<ID3D12Resource*>(const_cast<In*>(a)),
-        reinterpret_cast<ID3D12Resource*>(const_cast<In*>(b))};
+        dml::utils::ResourceFromRawBuffer(a),
+        dml::utils::ResourceFromRawBuffer(b)};
 
     if (beta != 0.0f) {
-      inputs.push_back(reinterpret_cast<ID3D12Resource*>(c));
+      inputs.push_back(dml::utils::ResourceFromRawBuffer(c));
     } else {
       inputs.push_back(nullptr);
     }
 
     std::vector<ID3D12Resource*> outputs = {
-        reinterpret_cast<ID3D12Resource*>(c)};
+        dml::utils::ResourceFromRawBuffer(c)};
     compiled_op->Execute(inputs, outputs);
   }
 }
@@ -1074,13 +1062,12 @@ void primitives<Device::DirectML>::max(T a, const T* x, T* y, dim_t size) {
 
   auto dxdevice = dml::get_device();
 
-  ComPtr<ID3D12Resource> scalar_resource =
-      dxdevice->CreatePreferredDeviceMemoryBuffer(sizeof(T));
+  StorageView a_storage(a, Device::DirectML);
 
   std::vector<ID3D12Resource*> inputs = {
-      scalar_resource.Get(),
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x))};
-  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(y)};
+      dml::utils::ResourceFromStorageView(a_storage),
+      dml::utils::ResourceFromRawBuffer(x)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
   compiled_op->Execute(inputs, outputs);
 }
 
@@ -1118,10 +1105,9 @@ void primitives<Device::DirectML>::max(const T* a,
 
   auto dxdevice = dml::get_device();
 
-  std::vector<ID3D12Resource*> inputs = {
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(a)),
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(b))};
-  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(c)};
+  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(a),
+                                         dml::utils::ResourceFromRawBuffer(b)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(c)};
   compiled_op->Execute(inputs, outputs);
 }
 
@@ -1158,13 +1144,12 @@ void primitives<Device::DirectML>::min(T a, const T* x, T* y, dim_t size) {
 
   auto dxdevice = dml::get_device();
 
-  ComPtr<ID3D12Resource> scalar_resource =
-      dxdevice->CreatePreferredDeviceMemoryBuffer(sizeof(T));
+  StorageView a_storage(a, Device::DirectML);
 
   std::vector<ID3D12Resource*> inputs = {
-      scalar_resource.Get(),
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x))};
-  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(y)};
+      dml::utils::ResourceFromStorageView(a_storage),
+      dml::utils::ResourceFromRawBuffer(x)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
   compiled_op->Execute(inputs, outputs);
 }
 
@@ -1202,10 +1187,9 @@ void primitives<Device::DirectML>::min(const T* a,
 
   auto dxdevice = dml::get_device();
 
-  std::vector<ID3D12Resource*> inputs = {
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(a)),
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(b))};
-  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(c)};
+  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(a),
+                                         dml::utils::ResourceFromRawBuffer(b)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(c)};
   compiled_op->Execute(inputs, outputs);
 }
 
@@ -1263,9 +1247,8 @@ void primitives<Device::DirectML>::exp(const T* x, T* y, dim_t size) {
 
   auto dxdevice = dml::get_device();
 
-  std::vector<ID3D12Resource*> inputs = {
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x))};
-  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(y)};
+  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
   compiled_op->Execute(inputs, outputs);
 }
 
@@ -1295,9 +1278,8 @@ void primitives<Device::DirectML>::log(const T* x, T* y, dim_t size) {
 
   auto dxdevice = dml::get_device();
 
-  std::vector<ID3D12Resource*> inputs = {
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x))};
-  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(y)};
+  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
   compiled_op->Execute(inputs, outputs);
 }
 
@@ -1327,9 +1309,8 @@ void primitives<Device::DirectML>::sin(const T* x, T* y, dim_t size) {
 
   auto dxdevice = dml::get_device();
 
-  std::vector<ID3D12Resource*> inputs = {
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x))};
-  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(y)};
+  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
   compiled_op->Execute(inputs, outputs);
 }
 
@@ -1359,9 +1340,8 @@ void primitives<Device::DirectML>::cos(const T* x, T* y, dim_t size) {
 
   auto dxdevice = dml::get_device();
 
-  std::vector<ID3D12Resource*> inputs = {
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x))};
-  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(y)};
+  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
   compiled_op->Execute(inputs, outputs);
 }
 
@@ -1508,9 +1488,8 @@ void primitives<Device::DirectML>::transpose_2d(const T* a,
 
   auto dxdevice = dml::get_device();
 
-  std::vector<ID3D12Resource*> inputs = {
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(a))};
-  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(b)};
+  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(a)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(b)};
 
   compiled_op->Execute(inputs, outputs);
 }
@@ -1595,9 +1574,8 @@ void primitives<Device::DirectML>::transpose_3d(const T* a,
 
   auto dxdevice = dml::get_device();
 
-  std::vector<ID3D12Resource*> inputs = {
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(a))};
-  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(b)};
+  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(a)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(b)};
 
   compiled_op->Execute(inputs, outputs);
 }
@@ -1679,12 +1657,11 @@ void primitives<Device::DirectML>::transpose_4d(const T* a,
 
   auto dxdevice = dml::get_device();
 
-  ID3D12Resource* input_resource =
-      reinterpret_cast<ID3D12Resource*>(const_cast<T*>(a));
+  ID3D12Resource* input_resource = dml::utils::ResourceFromRawBuffer(a);
 
   D3D12_RESOURCE_DESC input_desc = input_resource->GetDesc();
   std::vector<ID3D12Resource*> inputs = {input_resource};
-  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(b)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(b)};
 
   compiled_op->Execute(inputs, outputs);
 }
@@ -1816,9 +1793,9 @@ dim_t primitives<Device::DirectML>::gemm_pack_b(const T* b,
     auto dxdevice = dml::get_device();
 
     std::vector<ID3D12Resource*> transpose_inputs = {
-        reinterpret_cast<ID3D12Resource*>(const_cast<T*>(b))};
+        dml::utils::ResourceFromRawBuffer(b)};
     std::vector<ID3D12Resource*> transpose_outputs = {
-        reinterpret_cast<ID3D12Resource*>(dest)};
+        dml::utils::ResourceFromRawBuffer(dest)};
 
     compiled_transpose_op->Execute(transpose_inputs, transpose_outputs);
   } else {
@@ -1921,11 +1898,11 @@ dim_t primitives<Device::DirectML>::gemm_pack_b(const T* b,
 
     // Execute scaling (in-place on dest)
     std::vector<ID3D12Resource*> inputs = {
-        reinterpret_cast<ID3D12Resource*>(
+        dml::utils::ResourceFromRawBuffer(
             dest),  // Input is the already transposed/copied data
         scalar_resource.Get()};
     std::vector<ID3D12Resource*> outputs = {
-        reinterpret_cast<ID3D12Resource*>(dest)};
+        dml::utils::ResourceFromRawBuffer(dest)};
 
     compiled_op->Execute(inputs, outputs);
   }
@@ -2075,17 +2052,16 @@ void primitives<Device::DirectML>::gemm_batch_strided(bool transpose_a,
 
   auto dxdevice = dml::get_device();
 
-  std::vector<ID3D12Resource*> inputs = {
-      reinterpret_cast<ID3D12Resource*>(const_cast<In*>(a)),
-      reinterpret_cast<ID3D12Resource*>(const_cast<In*>(b))};
+  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(a),
+                                         dml::utils::ResourceFromRawBuffer(b)};
 
   if (beta != 0.0f) {
-    inputs.push_back(reinterpret_cast<ID3D12Resource*>(c));
+    inputs.push_back(dml::utils::ResourceFromRawBuffer(c));
   } else {
     inputs.push_back(nullptr);
   }
 
-  std::vector<ID3D12Resource*> outputs = {reinterpret_cast<ID3D12Resource*>(c)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(c)};
   compiled_op->Execute(inputs, outputs);
 }
 
@@ -2097,8 +2073,7 @@ void cross_device_primitives<Device::CPU, Device::DirectML>::copy(const T* x,
                                                                   dim_t size) {
   auto device = dml::get_device();
   std::string_view data(reinterpret_cast<const char*>(x), size * sizeof(T));
-  device->Upload(data.size(), data,
-                 reinterpret_cast<ID3D12Resource*>(const_cast<T*>(y)));
+  device->Upload(data.size(), data, dml::utils::ResourceFromRawBuffer(y));
 }
 
 template <>
@@ -2107,7 +2082,7 @@ void cross_device_primitives<Device::DirectML, Device::CPU>::copy(const T* x,
                                                                   T* y,
                                                                   dim_t size) {
   auto device = dml::get_device();
-  device->Download(reinterpret_cast<ID3D12Resource*>(const_cast<T*>(x)),
+  device->Download(dml::utils::ResourceFromRawBuffer(x),
                    reinterpret_cast<void*>(y), size * sizeof(T));
 }
 

@@ -349,6 +349,11 @@ inline ID3D12Resource* ResourceFromStorageView(
 }
 
 template <typename T>
+inline ID3D12Resource* ResourceFromRawBuffer(const T* buffer) {
+  return reinterpret_cast<ID3D12Resource*>(const_cast<T*>(buffer));
+}
+
+template <typename T>
 inline T* ResourceToBuffer(ID3D12Resource* resource) {
   return reinterpret_cast<T*>(resource);
 }
