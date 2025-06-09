@@ -31,8 +31,10 @@ void Gather::compute(const StorageView& data,
   const dim_t original_data_rank = data.rank();
   const dim_t original_indices_rank =
       indices.rank();  // Used for DML's IndexDimensions
+  const dim_t original_output_rank = output.rank();
   const dim_t target_dml_rank =
-      output.rank();  // All DML tensors need this rank
+      std::max({original_data_rank, original_indices_rank,
+                original_output_rank});  // All DML tensors need this rank
   auto* dml_device_wrapper = dml::get_device();  // ctranslate2::dml::Device
 
   // Use copies for potential reshaping. StorageView copy is shallow.
@@ -40,6 +42,7 @@ void Gather::compute(const StorageView& data,
   // destruction.
   StorageView data_for_dml = data;
   StorageView indices_for_dml = indices;
+  StorageView output_for_dml = output;
 
   dim_t dml_axis = axis;  // Axis to be used for DML, may be adjusted
 
@@ -77,11 +80,25 @@ void Gather::compute(const StorageView& data,
   // data.rank. The new logic correctly compares with target_dml_rank
   // (output.rank).
 
+  std::unique_ptr<dml::utils::ScopedReshape> scoped_output_reshape;
+  if (original_output_rank < target_dml_rank) {
+    Shape new_output_shape;
+    dim_t dims_to_prepend = target_dml_rank - original_output_rank;
+    for (dim_t i = 0; i < dims_to_prepend; ++i) {
+      new_output_shape.push_back(1);
+    }
+    for (dim_t i = 0; i < original_output_rank; ++i) {
+      new_output_shape.push_back(output.shape()[i]);
+    }
+    scoped_output_reshape.reset(
+        new dml::utils::ScopedReshape(output_for_dml, new_output_shape));
+  }
+
   // Create tensor descriptors using the (potentially reshaped) views
   dml::utils::DmlTensorDescBundle data_desc_bundle(data_for_dml);
   dml::utils::DmlTensorDescBundle indices_desc_bundle(indices_for_dml);
   dml::utils::DmlTensorDescBundle output_desc_bundle(
-      output);  // Output is already at target_dml_rank
+      output_for_dml);  // Output is now at target_dml_rank
 
   // Create gather operator descriptor
   DML_GATHER_OPERATOR_DESC gather_desc = {};
