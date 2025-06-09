@@ -90,6 +90,7 @@ void LayerNorm::compute(const StorageView* beta,
   // StorageView::buffer() returns ID3D12Resource* for DirectML backend
   // input and output must share the same buffer.
   ID3D12Resource* input_resource = dml::utils::ResourceFromStorageView(input);
+  device->KeepAliveUntilNextCommandListDispatch(input_resource);
   StorageView input_storage;
   if (input.buffer() == output.buffer()) {
     input_storage = std::move(input);

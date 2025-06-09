@@ -32,6 +32,7 @@ void SoftMax::compute(const StorageView& input,
 
   StorageView input_storage;
   ID3D12Resource* input_resource = dml::utils::ResourceFromStorageView(input);
+  device_context->KeepAliveUntilNextCommandListDispatch(input_resource);
   if (input.buffer() == output.buffer()) {
     input_storage = std::move(output);
     StorageView new_output(input_storage.shape(), input_storage.dtype(),
