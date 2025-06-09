@@ -1515,12 +1515,42 @@ T primitives<Device::DirectML>::amax(const T* array, dim_t size) {
 template <>
 template <typename T>
 float primitives<Device::DirectML>::logsumexp(const T* x, dim_t size) {
-  (void)x;  // Suppress unused parameter warnings
-  (void)size;
+  if (size == 0) {
+    return std::numeric_limits<float>::lowest();
+  }
 
-  throw std::runtime_error(
-      "DirectML does not support logsumexp operation directly. Use exp and sum "
-      "instead.");
+  auto dml_device = dml::get_dml_device();
+
+  std::vector<UINT> input_dims = {1, 1, 1, static_cast<UINT>(size)};
+  ::ctranslate2::dml::utils::DmlTensorDescBundle input_bundle(
+      dml::get_dml_data_type<T>(), input_dims, nullptr);
+
+  StorageView output_storage({1, 1, 1, 1}, DataType::FLOAT32, Device::DirectML);
+  ::ctranslate2::dml::utils::DmlTensorDescBundle output_bundle(output_storage);
+
+  // Use DML reduce log_sum_exp operation
+  DML_REDUCE_OPERATOR_DESC reduce_desc = {};
+  reduce_desc.Function = DML_REDUCE_FUNCTION_LOG_SUM_EXP;
+  reduce_desc.InputTensor = &input_bundle.get_tensor_desc();
+  reduce_desc.OutputTensor = &output_bundle.get_tensor_desc();
+
+  static const UINT axes[] = {3};  // Reduce along the last dimension
+  reduce_desc.AxisCount = 1;
+  reduce_desc.Axes = axes;
+
+  DML_OPERATOR_DESC op_desc = {};
+  op_desc.Type = DML_OPERATOR_REDUCE;
+  op_desc.Desc = &reduce_desc;
+
+  dml::Operator* compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+
+  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
+  std::vector<ID3D12Resource*> outputs = {
+      dml::utils::ResourceFromStorageView(output_storage)};
+  compiled_op->Execute(inputs, outputs);
+
+  return output_storage.to(Device::CPU).at<float>({0, 0, 0, 0});
 }
 
 template <>
