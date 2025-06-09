@@ -226,6 +226,9 @@ void primitives<Device::DirectML>::indexed_fill(T* x,
   // For indexed fill, we need to use scatter operation
   // Create a tensor of values to scatter (all set to 'a')
   auto dxdevice = dml::get_device();
+  ID3D12Resource* x_resource = dml::utils::ResourceFromRawBuffer(x);
+  const D3D12_RESOURCE_DESC x_desc = x_resource->GetDesc();
+  const dim_t x_total_elements = x_desc.Width / sizeof(T);
   ComPtr<ID3D12Resource> values_resource =
       dxdevice->CreatePreferredDeviceMemoryBuffer(num_indices * sizeof(T));
 
@@ -233,7 +236,8 @@ void primitives<Device::DirectML>::indexed_fill(T* x,
   fill(dml::utils::ResourceToBuffer<T>(values_resource.Get()), a, num_indices);
 
   // Now use scatter to place these values at the specified indices
-  std::vector<UINT> data_if_dims = {1, 1, 1, 1u};
+  std::vector<UINT> data_if_dims = {1, 1, 1,
+                                    static_cast<UINT>(x_total_elements)};
   ::ctranslate2::dml::utils::DmlTensorDescBundle data_if_bundle(
       dml::get_dml_data_type<T>(), data_if_dims, nullptr);
 
@@ -245,7 +249,8 @@ void primitives<Device::DirectML>::indexed_fill(T* x,
   ::ctranslate2::dml::utils::DmlTensorDescBundle updates_if_bundle(
       dml::get_dml_data_type<T>(), updates_if_dims, nullptr);
 
-  std::vector<UINT> output_if_dims = {1, 1, 1, 1u};
+  std::vector<UINT> output_if_dims = {1, 1, 1,
+                                      static_cast<UINT>(x_total_elements)};
   ::ctranslate2::dml::utils::DmlTensorDescBundle output_if_bundle(
       dml::get_dml_data_type<T>(), output_if_dims, nullptr);
 
@@ -261,21 +266,21 @@ void primitives<Device::DirectML>::indexed_fill(T* x,
   op_desc.Desc = &scatter_desc;
 
   dml::Operator* compiled_op;
-  try {
-    compiled_op =
-        dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
-  } catch (const std::runtime_error& e) {
-    // Fallback: manually fill each index
-    // This would require CPU-GPU synchronization and is very inefficient
-    // For now, just fill the entire array as a placeholder
-    fill(x, a, num_indices);
-    return;
-  }
+  compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  // Duplicate the input x to avoid overlapping input and output resources.
+  StorageView x_view(Device::DirectML, ctranslate2::type_to_dtype<T>::value);
+  ID3D12Resource* input_resource = dml::utils::ResourceFromRawBuffer(x);
+  input_resource->AddRef();
+  StorageView x_view_src({1, 1, 1, static_cast<dim_t>(x_total_elements)},
+                         reinterpret_cast<T*>(input_resource),
+                         Device::DirectML);
+  x_view.copy_from(x_view_src);
 
   std::vector<ID3D12Resource*> inputs = {
-      dml::utils::ResourceFromRawBuffer(x),        // Current data
-      dml::utils::ResourceFromRawBuffer(indices),  // Indices
-      values_resource.Get()                        // Values to scatter
+      dml::utils::ResourceFromStorageView(x_view),  // Current data
+      dml::utils::ResourceFromRawBuffer(indices),   // Indices
+      values_resource.Get()                         // Values to scatter
   };
   std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(x)};
   compiled_op->Execute(inputs, outputs);
