@@ -71,26 +71,19 @@ void AlibiAdd::compute(const StorageView& input,
   dml::Operator* add_operator = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
   // Execute the operator
-  ID3D12Resource* input_resource =
-      reinterpret_cast<ID3D12Resource*>(const_cast<void*>(input.buffer()));
-  ID3D12Resource* alibi_resource =
-      reinterpret_cast<ID3D12Resource*>(const_cast<void*>(alibi.buffer()));
-  ID3D12Resource* output_resource =
-      reinterpret_cast<ID3D12Resource*>(output.buffer());
-  DML_BUFFER_BINDING input_buffer_binding = {
-      input_resource, 0, static_cast<UINT64>(input.size() * item_size)};
-  DML_BUFFER_BINDING alibi_buffer_binding = {
-      alibi_resource, alibi_byte_offset,
-      static_cast<UINT64>(alibi.size() * item_size)};
-  std::vector<DML_BINDING_DESC> input_bindings = {
-      {DML_BINDING_TYPE_BUFFER, &input_buffer_binding},
-      {DML_BINDING_TYPE_BUFFER, &alibi_buffer_binding}};
-  DML_BUFFER_BINDING output_buffer_binding = {
-      output_resource, 0, static_cast<UINT64>(output.size() * item_size)};
-  DML_BINDING_DESC output_binding_desc = {DML_BINDING_TYPE_BUFFER,
-                                          &output_buffer_binding};
+  // Execute the operator
+  dml::utils::DmlBindingArrayBundle input_bindings(
+      {dml::utils::DmlBufferBindingBundle(
+           dml::utils::ResourceFromStorageView(input)),
+       dml::utils::DmlBufferBindingBundle(
+           dml::utils::ResourceFromStorageView(alibi), alibi_byte_offset)});
 
-  add_operator->Execute(input_bindings, {output_binding_desc});
+  dml::utils::DmlBindingArrayBundle output_bindings(
+      {dml::utils::DmlBufferBindingBundle(
+          dml::utils::ResourceFromStorageView(output))});
+
+  add_operator->Execute(input_bindings.get_descs(),
+                        output_bindings.get_descs());
 }
 
 #define DECLARE_IMPL(T)                                 \

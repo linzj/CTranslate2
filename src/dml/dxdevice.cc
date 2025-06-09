@@ -1,5 +1,6 @@
 #include "dxdevice.h"
 #include <spdlog/spdlog.h>
+#include "bucketized_buffer_allocator.h"
 #include "command_queue.h"
 #include "common.h"
 #include "descriptor_pool.h"
@@ -166,6 +167,7 @@ Device::Device(IAdapter* adapter,
       D3D12_FEATURE_FEATURE_LEVELS, &featureLevels, sizeof(featureLevels)));
 
   m_descriptorPool = std::make_unique<DescriptorPool>(m_d3d.Get(), 256);
+  m_allocator = std::make_unique<BucketizedBufferAllocator>(this);
 #if 0
   // Custom heaps are optional for MCDM devices, so we also need to check for
   // support.
@@ -394,6 +396,7 @@ Device::Device(ID3D12Device* d3ddevice,
   }
 
   m_descriptorPool = std::make_unique<DescriptorPool>(m_d3d.Get(), 1024 * 1024);
+  m_allocator = std::make_unique<BucketizedBufferAllocator>(this);
 }
 
 Device::~Device() {
@@ -420,11 +423,22 @@ Device::~Device() {
   }
 }
 
-Microsoft::WRL::ComPtr<ID3D12Resource>
+Microsoft::WRL::ComPtr<IResourceWrapper>
 Device::CreatePreferredDeviceMemoryBuffer(uint64_t sizeInBytes,
                                           D3D12_RESOURCE_FLAGS resourceFlags,
                                           uint64_t alignment,
                                           D3D12_HEAP_FLAGS heapFlags) {
+  auto resource_wrapper = m_allocator->Alloc(sizeInBytes, resourceFlags);
+  KeepAliveUntilNextCommandListDispatch(resource_wrapper);
+  return resource_wrapper;
+}
+
+Microsoft::WRL::ComPtr<ID3D12Resource>
+Device::CreatePreferredDeviceMemoryBufferWithoutPooling(
+    uint64_t sizeInBytes,
+    D3D12_RESOURCE_FLAGS resourceFlags,
+    uint64_t alignment,
+    D3D12_HEAP_FLAGS heapFlags) {
   auto return_value =
       m_useCustomHeaps
           ? CreateCustomBuffer(sizeInBytes, resourceFlags, alignment, heapFlags)
@@ -595,7 +609,8 @@ Microsoft::WRL::ComPtr<ID3D12Resource> Device::Upload(uint64_t totalSize,
           D3D12_RESOURCE_STATE_COPY_DEST)};
 
       m_commandList->ResourceBarrier(_countof(barriers), barriers);
-      m_commandList->CopyResource(buffer, uploadBuffer.Get());
+      m_commandList->CopyBufferRegion(buffer, 0, uploadBuffer.Get(), 0,
+                                      totalSize);
       std::swap(barriers[0].Transition.StateBefore,
                 barriers[0].Transition.StateAfter);
       m_commandList->ResourceBarrier(_countof(barriers), barriers);
@@ -655,7 +670,8 @@ void Device::Download(Microsoft::WRL::ComPtr<ID3D12Resource> buffer,
         D3D12_RESOURCE_STATE_COPY_SOURCE)};
 
     m_commandList->ResourceBarrier(_countof(barriers), barriers);
-    m_commandList->CopyResource(resourceToMap.Get(), buffer.Get());
+    m_commandList->CopyBufferRegion(resourceToMap.Get(), 0, buffer.Get(), 0,
+                                    dataSize);
     std::swap(barriers[0].Transition.StateBefore,
               barriers[0].Transition.StateAfter);
     m_commandList->ResourceBarrier(_countof(barriers), barriers);
@@ -926,13 +942,15 @@ void Device::InitializeOperator(
   // Create a temporary resource for initializing the op, if it's required.
   UINT64 temporaryResourceSize = initBindingProps.TemporaryResourceSize;
   if (temporaryResourceSize > 0) {
-    ComPtr<ID3D12Resource> buffer = CreatePreferredDeviceMemoryBuffer(
-        temporaryResourceSize, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    ComPtr<IResourceWrapper> resource_wrapper =
+        CreatePreferredDeviceMemoryBuffer(
+            temporaryResourceSize, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
     // Bind the temporary resource.
-    DML_BUFFER_BINDING bufferBinding = {buffer.Get(), 0, temporaryResourceSize};
+    DML_BUFFER_BINDING bufferBinding = {resource_wrapper->GetD3D12Resource(), 0,
+                                        temporaryResourceSize};
     DML_BINDING_DESC bindingDesc = {DML_BINDING_TYPE_BUFFER, &bufferBinding};
     bindingTable->BindTemporaryResource(&bindingDesc);
-    KeepAliveUntilNextCommandListDispatch(std::move(buffer));
   }
 
   // Bind inputs, if provided.
@@ -988,14 +1006,15 @@ void Device::ExecuteOperator(IDMLCompiledOperator* op,
   // Create a temporary resource for executing the op, if it's required.
   UINT64 temporaryResourceSize = execBindingProps.TemporaryResourceSize;
   if (temporaryResourceSize > 0) {
-    ComPtr<ID3D12Resource> buffer = CreatePreferredDeviceMemoryBuffer(
-        temporaryResourceSize, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    ComPtr<IResourceWrapper> resource_wrapper =
+        CreatePreferredDeviceMemoryBuffer(
+            temporaryResourceSize, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
 
     // Bind the temporary resource.
-    DML_BUFFER_BINDING bufferBinding = {buffer.Get(), 0, temporaryResourceSize};
+    DML_BUFFER_BINDING bufferBinding = {resource_wrapper->GetD3D12Resource(), 0,
+                                        temporaryResourceSize};
     DML_BINDING_DESC bindingDesc = {DML_BINDING_TYPE_BUFFER, &bufferBinding};
     bindingTable->BindTemporaryResource(&bindingDesc);
-    KeepAliveUntilNextCommandListDispatch(std::move(buffer));
   }
 
   if (persistentResourceBinding.Type != DML_BINDING_TYPE_NONE) {

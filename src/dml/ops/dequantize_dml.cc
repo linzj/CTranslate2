@@ -2,9 +2,11 @@
 
 #include "ctranslate2/ops/dequantize.h"
 #include "dml/backend_dml.h"
-#include "dml/dml_utils.h"  // Added
+#include "dml/dml_utils.h"
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
+
+#include <variant>
 
 namespace ctranslate2 {
 namespace ops {
@@ -42,14 +44,14 @@ void Dequantize::dequantize<Device::DirectML, int8_t, float>(
   // Bind cast inputs and outputs
   DML_BUFFER_BINDING cast_input_buffer_binding =
       dml::utils::create_buffer_binding(
-          reinterpret_cast<ID3D12Resource*>(const_cast<void*>(input.buffer())),
-          0, input.size() * sizeof(int8_t));
+          dml::utils::ResourceFromStorageView(input), 0,
+          input.size() * sizeof(int8_t));
   DML_BINDING_DESC cast_input_binding_desc =
       dml::utils::create_binding_desc(&cast_input_buffer_binding);
 
   DML_BUFFER_BINDING cast_output_buffer_binding =
       dml::utils::create_buffer_binding(
-          reinterpret_cast<ID3D12Resource*>(float_input.buffer()), 0,
+          dml::utils::ResourceFromStorageView(float_input), 0,
           float_input.size() * sizeof(float));
   DML_BINDING_DESC cast_output_binding_desc =
       dml::utils::create_binding_desc(&cast_output_buffer_binding);
@@ -118,17 +120,17 @@ void Dequantize::dequantize<Device::DirectML, int8_t, float>(
   // Bind division inputs and outputs
   DML_BUFFER_BINDING div_input1_buffer_binding =
       dml::utils::create_buffer_binding(
-          reinterpret_cast<ID3D12Resource*>(float_input.buffer()), 0,
+          dml::utils::ResourceFromStorageView(float_input), 0,
           float_input.size() * sizeof(float));
 
   DML_BUFFER_BINDING div_input2_buffer_binding =
       dml::utils::create_buffer_binding(
-          reinterpret_cast<ID3D12Resource*>(const_cast<void*>(scale.buffer())),
-          0, scale.size() * sizeof(float));
+          dml::utils::ResourceFromStorageView(scale), 0,
+          scale.size() * sizeof(float));
 
   DML_BUFFER_BINDING div_output_buffer_binding =
       dml::utils::create_buffer_binding(
-          reinterpret_cast<ID3D12Resource*>(output.buffer()), 0,
+          dml::utils::ResourceFromStorageView(output), 0,
           output.size() * sizeof(float));
 
   std::vector<DML_BINDING_DESC> div_input_bindings_vec_desc = {
@@ -159,12 +161,10 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
   const dim_t depth = c.dim(-1);
 
   // Get input buffers
-  auto* c_buffer = static_cast<ID3D12Resource*>(const_cast<void*>(c.buffer()));
-  auto* a_scale_buffer =
-      static_cast<ID3D12Resource*>(const_cast<void*>(a_scale.buffer()));
-  auto* b_scale_buffer =
-      static_cast<ID3D12Resource*>(const_cast<void*>(b_scale.buffer()));
-  auto* y_buffer = static_cast<ID3D12Resource*>(y.buffer());
+  auto* c_buffer = dml::utils::ResourceFromStorageView(c);
+  auto* a_scale_buffer = dml::utils::ResourceFromStorageView(a_scale);
+  auto* b_scale_buffer = dml::utils::ResourceFromStorageView(b_scale);
+  auto* y_buffer = dml::utils::ResourceFromStorageView(y);
 
   // Create tensor descriptors
   // Note: DmlTensorDescBundle is better here to manage lifetimes of underlying
@@ -362,8 +362,7 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
   auto cast_op = dml::GetOrCreateCompiledOperatorApi(&cast_op_desc_gemm);
 
   // Create temporary buffer for cast output
-  auto cast_output =
-      device->CreatePreferredDeviceMemoryBuffer(y.size() * sizeof(float));
+  StorageView cast_output(y.shape(), DataType::FLOAT32, Device::DirectML);
 
   // Step 2: Multiply scales (a_scale * b_scale)
   DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC scale_mult_desc = {};
@@ -378,8 +377,7 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
   auto scale_mult_op = dml::GetOrCreateCompiledOperatorApi(&scale_mult_op_desc);
 
   // Create temporary buffer for scale multiplication
-  auto combined_scale =
-      device->CreatePreferredDeviceMemoryBuffer(y.size() * sizeof(float));
+  StorageView combined_scale(y.shape(), DataType::FLOAT32, Device::DirectML);
 
   // Step 3: Divide cast output by combined scale
   DML_ELEMENT_WISE_DIVIDE_OPERATOR_DESC divide_desc = {};
@@ -405,17 +403,13 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
   auto divide_op = dml::GetOrCreateCompiledOperatorApi(&divide_op_desc);
 
   // Create temporary buffer for division result
-  auto divide_output =
-      device->CreatePreferredDeviceMemoryBuffer(y.size() * sizeof(float));
+  StorageView divide_output(y.shape(), DataType::FLOAT32, Device::DirectML);
 
   // Step 4: Add bias if provided
   dml::Operator* bias_add_op = nullptr;
-  Microsoft::WRL::ComPtr<ID3D12Resource> bias_output;
+  StorageView bias_output;
 
   if (bias) {
-    auto* bias_buffer =
-        static_cast<ID3D12Resource*>(const_cast<void*>(bias->buffer()));
-
     // Bias tensor
     // intermediate_desc_bundle uses y_dml_sizes and has rank y_rank.
     // Bias descriptor must be compatible using broadcast_sizes and nullptr
@@ -463,8 +457,7 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
     bias_add_op_desc.Desc = &bias_add_desc;
 
     bias_add_op = dml::GetOrCreateCompiledOperatorApi(&bias_add_op_desc);
-    bias_output =
-        device->CreatePreferredDeviceMemoryBuffer(y.size() * sizeof(float));
+    bias_output = StorageView(y.shape(), DataType::FLOAT32, Device::DirectML);
   }
 
   // Step 5: Apply activation if specified
@@ -472,6 +465,12 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
 
   if (_activation_type) {
     DML_OPERATOR_DESC activation_op_desc = {};
+    std::variant<
+        DML_ACTIVATION_RELU_OPERATOR_DESC, DML_ACTIVATION_GELU_OPERATOR_DESC,
+        DML_ACTIVATION_SIGMOID_OPERATOR_DESC, DML_ACTIVATION_TANH_OPERATOR_DESC,
+        DML_ACTIVATION_SWISH_OPERATOR_DESC,
+        DML_ACTIVATION_IDENTITY_OPERATOR_DESC>
+        activation_desc;
 
     switch (*_activation_type) {
       case ActivationType::ReLU: {
@@ -482,8 +481,10 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
         relu_desc.OutputTensor =
             &y_desc_bundle.get_tensor_desc();  // Final output
 
+        activation_desc = relu_desc;
         activation_op_desc.Type = DML_OPERATOR_ACTIVATION_RELU;
-        activation_op_desc.Desc = &relu_desc;
+        activation_op_desc.Desc =
+            &std::get<DML_ACTIVATION_RELU_OPERATOR_DESC>(activation_desc);
         break;
       }
       case ActivationType::GELU: {
@@ -491,8 +492,10 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
         gelu_desc.InputTensor = &intermediate_desc_bundle.get_tensor_desc();
         gelu_desc.OutputTensor = &y_desc_bundle.get_tensor_desc();
 
+        activation_desc = gelu_desc;
         activation_op_desc.Type = DML_OPERATOR_ACTIVATION_GELU;
-        activation_op_desc.Desc = &gelu_desc;
+        activation_op_desc.Desc =
+            &std::get<DML_ACTIVATION_GELU_OPERATOR_DESC>(activation_desc);
         break;
       }
       case ActivationType::Sigmoid: {
@@ -500,8 +503,10 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
         sigmoid_desc.InputTensor = &intermediate_desc_bundle.get_tensor_desc();
         sigmoid_desc.OutputTensor = &y_desc_bundle.get_tensor_desc();
 
+        activation_desc = sigmoid_desc;
         activation_op_desc.Type = DML_OPERATOR_ACTIVATION_SIGMOID;
-        activation_op_desc.Desc = &sigmoid_desc;
+        activation_op_desc.Desc =
+            &std::get<DML_ACTIVATION_SIGMOID_OPERATOR_DESC>(activation_desc);
         break;
       }
       case ActivationType::Tanh: {
@@ -509,8 +514,10 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
         tanh_desc.InputTensor = &intermediate_desc_bundle.get_tensor_desc();
         tanh_desc.OutputTensor = &y_desc_bundle.get_tensor_desc();
 
+        activation_desc = tanh_desc;
         activation_op_desc.Type = DML_OPERATOR_ACTIVATION_TANH;
-        activation_op_desc.Desc = &tanh_desc;
+        activation_op_desc.Desc =
+            &std::get<DML_ACTIVATION_TANH_OPERATOR_DESC>(activation_desc);
         break;
       }
       case ActivationType::Swish: {
@@ -519,8 +526,10 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
         swish_desc.OutputTensor = &y_desc_bundle.get_tensor_desc();
         swish_desc.SigmoidInputScale = 1.0f;
 
+        activation_desc = swish_desc;
         activation_op_desc.Type = DML_OPERATOR_ACTIVATION_SWISH;
-        activation_op_desc.Desc = &swish_desc;
+        activation_op_desc.Desc =
+            &std::get<DML_ACTIVATION_SWISH_OPERATOR_DESC>(activation_desc);
         break;
       }
       default:
@@ -529,8 +538,10 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
         identity_desc.InputTensor = &intermediate_desc_bundle.get_tensor_desc();
         identity_desc.OutputTensor = &y_desc_bundle.get_tensor_desc();
 
+        activation_desc = identity_desc;
         activation_op_desc.Type = DML_OPERATOR_ACTIVATION_IDENTITY;
-        activation_op_desc.Desc = &identity_desc;
+        activation_op_desc.Desc =
+            &std::get<DML_ACTIVATION_IDENTITY_OPERATOR_DESC>(activation_desc);
         break;
     }
 
@@ -545,8 +556,9 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
         dml::utils::create_buffer_binding(c_buffer, 0,
                                           c.size() * sizeof(int32_t));
     DML_BUFFER_BINDING cast_output_buffer_binding_storage =
-        dml::utils::create_buffer_binding(cast_output.Get(), 0,
-                                          y.size() * sizeof(float));
+        dml::utils::create_buffer_binding(
+            dml::utils::ResourceFromStorageView(cast_output), 0,
+            y.size() * sizeof(float));
 
     DML_BINDING_DESC input_binding_desc_gemm =
         dml::utils::create_binding_desc(&c_buffer_binding_storage);
@@ -565,8 +577,9 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
         dml::utils::create_buffer_binding(b_scale_buffer, 0,
                                           b_scale.size() * sizeof(float));
     DML_BUFFER_BINDING scale_output_buffer_binding_storage =
-        dml::utils::create_buffer_binding(combined_scale.Get(), 0,
-                                          y.size() * sizeof(float));
+        dml::utils::create_buffer_binding(
+            dml::utils::ResourceFromStorageView(combined_scale), 0,
+            y.size() * sizeof(float));
 
     std::vector<DML_BINDING_DESC> scale_input_bindings_vec_desc = {
         dml::utils::create_binding_desc(&a_scale_buffer_binding_storage),
@@ -582,15 +595,16 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
   {
     DML_BUFFER_BINDING cast_output_buffer_binding_for_div_storage =
         dml::utils::create_buffer_binding(
-            cast_output.Get(), 0,
+            dml::utils::ResourceFromStorageView(cast_output), 0,
             y.size() * sizeof(float));  // Input1 to Divide
     DML_BUFFER_BINDING combined_scale_buffer_binding_storage =
         dml::utils::create_buffer_binding(
-            combined_scale.Get(), 0,
+            dml::utils::ResourceFromStorageView(combined_scale), 0,
             y.size() * sizeof(float));  // Input2 to Divide
     DML_BUFFER_BINDING divide_output_buffer_binding_storage =
-        dml::utils::create_buffer_binding(divide_output.Get(), 0,
-                                          y.size() * sizeof(float));
+        dml::utils::create_buffer_binding(
+            dml::utils::ResourceFromStorageView(divide_output), 0,
+            y.size() * sizeof(float));
 
     std::vector<DML_BINDING_DESC> div_op_input_bindings_vec_desc = {
         dml::utils::create_binding_desc(
@@ -605,20 +619,22 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
   }
 
   // 4. Add bias if provided
-  Microsoft::WRL::ComPtr<ID3D12Resource> current_output = divide_output;
+  Microsoft::WRL::ComPtr<ID3D12Resource> current_output =
+      dml::utils::ResourceFromStorageView(divide_output);
   if (bias) {
-    auto* bias_buffer =
-        static_cast<ID3D12Resource*>(const_cast<void*>(bias->buffer()));
+    auto* bias_buffer = dml::utils::ResourceFromStorageView(*bias);
 
     DML_BUFFER_BINDING prev_output_buffer_binding_storage =
         dml::utils::create_buffer_binding(
-            divide_output.Get(), 0, y.size() * sizeof(float));  // Input1 to Add
+            dml::utils::ResourceFromStorageView(divide_output), 0,
+            y.size() * sizeof(float));  // Input1 to Add
     DML_BUFFER_BINDING bias_value_buffer_binding_storage =
         dml::utils::create_buffer_binding(
             bias_buffer, 0, bias->size() * sizeof(float));  // Input2 to Add
     DML_BUFFER_BINDING bias_add_output_buffer_binding_storage =
-        dml::utils::create_buffer_binding(bias_output.Get(), 0,
-                                          y.size() * sizeof(float));
+        dml::utils::create_buffer_binding(
+            dml::utils::ResourceFromStorageView(bias_output), 0,
+            y.size() * sizeof(float));
 
     std::vector<DML_BINDING_DESC> bias_add_input_bindings_vec_desc = {
         dml::utils::create_binding_desc(&prev_output_buffer_binding_storage),
@@ -629,7 +645,7 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
 
     bias_add_op->Execute(bias_add_input_bindings_vec_desc,
                          bias_add_output_bindings_vec_desc);
-    current_output = bias_output;
+    current_output = dml::utils::ResourceFromStorageView(bias_output);
   }
 
   // 5. Apply activation or copy to final output

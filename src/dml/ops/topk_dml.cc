@@ -79,33 +79,18 @@ void TopK::compute(const StorageView& x,
   dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
       &dml_op_desc, DML_EXECUTION_FLAG_NONE);
 
-  // Bindings using dml::utils::create_buffer_binding and
-  // dml::utils::create_binding_desc
-  DML_BUFFER_BINDING input_buffer_binding_s =
-      dml::utils::create_buffer_binding(  // Fully qualified
-          reinterpret_cast<ID3D12Resource*>(const_cast<void*>(x.buffer())), 0,
-          input_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-  DML_BINDING_DESC input_binding_desc = dml::utils::create_binding_desc(
-      &input_buffer_binding_s);  // Fully qualified
+  // Bindings
+  dml::utils::DmlBindingArrayBundle input_bindings(
+      {dml::utils::DmlBufferBindingBundle(
+          dml::utils::ResourceFromStorageView(x))});
 
-  DML_BUFFER_BINDING values_buffer_binding_s =
-      dml::utils::create_buffer_binding(
-          reinterpret_cast<ID3D12Resource*>(
-              values.buffer()),  // Fully qualified
-          0, values_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-  DML_BINDING_DESC values_binding_desc = dml::utils::create_binding_desc(
-      &values_buffer_binding_s);  // Fully qualified
+  dml::utils::DmlBindingArrayBundle output_bindings(
+      {dml::utils::DmlBufferBindingBundle(
+           dml::utils::ResourceFromStorageView(values)),
+       dml::utils::DmlBufferBindingBundle(
+           dml::utils::ResourceFromStorageView(indices))});
 
-  DML_BUFFER_BINDING indices_buffer_binding_s =
-      dml::utils::create_buffer_binding(
-          reinterpret_cast<ID3D12Resource*>(
-              indices.buffer()),  // Fully qualified
-          0, indices_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-  DML_BINDING_DESC indices_binding_desc = dml::utils::create_binding_desc(
-      &indices_buffer_binding_s);  // Fully qualified
-
-  compiled_op->Execute({input_binding_desc},
-                       {values_binding_desc, indices_binding_desc});
+  compiled_op->Execute(input_bindings.get_descs(), output_bindings.get_descs());
 }
 
 #define DECLARE_IMPL_DML_TOPK(DataType, IndexType)                    \

@@ -229,11 +229,11 @@ void primitives<Device::DirectML>::indexed_fill(T* x,
   ID3D12Resource* x_resource = dml::utils::ResourceFromRawBuffer(x);
   const D3D12_RESOURCE_DESC x_desc = x_resource->GetDesc();
   const dim_t x_total_elements = x_desc.Width / sizeof(T);
-  ComPtr<ID3D12Resource> values_resource =
-      dxdevice->CreatePreferredDeviceMemoryBuffer(num_indices * sizeof(T));
+  StorageView values({1, 1, 1, static_cast<dim_t>(num_indices)},
+                     ctranslate2::type_to_dtype<T>::value, Device::DirectML);
 
   // First, fill the values resource with 'a'
-  fill(dml::utils::ResourceToBuffer<T>(values_resource.Get()), a, num_indices);
+  fill(values.data<T>(), a, num_indices);
 
   // Now use scatter to place these values at the specified indices
   std::vector<UINT> data_if_dims = {1, 1, 1,
@@ -270,17 +270,18 @@ void primitives<Device::DirectML>::indexed_fill(T* x,
       dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
   // Duplicate the input x to avoid overlapping input and output resources.
   StorageView x_view(Device::DirectML, ctranslate2::type_to_dtype<T>::value);
-  ID3D12Resource* input_resource = dml::utils::ResourceFromRawBuffer(x);
-  input_resource->AddRef();
+  IResourceWrapper* input_resource_wrapper =
+      dml::utils::ResourceWrapperFromRawBuffer(x);
+  input_resource_wrapper->AddRef();
   StorageView x_view_src({1, 1, 1, static_cast<dim_t>(x_total_elements)},
-                         reinterpret_cast<T*>(input_resource),
+                         reinterpret_cast<T*>(input_resource_wrapper),
                          Device::DirectML);
   x_view.copy_from(x_view_src);
 
   std::vector<ID3D12Resource*> inputs = {
       dml::utils::ResourceFromStorageView(x_view),  // Current data
       dml::utils::ResourceFromRawBuffer(indices),   // Indices
-      values_resource.Get()                         // Values to scatter
+      dml::utils::ResourceFromStorageView(values)   // Values to scatter
   };
   std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(x)};
   compiled_op->Execute(inputs, outputs);
@@ -289,13 +290,9 @@ void primitives<Device::DirectML>::indexed_fill(T* x,
 template <>
 template <typename T>
 void primitives<Device::DirectML>::copy(const T* x, T* y, dim_t size) {
-  // The 'size' parameter indicates the number of elements of type T.
-  // It's implicitly handled by ensuring that 'x' and 'y' point to
-  // ID3D12Resource buffers that are appropriately sized for the copy operation.
-  // CopyResource copies the entire resource contents.
-  (void)size;  // Size is not directly used by CopyResource but informs buffer
-               // allocation.
-
+  if (size == 0) {
+    return;
+  }
   auto dxdevice = dml::get_device();
   // This call is expected to provide a command list that is ready for
   // recording. It will be closed and executed by
@@ -326,7 +323,8 @@ void primitives<Device::DirectML>::copy(const T* x, T* y, dim_t size) {
   command_list->ResourceBarrier(2, barriers);
 
   // Perform the copy
-  command_list->CopyResource(dst_resource, src_resource);
+  command_list->CopyBufferRegion(dst_resource, 0, src_resource, 0,
+                                 static_cast<UINT64>(size) * sizeof(T));
 
   // Transition source resource back to UNORDERED_ACCESS
   barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
@@ -1553,16 +1551,18 @@ float primitives<Device::DirectML>::logsumexp(const T* x,
   auto byte_offset = static_cast<UINT64>(offset) * element_size;
 
   ID3D12Resource* input_resource = dml::utils::ResourceFromRawBuffer(x);
-  Microsoft::WRL::ComPtr<ID3D12Resource> temp_buffer_storage;
+  StorageView temp_buffer_storage;
 
   if (byte_offset % DML_MINIMUM_BUFFER_TENSOR_ALIGNMENT != 0) {
     auto dxdevice = dml::get_device();
     temp_buffer_storage =
-        dxdevice->CreatePreferredDeviceMemoryBuffer(buffer_size);
+        StorageView({1, 1, 1, static_cast<UINT>(size)},
+                    ctranslate2::type_to_dtype<T>::value, Device::DirectML);
 
     auto command_list = dxdevice->GetCommandList();
     ID3D12Resource* src_resource = input_resource;
-    ID3D12Resource* dst_resource = temp_buffer_storage.Get();
+    ID3D12Resource* dst_resource =
+        dml::utils::ResourceFromStorageView(temp_buffer_storage);
 
     D3D12_RESOURCE_BARRIER barriers[2];
     barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -1587,7 +1587,7 @@ float primitives<Device::DirectML>::logsumexp(const T* x,
     std::swap(barriers[1].Transition.StateBefore,
               barriers[1].Transition.StateAfter);
     command_list->ResourceBarrier(2, barriers);
-    input_resource = temp_buffer_storage.Get();
+    input_resource = dml::utils::ResourceFromStorageView(temp_buffer_storage);
     byte_offset = 0;
   }
 
@@ -2153,9 +2153,11 @@ dim_t primitives<Device::DirectML>::gemm_pack_b(const T* b,
     D3D12_RANGE write_range = {0, sizeof(T)};
     upload_buffer->Unmap(0, &write_range);
 
+    StorageView scalar_storage(
+        {1, 1, 1, 1}, ctranslate2::type_to_dtype<T>::value, Device::DirectML);
     // Create GPU buffer for scalar
     ComPtr<ID3D12Resource> scalar_resource =
-        dxdevice->CreatePreferredDeviceMemoryBuffer(sizeof(T));
+        dml::utils::ResourceFromStorageView(scalar_storage);
 
     // Copy from upload buffer to GPU buffer
     auto command_list = dxdevice->GetCommandList();

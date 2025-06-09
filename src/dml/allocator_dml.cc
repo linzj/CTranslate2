@@ -3,6 +3,7 @@
 #include "allocator_dml.h"
 #include "backend_dml.h"
 #include "ctranslate2/devices.h"
+#include "resource_wrapper.h"
 
 #include <spdlog/spdlog.h>
 

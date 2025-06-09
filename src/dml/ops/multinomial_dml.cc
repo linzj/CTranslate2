@@ -36,7 +36,6 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
           device->GetCommandListType() == D3D12_COMMAND_LIST_TYPE_COPY
               ? Device::CPU
               : Device::DirectML);
-  Microsoft::WRL::ComPtr<ID3D12Resource> probs_f32_intermediate_res;
   ID3D12Resource* current_probs_resource_ptr;
   const dml::utils::DmlTensorDescBundle*
       probs_desc_for_ops_ptr;  // Will point to original or casted
@@ -46,9 +45,6 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
 
   if (probs_input.dtype() != DataType::FLOAT32) {
     probs_f32_sv.resize(probs_input.shape());
-    probs_f32_intermediate_res = device->CreatePreferredDeviceMemoryBuffer(
-        probs_f32_sv.reserved_memory());  // Size based on FLOAT32
-    device->KeepAliveUntilNextCommandListDispatch(probs_f32_intermediate_res);
 
     input_desc_orig_bundle_uptr =
         std::make_unique<dml::utils::DmlTensorDescBundle>(probs_input);
@@ -64,26 +60,24 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
     dml::Operator* cast_op =
         dml::GetOrCreateCompiledOperatorApi(&op_desc_wrapper);
 
-    DML_BUFFER_BINDING cast_input_b = dml::utils::create_buffer_binding(
-        reinterpret_cast<ID3D12Resource*>(
-            const_cast<void*>(probs_input.buffer())),
-        0,
+    dml::utils::DmlBufferBindingBundle cast_input_b(
+        dml::utils::ResourceFromStorageView(probs_input), 0,
         input_desc_orig_bundle_uptr->get_buffer_desc().TotalTensorSizeInBytes);
-    DML_BUFFER_BINDING cast_output_b = dml::utils::create_buffer_binding(
-        probs_f32_intermediate_res.Get(), 0,
+    dml::utils::DmlBufferBindingBundle cast_output_b(
+        dml::utils::ResourceFromStorageView(probs_f32_sv), 0,
         output_desc_f32_bundle_uptr->get_buffer_desc().TotalTensorSizeInBytes);
 
-    cast_op->Execute({dml::utils::create_binding_desc(&cast_input_b)},
-                     {dml::utils::create_binding_desc(&cast_output_b)});
-    current_probs_resource_ptr = probs_f32_intermediate_res.Get();
+    cast_op->Execute({cast_input_b.get_desc()}, {cast_output_b.get_desc()});
+    current_probs_resource_ptr =
+        dml::utils::ResourceFromStorageView(probs_f32_sv);
     probs_desc_for_ops_ptr = output_desc_f32_bundle_uptr.get();
   } else {
     // No cast needed, use original probs_input directly
     input_desc_orig_bundle_uptr =
         std::make_unique<dml::utils::DmlTensorDescBundle>(
             probs_input);  // Still need a bundle for original
-    current_probs_resource_ptr = reinterpret_cast<ID3D12Resource*>(
-        const_cast<void*>(probs_input.buffer()));
+    current_probs_resource_ptr =
+        dml::utils::ResourceFromStorageView(probs_input);
     probs_desc_for_ops_ptr = input_desc_orig_bundle_uptr.get();
   }
 
@@ -123,21 +117,17 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
 
   dml::utils::DmlTensorDescBundle random_desc_bundle(
       DataType::FLOAT32, random_dml_dims, random_strides_ptr);
-  Microsoft::WRL::ComPtr<ID3D12Resource> random_numbers_res =
-      device->CreatePreferredDeviceMemoryBuffer(
-          random_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-  device->KeepAliveUntilNextCommandListDispatch(random_numbers_res);
+  StorageView random_numbers_sv(random_shape_ct2, DataType::FLOAT32,
+                                Device::DirectML);
 
   Shape philox_state_dims_shape_ct2 = {4};
   std::vector<UINT> philox_state_dml_dims =
       dml::utils::to_dml_dims(philox_state_dims_shape_ct2, 4, true);
   dml::utils::DmlTensorDescBundle philox_state_tensor_desc_bundle(
       DML_TENSOR_DATA_TYPE_UINT32, philox_state_dml_dims, nullptr);
-  Microsoft::WRL::ComPtr<ID3D12Resource> state_in_res =
-      device->CreatePreferredDeviceMemoryBuffer(
-          philox_state_tensor_desc_bundle.get_buffer_desc()
-              .TotalTensorSizeInBytes);
-  device->KeepAliveUntilNextCommandListDispatch(state_in_res);
+  StorageView state_in_sv(philox_state_dims_shape_ct2,
+                          DataType::INT32,  // Corresponds to UINT32 for size
+                          Device::DirectML);
   {  // Zero Init Philox State
     DML_SCALAR_UNION zero_scalar;
     zero_scalar.UInt32 = 0;
@@ -156,26 +146,21 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
                                               &fill_zero_desc};
     dml::Operator* fill_op =
         dml::GetOrCreateCompiledOperatorApi(&op_desc_wrapper_fill);
-    DML_BUFFER_BINDING fill_out_b_storage =
-        dml::utils::create_buffer_binding(state_in_res.Get());
+    DML_BUFFER_BINDING fill_out_b_storage = dml::utils::create_buffer_binding(
+        dml::utils::ResourceFromStorageView(state_in_sv));
     fill_op->Execute({},
                      {dml::utils::create_binding_desc(&fill_out_b_storage)});
   }
-  Microsoft::WRL::ComPtr<ID3D12Resource> state_out_res =
-      device->CreatePreferredDeviceMemoryBuffer(
-          philox_state_tensor_desc_bundle.get_buffer_desc()
-              .TotalTensorSizeInBytes);
-  device->KeepAliveUntilNextCommandListDispatch(state_out_res);
+  StorageView state_out_sv(philox_state_dims_shape_ct2,
+                           DataType::INT32,  // Corresponds to UINT32 for size
+                           Device::DirectML);
 
   Shape cumsum_shape_ct2 = {batch_size, depth};
   std::vector<UINT> cumsum_dml_dims =
       dml::utils::to_dml_dims(cumsum_shape_ct2, batch_size * depth, true);
   dml::utils::DmlTensorDescBundle cumsum_desc_bundle(DataType::FLOAT32,
                                                      cumsum_dml_dims, nullptr);
-  Microsoft::WRL::ComPtr<ID3D12Resource> cumsum_res =
-      device->CreatePreferredDeviceMemoryBuffer(
-          cumsum_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-  device->KeepAliveUntilNextCommandListDispatch(cumsum_res);
+  StorageView cumsum_sv(cumsum_shape_ct2, DataType::FLOAT32, Device::DirectML);
 
   // DML logical ops output UINT8.
   Shape compare_shape_ct2 = {batch_size, depth};
@@ -183,10 +168,9 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
       dml::utils::to_dml_dims(compare_shape_ct2, batch_size * depth, true);
   dml::utils::DmlTensorDescBundle compare_tensor_desc_bundle(
       DML_TENSOR_DATA_TYPE_UINT8, compare_dml_dims, nullptr);
-  Microsoft::WRL::ComPtr<ID3D12Resource> compare_res =
-      device->CreatePreferredDeviceMemoryBuffer(
-          compare_tensor_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-  device->KeepAliveUntilNextCommandListDispatch(compare_res);
+  StorageView compare_sv(compare_shape_ct2,
+                         DataType::INT8,  // Corresponds to UINT8 for size
+                         Device::DirectML);
 
   Shape iota_shape_ct2 = {1, depth};
   std::vector<UINT> iota_dml_dims =
@@ -194,10 +178,7 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
   std::vector<UINT> iota_strides_vec = {0, 1};  // Broadcast batch dim
   dml::utils::DmlTensorDescBundle iota_desc_bundle(
       DataType::FLOAT32, iota_dml_dims, &iota_strides_vec);
-  Microsoft::WRL::ComPtr<ID3D12Resource> iota_res =
-      device->CreatePreferredDeviceMemoryBuffer(
-          iota_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-  device->KeepAliveUntilNextCommandListDispatch(iota_res);
+  StorageView iota_sv(iota_shape_ct2, DataType::FLOAT32, Device::DirectML);
 
   Shape scalar_shape_ct2 = {1};
   std::vector<UINT> scalar_dml_dims =
@@ -205,23 +186,17 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
   std::vector<UINT> scalar_strides_vec = {0};  // Broadcast
   dml::utils::DmlTensorDescBundle max_val_desc_bundle(
       DataType::FLOAT32, scalar_dml_dims, &scalar_strides_vec);
-  Microsoft::WRL::ComPtr<ID3D12Resource> max_val_res =
-      device->CreatePreferredDeviceMemoryBuffer(
-          max_val_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-  device->KeepAliveUntilNextCommandListDispatch(max_val_res);
+  StorageView max_val_sv({1}, DataType::FLOAT32, Device::DirectML);
 
   Shape argmin_input_shape_ct2 = {batch_size, depth};
   std::vector<UINT> argmin_input_dml_dims =
       dml::utils::to_dml_dims(argmin_input_shape_ct2, batch_size * depth, true);
   dml::utils::DmlTensorDescBundle argmin_input_desc_bundle(
       DataType::FLOAT32, argmin_input_dml_dims, nullptr);
-  Microsoft::WRL::ComPtr<ID3D12Resource> argmin_input_res =
-      device->CreatePreferredDeviceMemoryBuffer(
-          argmin_input_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-  device->KeepAliveUntilNextCommandListDispatch(argmin_input_res);
+  StorageView argmin_input_sv(argmin_input_shape_ct2, DataType::FLOAT32,
+                              Device::DirectML);
 
   // --- Define and Execute DML Operators ---
-  DML_BUFFER_BINDING temp_binding_storage[3];
 
   // Op 1: Random Generator
   {
@@ -233,19 +208,16 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
     DML_OPERATOR_DESC op_desc_wrapper = {DML_OPERATOR_RANDOM_GENERATOR, &desc};
     dml::Operator* op = dml::GetOrCreateCompiledOperatorApi(&op_desc_wrapper);
 
-    temp_binding_storage[0] =
-        dml::utils::create_buffer_binding(state_in_res.Get());
-    temp_binding_storage[1] =
-        dml::utils::create_buffer_binding(random_numbers_res.Get());
-    temp_binding_storage[2] =
-        dml::utils::create_buffer_binding(state_out_res.Get());
-
-    std::vector<DML_BINDING_DESC> inputs = {
-        dml::utils::create_binding_desc(&temp_binding_storage[0])};
-    std::vector<DML_BINDING_DESC> outputs = {
-        dml::utils::create_binding_desc(&temp_binding_storage[1]),
-        dml::utils::create_binding_desc(&temp_binding_storage[2])};
-    op->Execute(inputs, outputs);
+    dml::utils::DmlBindingArrayBundle inputs(
+        {dml::utils::DmlBufferBindingBundle(
+            dml::utils::ResourceFromStorageView(state_in_sv))});
+    dml::utils::DmlBindingArrayBundle outputs({
+        dml::utils::DmlBufferBindingBundle(
+            dml::utils::ResourceFromStorageView(random_numbers_sv)),
+        dml::utils::DmlBufferBindingBundle(
+            dml::utils::ResourceFromStorageView(state_out_sv)),
+    });
+    op->Execute(inputs.get_descs(), outputs.get_descs());
   }
 
   // Op 2: Cumulative Sum
@@ -260,12 +232,11 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
                                          &desc};
     dml::Operator* op = dml::GetOrCreateCompiledOperatorApi(&op_desc_wrapper);
 
-    temp_binding_storage[0] =
-        dml::utils::create_buffer_binding(current_probs_resource_ptr);
-    temp_binding_storage[1] =
-        dml::utils::create_buffer_binding(cumsum_res.Get());
-    op->Execute({dml::utils::create_binding_desc(&temp_binding_storage[0])},
-                {dml::utils::create_binding_desc(&temp_binding_storage[1])});
+    dml::utils::DmlBufferBindingBundle input_binding(
+        current_probs_resource_ptr);
+    dml::utils::DmlBufferBindingBundle output_binding(
+        dml::utils::ResourceFromStorageView(cumsum_sv));
+    op->Execute({input_binding.get_desc()}, {output_binding.get_desc()});
   }
 
   // Op 3: Compare (CumulativeProbs >= RandomSample), output should be UINT8
@@ -281,18 +252,16 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
         DML_OPERATOR_ELEMENT_WISE_LOGICAL_GREATER_THAN_OR_EQUAL, &desc};
     dml::Operator* op = dml::GetOrCreateCompiledOperatorApi(&op_desc_wrapper);
 
-    temp_binding_storage[0] =
-        dml::utils::create_buffer_binding(cumsum_res.Get());
-    temp_binding_storage[1] =
-        dml::utils::create_buffer_binding(random_numbers_res.Get());
-    temp_binding_storage[2] =
-        dml::utils::create_buffer_binding(compare_res.Get());
-    std::vector<DML_BINDING_DESC> inputs = {
-        dml::utils::create_binding_desc(&temp_binding_storage[0]),
-        dml::utils::create_binding_desc(&temp_binding_storage[1])};
-    std::vector<DML_BINDING_DESC> outputs = {
-        dml::utils::create_binding_desc(&temp_binding_storage[2])};
-    op->Execute(inputs, outputs);
+    dml::utils::DmlBindingArrayBundle inputs({
+        dml::utils::DmlBufferBindingBundle(
+            dml::utils::ResourceFromStorageView(cumsum_sv)),
+        dml::utils::DmlBufferBindingBundle(
+            dml::utils::ResourceFromStorageView(random_numbers_sv)),
+    });
+    dml::utils::DmlBindingArrayBundle outputs(
+        {dml::utils::DmlBufferBindingBundle(
+            dml::utils::ResourceFromStorageView(compare_sv))});
+    op->Execute(inputs.get_descs(), outputs.get_descs());
   }
 
   // Op 4a: Fill Iota Tensor
@@ -311,9 +280,9 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
                                              &desc};
     dml::Operator* op_seq =
         dml::GetOrCreateCompiledOperatorApi(&op_desc_wrapper_seq);
-    temp_binding_storage[0] = dml::utils::create_buffer_binding(iota_res.Get());
-    op_seq->Execute(
-        {}, {dml::utils::create_binding_desc(&temp_binding_storage[0])});
+    dml::utils::DmlBufferBindingBundle iota_binding(
+        dml::utils::ResourceFromStorageView(iota_sv));
+    op_seq->Execute({}, {iota_binding.get_desc()});
   }
 
   // Op 4b: Fill Max Value Scalar Tensor
@@ -335,10 +304,9 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
         DML_OPERATOR_FILL_VALUE_CONSTANT, &desc_fill_max};
     dml::Operator* op_fill_max =
         dml::GetOrCreateCompiledOperatorApi(&op_desc_wrapper_fill_max);
-    temp_binding_storage[0] =
-        dml::utils::create_buffer_binding(max_val_res.Get());
-    op_fill_max->Execute(
-        {}, {dml::utils::create_binding_desc(&temp_binding_storage[0])});
+    dml::utils::DmlBufferBindingBundle max_val_binding(
+        dml::utils::ResourceFromStorageView(max_val_sv));
+    op_fill_max->Execute({}, {max_val_binding.get_desc()});
   }
 
   // Op 5: Conditional Select
@@ -352,22 +320,18 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
     DML_OPERATOR_DESC op_desc_wrapper = {DML_OPERATOR_ELEMENT_WISE_IF, &desc};
     dml::Operator* op = dml::GetOrCreateCompiledOperatorApi(&op_desc_wrapper);
 
-    temp_binding_storage[0] = dml::utils::create_buffer_binding(
-        compare_res.Get());  // Holds UINT8 now
-    DML_BUFFER_BINDING if_a_b =
-        dml::utils::create_buffer_binding(iota_res.Get());
-    DML_BUFFER_BINDING if_b_b =
-        dml::utils::create_buffer_binding(max_val_res.Get());
-    DML_BUFFER_BINDING if_out_b =
-        dml::utils::create_buffer_binding(argmin_input_res.Get());
-
-    std::vector<DML_BINDING_DESC> if_inputs = {
-        dml::utils::create_binding_desc(&temp_binding_storage[0]),
-        dml::utils::create_binding_desc(&if_a_b),
-        dml::utils::create_binding_desc(&if_b_b)};
-    std::vector<DML_BINDING_DESC> if_outputs = {
-        dml::utils::create_binding_desc(&if_out_b)};
-    op->Execute(if_inputs, if_outputs);
+    dml::utils::DmlBindingArrayBundle if_inputs({
+        dml::utils::DmlBufferBindingBundle(
+            dml::utils::ResourceFromStorageView(compare_sv)),
+        dml::utils::DmlBufferBindingBundle(
+            dml::utils::ResourceFromStorageView(iota_sv)),
+        dml::utils::DmlBufferBindingBundle(
+            dml::utils::ResourceFromStorageView(max_val_sv)),
+    });
+    dml::utils::DmlBindingArrayBundle if_outputs(
+        {dml::utils::DmlBufferBindingBundle(
+            dml::utils::ResourceFromStorageView(argmin_input_sv))});
+    op->Execute(if_inputs.get_descs(), if_outputs.get_descs());
   }
 
   // Op 6: ArgMin
@@ -376,11 +340,10 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
       dml::utils::to_dml_dims(dml_argmin_out_shape_ct2, batch_size, true);
   dml::utils::DmlTensorDescBundle dml_argmin_out_tensor_desc_bundle(
       DML_TENSOR_DATA_TYPE_UINT32, dml_argmin_out_dml_dims, nullptr);
-  Microsoft::WRL::ComPtr<ID3D12Resource> dml_argmin_out_res =
-      device->CreatePreferredDeviceMemoryBuffer(
-          dml_argmin_out_tensor_desc_bundle.get_buffer_desc()
-              .TotalTensorSizeInBytes);
-  device->KeepAliveUntilNextCommandListDispatch(dml_argmin_out_res);
+  StorageView dml_argmin_out_sv(
+      dml_argmin_out_shape_ct2,
+      DataType::INT32,  // Corresponds to UINT32 for size
+      Device::DirectML);
   {
     DML_REDUCE_OPERATOR_DESC desc = {};
     desc.InputTensor = &argmin_input_desc_bundle.get_tensor_desc();
@@ -393,12 +356,12 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
     DML_OPERATOR_DESC op_desc_wrapper = {DML_OPERATOR_REDUCE, &desc};
     dml::Operator* op = dml::GetOrCreateCompiledOperatorApi(&op_desc_wrapper);
 
-    temp_binding_storage[0] =
-        dml::utils::create_buffer_binding(argmin_input_res.Get());
-    temp_binding_storage[1] =
-        dml::utils::create_buffer_binding(dml_argmin_out_res.Get());
-    op->Execute({dml::utils::create_binding_desc(&temp_binding_storage[0])},
-                {dml::utils::create_binding_desc(&temp_binding_storage[1])});
+    dml::utils::DmlBufferBindingBundle argmin_input_binding(
+        dml::utils::ResourceFromStorageView(argmin_input_sv));
+    dml::utils::DmlBufferBindingBundle argmin_output_binding(
+        dml::utils::ResourceFromStorageView(dml_argmin_out_sv));
+    op->Execute({argmin_input_binding.get_desc()},
+                {argmin_output_binding.get_desc()});
   }
 
   // Op 7: Cast/Copy to final output_indices buffer
@@ -419,14 +382,12 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
   dml::Operator* cast_final_op =
       dml::GetOrCreateCompiledOperatorApi(&op_desc_wrapper_cast_final);
 
-  temp_binding_storage[0] =
-      dml::utils::create_buffer_binding(dml_argmin_out_res.Get());
-  temp_binding_storage[1] =
-      dml::utils::create_buffer_binding(reinterpret_cast<ID3D12Resource*>(
-          const_cast<void*>(output_indices.buffer())));
-  cast_final_op->Execute(
-      {dml::utils::create_binding_desc(&temp_binding_storage[0])},
-      {dml::utils::create_binding_desc(&temp_binding_storage[1])});
+  dml::utils::DmlBufferBindingBundle cast_final_input_binding(
+      dml::utils::ResourceFromStorageView(dml_argmin_out_sv));
+  dml::utils::DmlBufferBindingBundle cast_final_output_binding(
+      dml::utils::ResourceFromStorageView(output_indices));
+  cast_final_op->Execute({cast_final_input_binding.get_desc()},
+                         {cast_final_output_binding.get_desc()});
 
   output_indices.reshape(original_output_shape);
 }

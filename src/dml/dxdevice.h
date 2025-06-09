@@ -10,6 +10,7 @@
 #define IGraphicsUnknown IUnknown
 #define IID_GRAPHICS_PPV_ARGS IID_PPV_ARGS
 typedef interface IDXGIAdapter1 IDXGIAdapter1;
+typedef interface IResourceWrapper IResourceWrapper;
 #define DXCOMPILER_NONE
 
 using IAdapter = IDXGIAdapter1;
@@ -28,6 +29,7 @@ namespace dml {
 
 class CommandQueue;
 class DescriptorPool;
+class BucketizedBufferAllocator;
 
 template <typename T>
 struct ComPtrHasher {
@@ -97,7 +99,14 @@ class Device {
 
   // Creates either a default buffer or custom buffer based on support for
   // custom heaps and whether or not they are allowed.
-  Microsoft::WRL::ComPtr<ID3D12Resource> CreatePreferredDeviceMemoryBuffer(
+  Microsoft::WRL::ComPtr<IResourceWrapper> CreatePreferredDeviceMemoryBuffer(
+      uint64_t sizeInBytes,
+      D3D12_RESOURCE_FLAGS resourceFlags =
+          D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+      uint64_t alignment = 0,
+      D3D12_HEAP_FLAGS heapFlags = D3D12_HEAP_FLAG_NONE);
+  Microsoft::WRL::ComPtr<ID3D12Resource>
+  CreatePreferredDeviceMemoryBufferWithoutPooling(
       uint64_t sizeInBytes,
       D3D12_RESOURCE_FLAGS resourceFlags =
           D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
@@ -236,6 +245,7 @@ class Device {
   std::optional<D3D12_FEATURE_DATA_ARCHITECTURE1> m_architectureSupport;
   std::unique_ptr<CommandQueue> m_queue;
   std::unique_ptr<DescriptorPool> m_descriptorPool;
+  std::unique_ptr<BucketizedBufferAllocator> m_allocator;
 
   DWORD m_callbackCookie = 0;
   bool m_restoreBackgroundProcessing = false;

@@ -3,6 +3,7 @@
 #include "backend_dml.h"
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
+#include "dml/resource_wrapper.h"
 
 namespace ctranslate2 {
 namespace dml {
@@ -423,15 +424,13 @@ void DmlTensorDescBundle::calculate_strides_and_total_size(
   }
 }
 
-Microsoft::WRL::ComPtr<ID3D12Resource> CreateDmlConstantTensor(
+Microsoft::WRL::ComPtr<IResourceWrapper> CreateDmlConstantTensor(
     dml::Device* resolved_ct2_dml_device,
     DML_SCALAR_UNION resolved_scalar_value,
     const DmlTensorDescBundle& bundle_for_constant) {
-  Microsoft::WRL::ComPtr<ID3D12Resource> constant_resource =
+  Microsoft::WRL::ComPtr<IResourceWrapper> constant_resource =
       resolved_ct2_dml_device->CreatePreferredDeviceMemoryBuffer(
           bundle_for_constant.get_buffer_desc().TotalTensorSizeInBytes);
-  resolved_ct2_dml_device->KeepAliveUntilNextCommandListDispatch(
-      constant_resource);
 
   DML_FILL_VALUE_CONSTANT_OPERATOR_DESC fill_desc{};
   fill_desc.OutputTensor = &bundle_for_constant.get_tensor_desc();
@@ -443,7 +442,7 @@ Microsoft::WRL::ComPtr<ID3D12Resource> CreateDmlConstantTensor(
   dml::Operator* fill_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
   DML_BUFFER_BINDING temp_output_binding = create_buffer_binding(
-      constant_resource.Get(), 0,
+      constant_resource->GetD3D12Resource(), 0,
       bundle_for_constant.get_buffer_desc().TotalTensorSizeInBytes);
   DML_BINDING_DESC output_binding_desc =
       create_binding_desc(&temp_output_binding);

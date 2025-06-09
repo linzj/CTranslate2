@@ -188,17 +188,15 @@ void Slide::compute(const StorageView& input,
   // Get or create compiled operator
   auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
-  // Create input binding
-  dml::utils::DmlBufferBindingBundle input_binding(
-      dml::utils::ResourceFromStorageView(input), 0,
-      input.size() * input.item_size());
+  // Create input and output bindings
+  dml::utils::DmlBindingArrayBundle input_bindings(
+      {dml::utils::DmlBufferBindingBundle(
+          dml::utils::ResourceFromStorageView(input))});
+  dml::utils::DmlBindingArrayBundle output_bindings(
+      {dml::utils::DmlBufferBindingBundle(
+          dml::utils::ResourceFromStorageView(output))});
 
-  // Create output binding
-  dml::utils::DmlBufferBindingBundle output_binding(
-      dml::utils::ResourceFromStorageView(output), 0,
-      output.size() * output.item_size());
-
-  compiled_op->Execute({input_binding.get_desc()}, {output_binding.get_desc()});
+  compiled_op->Execute(input_bindings.get_descs(), output_bindings.get_descs());
 }
 
 // Explicit template instantiations for DirectML

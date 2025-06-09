@@ -234,6 +234,9 @@ if(WITH_DIRECTML)
     src/dml/allocator_dml.h
     src/dml/backend_dml.cc
     src/dml/backend_dml.h
+    src/dml/bucketized_buffer_allocator.cc
+    src/dml/bucketized_buffer_allocator.h
+    src/dml/backend_dml.h
     src/dml/common.h
     src/dml/dxdevice.cc
     src/dml/dxdevice.h

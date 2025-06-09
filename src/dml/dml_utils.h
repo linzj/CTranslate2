@@ -2,6 +2,7 @@
 
 #include "ctranslate2/storage_view.h"
 #include "dml/dxdevice.h"
+#include "resource_wrapper.h"
 
 // Forward declaration for a helper function that might be used internally or
 // defined later
@@ -234,14 +235,16 @@ class DmlBufferBindingBundle {
     return *this;
   }
 
-  // Delete copy constructor and copy assignment operator as DML_BINDING_DESC
-  // would point to the original DML_BUFFER_BINDING if copied, which could
-  // lead to dangling pointers if the original is destroyed.
-  // If copying is truly needed, a deep copy mechanism or shared ownership
-  // would be required, but for typical DML binding patterns, moving or
-  // creating new bundles is safer.
-  DmlBufferBindingBundle(const DmlBufferBindingBundle&) = delete;
-  DmlBufferBindingBundle& operator=(const DmlBufferBindingBundle&) = delete;
+  DmlBufferBindingBundle(const DmlBufferBindingBundle& other) noexcept
+      : buffer_binding_(other.buffer_binding_), type_(other.type_) {}
+
+  DmlBufferBindingBundle& operator=(const DmlBufferBindingBundle& other) {
+    if (this != &other) {
+      buffer_binding_ = other.buffer_binding_;
+      type_ = other.type_;
+    }
+    return *this;
+  }
 
  private:
   DML_BUFFER_BINDING buffer_binding_;
@@ -338,24 +341,32 @@ class ScopedReshape {
 // DML_OPERATOR_FILL_VALUE_CONSTANT. Manages the lifetime of the
 // DML_BUFFER_TENSOR_DESC and DML_TENSOR_DESC. Returns the GPU resource and
 // fills out_bundle with the descriptor bundle.
-Microsoft::WRL::ComPtr<ID3D12Resource> CreateDmlConstantTensor(
+Microsoft::WRL::ComPtr<IResourceWrapper> CreateDmlConstantTensor(
     dml::Device* ct2_dml_device,    // ctranslate2 dml::Device wrapper
     DML_SCALAR_UNION scalar_value,  // Scalar value to fill
     const DmlTensorDescBundle& out_bundle);
 
 inline ID3D12Resource* ResourceFromStorageView(
     const StorageView& storage_view) {
-  return static_cast<ID3D12Resource*>(const_cast<void*>(storage_view.buffer()));
+  return static_cast<IResourceWrapper*>(
+             const_cast<void*>(storage_view.buffer()))
+      ->GetD3D12Resource();
 }
 
 template <typename T>
 inline ID3D12Resource* ResourceFromRawBuffer(const T* buffer) {
-  return reinterpret_cast<ID3D12Resource*>(const_cast<T*>(buffer));
+  return reinterpret_cast<IResourceWrapper*>(const_cast<T*>(buffer))
+      ->GetD3D12Resource();
 }
 
 template <typename T>
 inline T* ResourceToBuffer(ID3D12Resource* resource) {
   return reinterpret_cast<T*>(resource);
+}
+
+template <typename T>
+inline IResourceWrapper* ResourceWrapperFromRawBuffer(const T* buffer) {
+  return reinterpret_cast<IResourceWrapper*>(const_cast<T*>(buffer));
 }
 }  // namespace utils
 }  // namespace dml

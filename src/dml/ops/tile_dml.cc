@@ -59,26 +59,16 @@ void Tile::compute(const StorageView& input,
 
   auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
-  DML_BUFFER_BINDING input_buffer_binding_storage =
-      dml::utils::create_buffer_binding(
-          reinterpret_cast<ID3D12Resource*>(const_cast<void*>(input.buffer())),
-          0, input_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-  DML_BINDING_DESC input_binding_desc_for_op =
-      dml::utils::create_binding_desc(&input_buffer_binding_storage);
+  // Bindings
+  dml::utils::DmlBindingArrayBundle input_bindings(
+      {dml::utils::DmlBufferBindingBundle(
+          dml::utils::ResourceFromStorageView(input))});
 
-  DML_BUFFER_BINDING output_buffer_binding_storage =
-      dml::utils::create_buffer_binding(
-          reinterpret_cast<ID3D12Resource*>(output.buffer()), 0,
-          output_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-  DML_BINDING_DESC output_binding_desc_for_op =
-      dml::utils::create_binding_desc(&output_buffer_binding_storage);
+  dml::utils::DmlBindingArrayBundle output_bindings(
+      {dml::utils::DmlBufferBindingBundle(
+          dml::utils::ResourceFromStorageView(output))});
 
-  std::vector<DML_BINDING_DESC> bindings_for_op_inputs = {
-      input_binding_desc_for_op};
-  std::vector<DML_BINDING_DESC> bindings_for_op_outputs = {
-      output_binding_desc_for_op};
-
-  compiled_op->Execute(bindings_for_op_inputs, bindings_for_op_outputs);
+  compiled_op->Execute(input_bindings.get_descs(), output_bindings.get_descs());
 }
 
 #define DECLARE_IMPL(T)                                 \

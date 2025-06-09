@@ -14,7 +14,8 @@ Operator::Operator(Device* device,
       m_compiledOperator->GetBindingProperties().PersistentResourceSize;
   if (persistentResourceSize > 0) {
     m_persistentResource =
-        device->CreatePreferredDeviceMemoryBuffer(persistentResourceSize);
+        device->CreatePreferredDeviceMemoryBufferWithoutPooling(
+            persistentResourceSize);
 
     m_persistentResourceBinding = DML_BUFFER_BINDING{m_persistentResource.Get(),
                                                      0, persistentResourceSize};
