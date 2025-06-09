@@ -26,7 +26,7 @@ TEST_P(PrimitiveTest, LogSumExp) {
   const Device device = GetParam();
   StorageView x({8}, std::vector<float>{0.6, 0.2, -1.2, 0.1, 0.3, 0.5, -1.3, 0.2}, device);
   float result = 0;
-  DEVICE_DISPATCH(device, result = primitives<D>::logsumexp(x.data<float>(), x.size()));
+  DEVICE_DISPATCH(device, result = primitives<D>::logsumexp(x.data<float>(), x.size(), 0));
   EXPECT_NEAR(result, 2.1908040046691895, 1e-6);
 }
 

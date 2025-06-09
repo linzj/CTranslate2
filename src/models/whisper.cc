@@ -834,12 +834,13 @@ namespace ctranslate2 {
         const dim_t num_timestamp_tokens = _timestamp_end_id - _timestamp_begin_id + 1;
 
         const T* text_log_probs = log_probs.index<T>({batch_id, 0});
-        const T* timestamp_log_probs = text_log_probs + num_text_tokens;
+        const T* timestamp_log_probs = text_log_probs;
 
         // If sum of probability over timestamps is above any other token, sample timestamp.
         const float max_text_token_log_prob = primitives<D>::max(text_log_probs, num_text_tokens);
         const float timestamp_log_prob = primitives<D>::logsumexp(timestamp_log_probs,
-                                                                  num_timestamp_tokens);
+                                                                  num_timestamp_tokens,
+                                                                  num_text_tokens);
 
         return timestamp_log_prob > max_text_token_log_prob;
       }

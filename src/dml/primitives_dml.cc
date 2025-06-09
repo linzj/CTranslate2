@@ -1514,7 +1514,9 @@ T primitives<Device::DirectML>::amax(const T* array, dim_t size) {
 
 template <>
 template <typename T>
-float primitives<Device::DirectML>::logsumexp(const T* x, dim_t size) {
+float primitives<Device::DirectML>::logsumexp(const T* x,
+                                              dim_t size,
+                                              dim_t offset) {
   if (size == 0) {
     return std::numeric_limits<float>::lowest();
   }
@@ -1545,10 +1547,16 @@ float primitives<Device::DirectML>::logsumexp(const T* x, dim_t size) {
   dml::Operator* compiled_op =
       dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
 
-  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
-  std::vector<ID3D12Resource*> outputs = {
-      dml::utils::ResourceFromStorageView(output_storage)};
-  compiled_op->Execute(inputs, outputs);
+  const auto element_size =
+      dml::utils::get_dml_element_size_in_bytes(input_bundle.get_data_type());
+
+  dml::utils::DmlBufferBindingBundle x_binding(
+      dml::utils::ResourceFromRawBuffer(x),
+      static_cast<UINT64>(offset * element_size), 0);
+  dml::utils::DmlBufferBindingBundle output_binding(
+      dml::utils::ResourceFromStorageView(output_storage));
+
+  compiled_op->Execute({x_binding.get_desc()}, {output_binding.get_desc()});
 
   return output_storage.to(Device::CPU).at<float>({0, 0, 0, 0});
 }
@@ -2415,7 +2423,8 @@ DECLARE_ALL_TYPES(DECLARE_IMPL)
                                                            dim_t);            \
   template void primitives<Device::DirectML>::sigmoid(const T*, T*, dim_t);   \
   template void primitives<Device::DirectML>::swish(const T*, T*, dim_t);     \
-  template float primitives<Device::DirectML>::logsumexp(const T*, dim_t);    \
+  template float primitives<Device::DirectML>::logsumexp(const T*, dim_t,     \
+                                                         dim_t);              \
   template void primitives<Device::DirectML>::sin(const T*, T*, dim_t);       \
   template void primitives<Device::DirectML>::cos(const T*, T*, dim_t);       \
   template void primitives<Device::DirectML>::tanh(const T*, T*, dim_t);      \

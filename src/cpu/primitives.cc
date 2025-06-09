@@ -334,8 +334,9 @@ namespace ctranslate2 {
 
   template<>
   template<>
-  float primitives<Device::CPU>::logsumexp(const float* x, dim_t size) {
+  float primitives<Device::CPU>::logsumexp(const float* x, dim_t size, dim_t offset) {
     float result = 0;
+    x += offset;
     CPU_ISA_DISPATCH((result = cpu::reduce_logsumexp<ISA>(x, size)));
     return result;
   }

@@ -664,8 +664,9 @@ namespace ctranslate2 {
 
   template<>
   template <typename T>
-  float primitives<Device::CUDA>::logsumexp(const T* x, dim_t size) {
+  float primitives<Device::CUDA>::logsumexp(const T* x, dim_t size, dim_t offset) {
     const float max_value = max(x, size);
+    x += offset;
 
     auto exp_it = thrust::make_transform_iterator(
       thrust::device_pointer_cast(cuda::device_cast(x)),
