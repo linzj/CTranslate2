@@ -1549,10 +1549,50 @@ float primitives<Device::DirectML>::logsumexp(const T* x,
 
   const auto element_size =
       dml::utils::get_dml_element_size_in_bytes(input_bundle.get_data_type());
+  const auto buffer_size = static_cast<UINT64>(size) * element_size;
+  auto byte_offset = static_cast<UINT64>(offset) * element_size;
 
-  dml::utils::DmlBufferBindingBundle x_binding(
-      dml::utils::ResourceFromRawBuffer(x),
-      static_cast<UINT64>(offset * element_size), 0);
+  ID3D12Resource* input_resource = dml::utils::ResourceFromRawBuffer(x);
+  Microsoft::WRL::ComPtr<ID3D12Resource> temp_buffer_storage;
+
+  if (byte_offset % DML_MINIMUM_BUFFER_TENSOR_ALIGNMENT != 0) {
+    auto dxdevice = dml::get_device();
+    temp_buffer_storage =
+        dxdevice->CreatePreferredDeviceMemoryBuffer(buffer_size);
+
+    auto command_list = dxdevice->GetCommandList();
+    ID3D12Resource* src_resource = input_resource;
+    ID3D12Resource* dst_resource = temp_buffer_storage.Get();
+
+    D3D12_RESOURCE_BARRIER barriers[2];
+    barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barriers[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    barriers[0].Transition.pResource = src_resource;
+    barriers[0].Transition.Subresource =
+        D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barriers[1].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    barriers[1].Transition.pResource = dst_resource;
+    barriers[1].Transition.Subresource =
+        D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+    command_list->ResourceBarrier(2, barriers);
+    command_list->CopyBufferRegion(dst_resource, 0, src_resource, byte_offset,
+                                   buffer_size);
+    std::swap(barriers[0].Transition.StateBefore,
+              barriers[0].Transition.StateAfter);
+    std::swap(barriers[1].Transition.StateBefore,
+              barriers[1].Transition.StateAfter);
+    command_list->ResourceBarrier(2, barriers);
+    input_resource = temp_buffer_storage.Get();
+    byte_offset = 0;
+  }
+
+  dml::utils::DmlBufferBindingBundle x_binding(input_resource, byte_offset,
+                                               buffer_size);
   dml::utils::DmlBufferBindingBundle output_binding(
       dml::utils::ResourceFromStorageView(output_storage));
 
