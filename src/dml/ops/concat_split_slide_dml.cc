@@ -70,9 +70,8 @@ void Concat::compute(const std::vector<const StorageView*>& inputs,
 
   for (const auto* input_sv : inputs) {
     input_buffer_bindings_storage.push_back(dml::utils::create_buffer_binding(
-        reinterpret_cast<ID3D12Resource*>(
-            const_cast<void*>(input_sv->buffer())),
-        0, input_sv->size() * input_sv->item_size()));
+        dml::utils::ResourceFromStorageView(*input_sv), 0,
+        input_sv->size() * input_sv->item_size()));
     input_binding_descs_for_op.push_back(
         dml::utils::create_binding_desc(&input_buffer_bindings_storage.back()));
   }
@@ -80,7 +79,7 @@ void Concat::compute(const std::vector<const StorageView*>& inputs,
   // Create output binding
   DML_BUFFER_BINDING output_buffer_binding_storage =
       dml::utils::create_buffer_binding(
-          reinterpret_cast<ID3D12Resource*>(output.buffer()), 0,
+          dml::utils::ResourceFromStorageView(output), 0,
           output.size() * output.item_size());
   DML_BINDING_DESC output_binding_desc_for_op =
       dml::utils::create_binding_desc(&output_buffer_binding_storage);
@@ -133,8 +132,8 @@ void Split::compute(const StorageView& input,
   // Create input binding
   DML_BUFFER_BINDING input_buffer_binding_storage =
       dml::utils::create_buffer_binding(
-          reinterpret_cast<ID3D12Resource*>(const_cast<void*>(input.buffer())),
-          0, input.size() * input.item_size());
+          dml::utils::ResourceFromStorageView(input), 0,
+          input.size() * input.item_size());
   DML_BINDING_DESC input_binding_desc_for_op =
       dml::utils::create_binding_desc(&input_buffer_binding_storage);
 
@@ -146,9 +145,8 @@ void Split::compute(const StorageView& input,
 
   for (const auto* output_sv : outputs) {
     output_buffer_bindings_storage.push_back(dml::utils::create_buffer_binding(
-        reinterpret_cast<ID3D12Resource*>(
-            const_cast<void*>(output_sv->buffer())),
-        0, output_sv->size() * output_sv->item_size()));
+        dml::utils::ResourceFromStorageView(*output_sv), 0,
+        output_sv->size() * output_sv->item_size()));
     output_binding_descs_for_op.push_back(dml::utils::create_binding_desc(
         &output_buffer_bindings_storage.back()));
   }
@@ -208,15 +206,15 @@ void Slide::compute(const StorageView& input,
   // Create input binding
   DML_BUFFER_BINDING input_buffer_binding_storage =
       dml::utils::create_buffer_binding(
-          reinterpret_cast<ID3D12Resource*>(const_cast<void*>(input.buffer())),
-          0, input.size() * input.item_size());
+          dml::utils::ResourceFromStorageView(input), 0,
+          input.size() * input.item_size());
   DML_BINDING_DESC input_binding_desc_for_op =
       dml::utils::create_binding_desc(&input_buffer_binding_storage);
 
   // Create output binding
   DML_BUFFER_BINDING output_buffer_binding_storage =
       dml::utils::create_buffer_binding(
-          reinterpret_cast<ID3D12Resource*>(output.buffer()), 0,
+          dml::utils::ResourceFromStorageView(output), 0,
           output.size() * output.item_size());
   DML_BINDING_DESC output_binding_desc_for_op =
       dml::utils::create_binding_desc(&output_buffer_binding_storage);

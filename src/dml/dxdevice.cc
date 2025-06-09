@@ -536,6 +536,13 @@ void Device::RecordDispatch(const char* name,
   // PIXEndEvent(m_commandList.Get());
 }
 
+void Device::KeepAliveUntilNextCommandListDispatch(
+    Microsoft::WRL::ComPtr<IGraphicsUnknown>&& object) {
+  if (object) {
+    m_temporaryResources.emplace(std::move(object));
+  }
+}
+
 Microsoft::WRL::ComPtr<ID3D12Resource> Device::Upload(uint64_t totalSize,
                                                       std::string_view data,
                                                       std::wstring_view name) {
@@ -593,7 +600,7 @@ Microsoft::WRL::ComPtr<ID3D12Resource> Device::Upload(uint64_t totalSize,
                 barriers[0].Transition.StateAfter);
       m_commandList->ResourceBarrier(_countof(barriers), barriers);
 
-      m_temporaryResources.push_back(std::move(uploadBuffer));
+      m_temporaryResources.emplace(std::move(uploadBuffer));
     }
   }
 

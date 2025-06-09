@@ -17,7 +17,7 @@ using IAdapter = IDXGIAdapter1;
 #include <DirectML.h>
 
 #include <string_view>
-#include <vector>
+#include <unordered_set>
 
 // Simplified abstraction for submitting work to a device with a single command
 // queue. Not thread safe. This "device" includes a single command list that is
@@ -28,6 +28,16 @@ namespace dml {
 
 class CommandQueue;
 class DescriptorPool;
+
+template <typename T>
+struct ComPtrHasher {
+  // The operator() that the unordered_set will call
+  std::size_t operator()(const Microsoft::WRL::ComPtr<T>& ptr) const {
+    // Get the raw pointer and hash it.
+    // std::hash already has a specialization for pointer types.
+    return std::hash<T*>()(ptr.Get());
+  }
+};
 
 class Device {
  public:
@@ -154,9 +164,7 @@ class Device {
   bool GpuTimingEnabled() const { return m_timestampCapacity > 0; }
 
   void KeepAliveUntilNextCommandListDispatch(
-      Microsoft::WRL::ComPtr<IGraphicsUnknown>&& object) {
-    m_temporaryResources.emplace_back(std::move(object));
-  }
+      Microsoft::WRL::ComPtr<IGraphicsUnknown>&& object);
 
   Microsoft::WRL::ComPtr<ID3D12Resource> Upload(uint64_t totalSize,
                                                 std::string_view data,
@@ -220,7 +228,9 @@ class Device {
   D3D12_COMMAND_LIST_TYPE m_commandListType = D3D12_COMMAND_LIST_TYPE_COMPUTE;
   Microsoft::WRL::ComPtr<ID3D12CommandAllocator> m_commandAllocator;
   Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> m_commandList;
-  std::vector<Microsoft::WRL::ComPtr<IGraphicsUnknown>> m_temporaryResources;
+  std::unordered_set<Microsoft::WRL::ComPtr<IGraphicsUnknown>,
+                     ComPtrHasher<IGraphicsUnknown>>
+      m_temporaryResources;
   uint32_t m_dispatchRepeat = 1;
   std::vector<D3D12_RESOURCE_BARRIER> m_postDispatchBarriers;
   std::optional<D3D12_FEATURE_DATA_ARCHITECTURE1> m_architectureSupport;
