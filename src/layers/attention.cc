@@ -260,7 +260,8 @@ namespace ctranslate2 {
                                  primitives<D>::add_batch_broadcast(position_bias_per_gpu->data<T>(),
                                                                     output.data<T>(),
                                                                     position_bias_per_gpu->size(),
-                                                                    output.size()));
+                                                                    output.size(),
+                                                                    0));
       }
 
       if (alibi)

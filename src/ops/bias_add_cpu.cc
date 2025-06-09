@@ -11,7 +11,8 @@ namespace ctranslate2 {
                                          value.data<T>(),
                                          output.data<T>(),
                                          bias.size(),
-                                         value.size());
+                                         value.size(),
+                                         0);
       if (_activation_type)
         get_activation_op(*_activation_type)(output, output);
     }

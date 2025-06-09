@@ -58,11 +58,11 @@ namespace ctranslate2 {
     }
 
     template <typename T>
-    static void add_batch_broadcast(const T* a, const T* b, T* c, dim_t a_size, dim_t b_size);
+    static void add_batch_broadcast(const T* a, const T* b, T* c, dim_t a_size, dim_t b_size, dim_t a_offset);
 
     template <typename T>
-    static void add_batch_broadcast(const T* x, T* y, dim_t x_size, dim_t y_size) {
-      add_batch_broadcast(x, y, y, x_size, y_size);
+    static void add_batch_broadcast(const T* x, T* y, dim_t x_size, dim_t y_size, dim_t a_offset) {
+      add_batch_broadcast(x, y, y, x_size, y_size, a_offset);
     }
 
     template <typename T>

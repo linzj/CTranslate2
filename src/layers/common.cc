@@ -167,10 +167,11 @@ namespace ctranslate2 {
                                     + std::to_string(depth));
 
       DEVICE_AND_TYPE_DISPATCH(input.device(), input.dtype(),
-                               primitives<D>::add_batch_broadcast(encodings.data<T>() + index * depth,
+                               primitives<D>::add_batch_broadcast(encodings.data<T>(),
                                                                   input.data<T>(),
                                                                   time * depth,
-                                                                  input.size()));
+                                                                  input.size(),
+                                                                  index * depth));
     }
 
     void PositionEncoder::operator()(const StorageView& input, StorageView& output, dim_t index) {

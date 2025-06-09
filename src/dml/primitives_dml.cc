@@ -1023,9 +1023,57 @@ void primitives<Device::DirectML>::add_batch_broadcast(const T* a,
                                                        const T* b,
                                                        T* c,
                                                        dim_t a_size,
-                                                       dim_t b_size) {
-  // Implement using DML broadcast operations
-  add(a, b, c, std::min(a_size, b_size));
+                                                       dim_t b_size,
+                                                       dim_t a_offset) {
+  if (b_size == 0) {
+    return;
+  }
+  if (a_size == 0) {
+    THROW_INVALID_ARGUMENT("a_size cannot be zero when b_size is non-zero");
+  }
+  if (b_size % a_size != 0) {
+    THROW_INVALID_ARGUMENT("b_size must be a multiple of a_size");
+  }
+
+  const dim_t batch_size = b_size / a_size;
+
+  const std::vector<UINT> a_dims = {1, 1, 1, static_cast<UINT>(a_size)};
+  const std::vector<UINT> b_dims = {1, 1, static_cast<UINT>(batch_size),
+                                    static_cast<UINT>(a_size)};
+
+  dml::utils::DmlTensorDescBundle a_bundle(dml::get_dml_data_type<T>(), a_dims,
+                                           nullptr);
+  dml::utils::DmlTensorDescBundle b_bundle(dml::get_dml_data_type<T>(), b_dims,
+                                           nullptr);
+  dml::utils::DmlTensorDescBundle c_bundle(dml::get_dml_data_type<T>(), b_dims,
+                                           nullptr);
+
+  DML_ELEMENT_WISE_ADD_OPERATOR_DESC add_desc = {};
+  add_desc.ATensor = &a_bundle.get_tensor_desc();
+  add_desc.BTensor = &b_bundle.get_tensor_desc();
+  add_desc.OutputTensor = &c_bundle.get_tensor_desc();
+
+  DML_OPERATOR_DESC op_desc = {DML_OPERATOR_ELEMENT_WISE_ADD, &add_desc};
+
+  dml::Operator* compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+
+  const auto element_size =
+      dml::utils::get_dml_element_size_in_bytes(a_bundle.get_data_type());
+
+  dml::utils::DmlBufferBindingBundle a_binding(
+      dml::utils::ResourceFromRawBuffer(a),
+      static_cast<UINT64>(a_offset * element_size),
+      static_cast<UINT64>(a_size * element_size));
+  dml::utils::DmlBufferBindingBundle b_binding(
+      dml::utils::ResourceFromRawBuffer(b), 0,
+      static_cast<UINT64>(b_size * element_size));
+  dml::utils::DmlBufferBindingBundle c_binding(
+      dml::utils::ResourceFromRawBuffer(c), 0,
+      static_cast<UINT64>(b_size * element_size));
+
+  compiled_op->Execute({a_binding.get_desc(), b_binding.get_desc()},
+                       {c_binding.get_desc()});
 }
 
 template <>
@@ -2287,7 +2335,8 @@ void cross_device_primitives<Device::DirectML, Device::CPU>::copy(const T* x,
   template void primitives<Device::DirectML>::add(const T* a, const T* b,     \
                                                   T* c, dim_t size);          \
   template void primitives<Device::DirectML>::add_batch_broadcast(            \
-      const T* a, const T* b, T* c, dim_t a_size, dim_t b_size);              \
+      const T* a, const T* b, T* c, dim_t a_size, dim_t b_size,               \
+      dim_t a_offset);                                                        \
   template void primitives<Device::DirectML>::add_depth_broadcast(            \
       const T* a, const T* b, T* c, dim_t a_size, dim_t b_size);              \
   template void primitives<Device::DirectML>::sub(const T* a, const T* b,     \

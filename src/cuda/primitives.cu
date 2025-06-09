@@ -125,7 +125,8 @@ namespace ctranslate2 {
   template<>
   template <typename T>
   void primitives<Device::CUDA>::add_batch_broadcast(const T* a, const T* b, T* c,
-                                                     dim_t a_size, dim_t b_size) {
+                                                     dim_t a_size, dim_t b_size, dim_t a_offset) {
+    a += a_offset;
     cuda::binary_transform(a, b, c, b_size,
                            cuda::plus<cuda::device_type<T>>(),
                            cuda::repeat_vec<cuda::index_t>(a_size));

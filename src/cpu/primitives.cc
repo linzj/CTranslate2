@@ -148,8 +148,9 @@ namespace ctranslate2 {
   template<>
   template <typename T>
   void primitives<Device::CPU>::add_batch_broadcast(const T* a, const T* b, T* c,
-                                                    dim_t a_size, dim_t b_size) {
+                                                    dim_t a_size, dim_t b_size, dim_t a_offset) {
     const dim_t iter_size = b_size / a_size;
+    a += a_offset;
     cpu::parallel_for(0, iter_size, 1, [&](dim_t begin, dim_t end) {
       for (dim_t i = begin; i < end; ++i) {
         const dim_t offset = i * a_size;
@@ -1164,7 +1165,7 @@ namespace ctranslate2 {
   primitives<Device::CPU>::add(T a, const T* x, T* y, dim_t size);      \
   template void                                                         \
   primitives<Device::CPU>::add_batch_broadcast(const T* a, const T* b, T* c, \
-                                               dim_t a_size, dim_t b_size); \
+                                               dim_t a_size, dim_t b_size, dim_t a_offset); \
   template void                                                         \
   primitives<Device::CPU>::add_depth_broadcast(const T* a, const T* b, T* c, \
                                                dim_t a_size, dim_t b_size); \
