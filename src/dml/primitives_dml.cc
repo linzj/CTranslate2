@@ -1502,18 +1502,95 @@ void primitives<Device::DirectML>::prepare_length_mask(const int32_t* lengths,
                                                        bool mask_future,
                                                        bool multi_query,
                                                        int32_t* mask) {
-  // Suppress unused parameter warnings
-  (void)lengths;
-  (void)batch_size;
-  (void)num_heads;
-  (void)num_queries;
-  (void)mask_future;
-  (void)multi_query;
-  (void)mask;
+  if (!mask_future) {
+    // Replicate each length num_heads * num_queries times using TILE.
+    std::vector<UINT> lengths_dims = {static_cast<UINT>(batch_size), 1, 1, 1};
+    dml::utils::DmlTensorDescBundle lengths_bundle(DML_TENSOR_DATA_TYPE_INT32,
+                                                   lengths_dims, nullptr);
 
-  throw std::runtime_error(
-      "DirectML does not support preparing length masks directly. "
-      "Implement as a custom operation.");
+    std::vector<UINT> mask_dims = {static_cast<UINT>(batch_size),
+                                   static_cast<UINT>(num_heads),
+                                   static_cast<UINT>(num_queries), 1};
+    dml::utils::DmlTensorDescBundle mask_bundle(DML_TENSOR_DATA_TYPE_INT32,
+                                                mask_dims, nullptr);
+
+    DML_TILE_OPERATOR_DESC tile_desc = {};
+    tile_desc.InputTensor = &lengths_bundle.get_tensor_desc();
+    tile_desc.OutputTensor = &mask_bundle.get_tensor_desc();
+    const UINT repeats[] = {1, static_cast<UINT>(num_heads),
+                            static_cast<UINT>(num_queries), 1};
+    tile_desc.RepeatsCount = ARRAYSIZE(repeats);
+    tile_desc.Repeats = repeats;
+
+    DML_OPERATOR_DESC op_desc = {DML_OPERATOR_TILE, &tile_desc};
+    dml::Operator* tile_op =
+        dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+
+    tile_op->Execute({dml::utils::ResourceFromRawBuffer(lengths)},
+                     {dml::utils::ResourceFromRawBuffer(mask)});
+
+  } else {
+    // Create a causal mask and apply std::min(length, causal_mask_value).
+    const dim_t mask_size_per_batch = num_heads * num_queries;
+
+    // 1. Create causal mask values on CPU.
+    std::vector<int32_t> causal_vals(mask_size_per_batch);
+    for (dim_t i = 0; i < mask_size_per_batch; ++i) {
+      causal_vals[i] = (multi_query ? (i / num_heads) : (i % num_queries)) + 1;
+    }
+
+    // 2. Upload to a GPU StorageView.
+    StorageView causal_storage({1, num_heads, num_queries, 1}, causal_vals,
+                               Device::DirectML);
+
+    // 3. Prepare tensor descriptors for tiling the lengths tensor.
+    std::vector<UINT> lengths_dims = {static_cast<UINT>(batch_size), 1, 1, 1};
+    dml::utils::DmlTensorDescBundle lengths_bundle(DML_TENSOR_DATA_TYPE_INT32,
+                                                   lengths_dims, nullptr);
+
+    // 3.5. Tile the lengths tensor to match the mask dimensions.
+    StorageView lengths_tiled_storage({batch_size, num_heads, num_queries, 1},
+                                      DataType::INT32, Device::DirectML);
+    dml::utils::DmlTensorDescBundle lengths_tiled_bundle(lengths_tiled_storage);
+
+    DML_TILE_OPERATOR_DESC tile_desc = {};
+    tile_desc.InputTensor = &lengths_bundle.get_tensor_desc();
+    tile_desc.OutputTensor = &lengths_tiled_bundle.get_tensor_desc();
+    const UINT repeats[] = {1, static_cast<UINT>(num_heads),
+                            static_cast<UINT>(num_queries), 1};
+    tile_desc.RepeatsCount = ARRAYSIZE(repeats);
+    tile_desc.Repeats = repeats;
+
+    DML_OPERATOR_DESC tile_op_desc = {DML_OPERATOR_TILE, &tile_desc};
+    dml::Operator* tile_op = dml::GetOrCreateCompiledOperatorApi(
+        &tile_op_desc, DML_EXECUTION_FLAG_NONE);
+
+    tile_op->Execute(
+        {dml::utils::ResourceFromRawBuffer(lengths)},
+        {dml::utils::ResourceFromStorageView(lengths_tiled_storage)});
+
+    // 4. Prepare tensors for the MIN operation.
+    dml::utils::DmlTensorDescBundle causal_bundle(causal_storage);
+    std::vector<UINT> mask_dims = {static_cast<UINT>(batch_size),
+                                   static_cast<UINT>(num_heads),
+                                   static_cast<UINT>(num_queries), 1};
+    dml::utils::DmlTensorDescBundle mask_bundle(DML_TENSOR_DATA_TYPE_INT32,
+                                                mask_dims, nullptr);
+
+    // 5. Create and execute the MIN operator.
+    DML_ELEMENT_WISE_MIN_OPERATOR_DESC min_desc = {};
+    min_desc.ATensor = &lengths_tiled_bundle.get_tensor_desc();
+    min_desc.BTensor = &causal_bundle.get_tensor_desc();
+    min_desc.OutputTensor = &mask_bundle.get_tensor_desc();
+
+    DML_OPERATOR_DESC min_op_desc = {DML_OPERATOR_ELEMENT_WISE_MIN, &min_desc};
+    dml::Operator* min_op = dml::GetOrCreateCompiledOperatorApi(
+        &min_op_desc, DML_EXECUTION_FLAG_NONE);
+
+    min_op->Execute({dml::utils::ResourceFromStorageView(lengths_tiled_storage),
+                     dml::utils::ResourceFromStorageView(causal_storage)},
+                    {dml::utils::ResourceFromRawBuffer(mask)});
+  }
 }
 
 template <>
