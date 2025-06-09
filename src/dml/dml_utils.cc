@@ -469,9 +469,9 @@ DmlBufferBindingBundle::DmlBufferBindingBundle(ID3D12Resource* resource,
     UINT64 size_in_byte = desc.Width;
 
     buffer_binding_.SizeInBytes = size_in_byte;
-    // Ensure the resource is kept alive until the next dispatch
-    dml::get_device()->KeepAliveUntilNextCommandListDispatch(resource);
   }
+  // Ensure the resource is kept alive until the next dispatch
+  dml::get_device()->KeepAliveUntilNextCommandListDispatch(resource);
 }
 
 }  // namespace utils

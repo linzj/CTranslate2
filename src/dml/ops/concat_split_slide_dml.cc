@@ -61,31 +61,23 @@ void Concat::compute(const std::vector<const StorageView*>& inputs,
   // Get or create compiled operator
   auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
-  // Create input bindings
-  std::vector<DML_BUFFER_BINDING>
-      input_buffer_bindings_storage;  // To keep DML_BUFFER_BINDING alive
-  std::vector<DML_BINDING_DESC> input_binding_descs_for_op;
-  input_buffer_bindings_storage.reserve(inputs.size());
-  input_binding_descs_for_op.reserve(inputs.size());
-
+  // Create input bindings using DmlBindingArrayBundle
+  std::vector<dml::utils::DmlBufferBindingBundle> input_binding_bundles;
+  input_binding_bundles.reserve(inputs.size());
   for (const auto* input_sv : inputs) {
-    input_buffer_bindings_storage.push_back(dml::utils::create_buffer_binding(
+    input_binding_bundles.emplace_back(
         dml::utils::ResourceFromStorageView(*input_sv), 0,
-        input_sv->size() * input_sv->item_size()));
-    input_binding_descs_for_op.push_back(
-        dml::utils::create_binding_desc(&input_buffer_bindings_storage.back()));
+        input_sv->size() * input_sv->item_size());
   }
+  dml::utils::DmlBindingArrayBundle input_bindings(
+      std::move(input_binding_bundles));
 
-  // Create output binding
-  DML_BUFFER_BINDING output_buffer_binding_storage =
-      dml::utils::create_buffer_binding(
-          dml::utils::ResourceFromStorageView(output), 0,
-          output.size() * output.item_size());
-  DML_BINDING_DESC output_binding_desc_for_op =
-      dml::utils::create_binding_desc(&output_buffer_binding_storage);
+  // Create output binding using DmlBufferBindingBundle
+  dml::utils::DmlBufferBindingBundle output_binding(
+      dml::utils::ResourceFromStorageView(output), 0,
+      output.size() * output.item_size());
 
-  compiled_op->Execute(input_binding_descs_for_op,
-                       {output_binding_desc_for_op});
+  compiled_op->Execute(input_bindings.get_descs(), {output_binding.get_desc()});
 }
 
 template <Device D, typename T>
@@ -129,30 +121,23 @@ void Split::compute(const StorageView& input,
   // Get or create compiled operator
   auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
-  // Create input binding
-  DML_BUFFER_BINDING input_buffer_binding_storage =
-      dml::utils::create_buffer_binding(
-          dml::utils::ResourceFromStorageView(input), 0,
-          input.size() * input.item_size());
-  DML_BINDING_DESC input_binding_desc_for_op =
-      dml::utils::create_binding_desc(&input_buffer_binding_storage);
+  // Create input binding using DmlBufferBindingBundle
+  dml::utils::DmlBufferBindingBundle input_binding(
+      dml::utils::ResourceFromStorageView(input), 0,
+      input.size() * input.item_size());
 
-  // Create output bindings
-  std::vector<DML_BUFFER_BINDING> output_buffer_bindings_storage;  // Keep alive
-  std::vector<DML_BINDING_DESC> output_binding_descs_for_op;
-  output_buffer_bindings_storage.reserve(outputs.size());
-  output_binding_descs_for_op.reserve(outputs.size());
-
+  // Create output bindings using DmlBindingArrayBundle
+  std::vector<dml::utils::DmlBufferBindingBundle> output_binding_bundles;
+  output_binding_bundles.reserve(outputs.size());
   for (const auto* output_sv : outputs) {
-    output_buffer_bindings_storage.push_back(dml::utils::create_buffer_binding(
+    output_binding_bundles.emplace_back(
         dml::utils::ResourceFromStorageView(*output_sv), 0,
-        output_sv->size() * output_sv->item_size()));
-    output_binding_descs_for_op.push_back(dml::utils::create_binding_desc(
-        &output_buffer_bindings_storage.back()));
+        output_sv->size() * output_sv->item_size());
   }
+  dml::utils::DmlBindingArrayBundle output_bindings(
+      std::move(output_binding_bundles));
 
-  compiled_op->Execute({input_binding_desc_for_op},
-                       output_binding_descs_for_op);
+  compiled_op->Execute({input_binding.get_desc()}, output_bindings.get_descs());
 }
 
 template <Device D, typename T>
@@ -204,23 +189,16 @@ void Slide::compute(const StorageView& input,
   auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
   // Create input binding
-  DML_BUFFER_BINDING input_buffer_binding_storage =
-      dml::utils::create_buffer_binding(
-          dml::utils::ResourceFromStorageView(input), 0,
-          input.size() * input.item_size());
-  DML_BINDING_DESC input_binding_desc_for_op =
-      dml::utils::create_binding_desc(&input_buffer_binding_storage);
+  dml::utils::DmlBufferBindingBundle input_binding(
+      dml::utils::ResourceFromStorageView(input), 0,
+      input.size() * input.item_size());
 
   // Create output binding
-  DML_BUFFER_BINDING output_buffer_binding_storage =
-      dml::utils::create_buffer_binding(
-          dml::utils::ResourceFromStorageView(output), 0,
-          output.size() * output.item_size());
-  DML_BINDING_DESC output_binding_desc_for_op =
-      dml::utils::create_binding_desc(&output_buffer_binding_storage);
+  dml::utils::DmlBufferBindingBundle output_binding(
+      dml::utils::ResourceFromStorageView(output), 0,
+      output.size() * output.item_size());
 
-  compiled_op->Execute({input_binding_desc_for_op},
-                       {output_binding_desc_for_op});
+  compiled_op->Execute({input_binding.get_desc()}, {output_binding.get_desc()});
 }
 
 // Explicit template instantiations for DirectML
