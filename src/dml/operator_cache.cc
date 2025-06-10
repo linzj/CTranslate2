@@ -31,9 +31,17 @@ void append_bytes_array(std::ostringstream& ss,
   }
 }
 
+DMLOperatorCache::DMLOperatorCache(Device* device) : _device(device) {}
+
+DMLOperatorCache::~DMLOperatorCache() = default;
+
 DMLOperatorCache& DMLOperatorCache::instance() {
-  static DMLOperatorCache cache_instance;
-  return cache_instance;
+  DMLOperatorCache* instance = dml::get_device()->GetOperatorCache();
+  if (!instance) {
+    SPDLOG_ERROR("DMLOperatorCache instance is not initialized.");
+    throw std::runtime_error("DMLOperatorCache instance is not initialized.");
+  }
+  return *instance;
 }
 
 void DMLOperatorCache::Clear() {
@@ -776,7 +784,6 @@ std::string DMLOperatorCache::GenerateCacheKey(const DML_OPERATOR_DESC* op_desc,
 }
 
 Operator* DMLOperatorCache::GetOrCreateCompiledOperator(
-    Device* device,
     const DML_OPERATOR_DESC* op_desc,
     DML_EXECUTION_FLAGS flags,
     PCWSTR name) {
@@ -800,7 +807,7 @@ Operator* DMLOperatorCache::GetOrCreateCompiledOperator(
                      .c_str());
   }
 
-  auto dml_device = device->DML();
+  auto dml_device = _device->DML();
   // Not found, create and compile. This is done outside the lock to avoid
   // holding it during potentially long operations.
   Microsoft::WRL::ComPtr<IDMLOperator> dml_operator;
@@ -813,7 +820,7 @@ Operator* DMLOperatorCache::GetOrCreateCompiledOperator(
   if (name)
     compiled_operator->SetName(name);
   std::unique_ptr<Operator> operator_obj =
-      std::make_unique<Operator>(device, std::move(compiled_operator));
+      std::make_unique<Operator>(_device, std::move(compiled_operator));
 
   if (kCacheEnabled) {
     // Re-lock to insert into the cache
@@ -835,8 +842,8 @@ Operator* GetOrCreateCompiledOperatorApi(const DML_OPERATOR_DESC* op_desc,
                                          PCWSTR name) {
   // Assumes get_dml_device() is available in ctranslate2::dml namespace
   // and returns the current IDMLDevice*.
-  return DMLOperatorCache::instance().GetOrCreateCompiledOperator(
-      get_device(), op_desc, flags, name);
+  return DMLOperatorCache::instance().GetOrCreateCompiledOperator(op_desc,
+                                                                  flags, name);
 }
 
 }  // namespace dml

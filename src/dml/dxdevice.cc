@@ -5,6 +5,7 @@
 #include "common.h"
 #include "descriptor_pool.h"
 #include "dml/dml_utils.h"
+#include "dml/operator_cache.h"
 
 #include <assert.h>
 #include <dxgi1_6.h>
@@ -168,6 +169,7 @@ Device::Device(IAdapter* adapter,
 
   m_descriptorPool = std::make_unique<DescriptorPool>(m_d3d.Get(), 256);
   m_allocator = std::make_unique<BucketizedBufferAllocator>(this);
+  m_operatorCache = std::make_unique<DMLOperatorCache>(this);
 #if 0
   // Custom heaps are optional for MCDM devices, so we also need to check for
   // support.
@@ -397,6 +399,7 @@ Device::Device(ID3D12Device* d3ddevice,
 
   m_descriptorPool = std::make_unique<DescriptorPool>(m_d3d.Get(), 1024 * 1024);
   m_allocator = std::make_unique<BucketizedBufferAllocator>(this);
+  m_operatorCache = std::make_unique<DMLOperatorCache>(this);
 }
 
 Device::~Device() {
@@ -421,6 +424,8 @@ Device::~Device() {
       (void)m_d3d->SetStablePowerState(FALSE);
     }
   }
+  // Leak operator cache now, for its destruction causes crash.
+  m_operatorCache.release();
 }
 
 Microsoft::WRL::ComPtr<IResourceWrapper>

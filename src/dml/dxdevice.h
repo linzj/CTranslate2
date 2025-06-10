@@ -30,6 +30,7 @@ namespace dml {
 class CommandQueue;
 class DescriptorPool;
 class BucketizedBufferAllocator;
+class DMLOperatorCache;
 
 template <typename T>
 struct ComPtrHasher {
@@ -215,6 +216,8 @@ class Device {
 
   void DummyPresent();
 
+  DMLOperatorCache* GetOperatorCache() { return m_operatorCache.get(); }
+
  private:
   void EnsureDxcInterfaces();
   void SetDescriptorHeap(ID3D12DescriptorHeap* descriptorHeap);
@@ -246,6 +249,7 @@ class Device {
   std::unique_ptr<CommandQueue> m_queue;
   std::unique_ptr<DescriptorPool> m_descriptorPool;
   std::unique_ptr<BucketizedBufferAllocator> m_allocator;
+  std::unique_ptr<DMLOperatorCache> m_operatorCache;
 
   DWORD m_callbackCookie = 0;
   bool m_restoreBackgroundProcessing = false;

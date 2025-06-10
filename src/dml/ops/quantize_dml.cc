@@ -88,9 +88,8 @@ void Quantize::quantize(const StorageView& input,
   abs_op_def.OutputTensor = &abs_input_desc.get_tensor_desc();
   DML_OPERATOR_DESC dml_abs_op_desc = {DML_OPERATOR_ELEMENT_WISE_ABS,
                                        &abs_op_def};
-  dml::Operator* compiled_abs_op =
-      dml::DMLOperatorCache::instance().GetOrCreateCompiledOperator(
-          dml_dev, &dml_abs_op_desc, DML_EXECUTION_FLAG_NONE, L"Quantize_Abs");
+  dml::Operator* compiled_abs_op = dml::GetOrCreateCompiledOperatorApi(
+      &dml_abs_op_desc, DML_EXECUTION_FLAG_NONE, L"Quantize_Abs");
   compiled_abs_op->Execute(
       {dml::utils::ResourceFromStorageView(input)},
       {dml::utils::ResourceFromStorageView(abs_input_storage)});
@@ -106,10 +105,8 @@ void Quantize::quantize(const StorageView& input,
   reduce_op_def.AxisCount = static_cast<UINT>(reduce_axes.size());
   reduce_op_def.Axes = reduce_axes.data();
   DML_OPERATOR_DESC dml_reduce_op_desc = {DML_OPERATOR_REDUCE, &reduce_op_def};
-  dml::Operator* compiled_reduce_op =
-      dml::DMLOperatorCache::instance().GetOrCreateCompiledOperator(
-          dml_dev, &dml_reduce_op_desc, DML_EXECUTION_FLAG_NONE,
-          L"Quantize_ReduceMax");
+  dml::Operator* compiled_reduce_op = dml::GetOrCreateCompiledOperatorApi(
+      &dml_reduce_op_desc, DML_EXECUTION_FLAG_NONE, L"Quantize_ReduceMax");
   compiled_reduce_op->Execute(
       {dml::utils::ResourceFromStorageView(abs_input_storage)},
       {dml::utils::ResourceFromStorageView(abs_max_storage)});
@@ -188,10 +185,8 @@ void Quantize::quantize(const StorageView& input,
   div_op_def.OutputTensor = &scale_if_amax_not_zero_desc.get_tensor_desc();
   DML_OPERATOR_DESC dml_div_op_desc = {DML_OPERATOR_ELEMENT_WISE_DIVIDE,
                                        &div_op_def};
-  dml::Operator* compiled_div_op =
-      dml::DMLOperatorCache::instance().GetOrCreateCompiledOperator(
-          dml_dev, &dml_div_op_desc, DML_EXECUTION_FLAG_NONE,
-          L"Quantize_DivideBy127");
+  dml::Operator* compiled_div_op = dml::GetOrCreateCompiledOperatorApi(
+      &dml_div_op_desc, DML_EXECUTION_FLAG_NONE, L"Quantize_DivideBy127");
   compiled_div_op->Execute(
       {dml::utils::ResourceFromStorageView(abs_max_storage),
        dml::utils::ResourceFromStorageView(const_127_storage)},
@@ -212,10 +207,8 @@ void Quantize::quantize(const StorageView& input,
   equals_op_def.OutputTensor = &condition_desc.get_tensor_desc();
   DML_OPERATOR_DESC dml_equals_op_desc = {
       DML_OPERATOR_ELEMENT_WISE_LOGICAL_EQUALS, &equals_op_def};
-  dml::Operator* compiled_equals_op =
-      dml::DMLOperatorCache::instance().GetOrCreateCompiledOperator(
-          dml_dev, &dml_equals_op_desc, DML_EXECUTION_FLAG_NONE,
-          L"Quantize_IsAmaxZero");
+  dml::Operator* compiled_equals_op = dml::GetOrCreateCompiledOperatorApi(
+      &dml_equals_op_desc, DML_EXECUTION_FLAG_NONE, L"Quantize_IsAmaxZero");
   compiled_equals_op->Execute(
       {dml::utils::ResourceFromStorageView(abs_max_storage),
        dml::utils::ResourceFromStorageView(const_0_storage)},
@@ -236,10 +229,8 @@ void Quantize::quantize(const StorageView& input,
   if_op_def.OutputTensor =
       &scale_desc.get_tensor_desc();  // Output to final 'scale'
   DML_OPERATOR_DESC dml_if_op_desc = {DML_OPERATOR_ELEMENT_WISE_IF, &if_op_def};
-  dml::Operator* compiled_if_op =
-      dml::DMLOperatorCache::instance().GetOrCreateCompiledOperator(
-          dml_dev, &dml_if_op_desc, DML_EXECUTION_FLAG_NONE,
-          L"Quantize_SelectScale");
+  dml::Operator* compiled_if_op = dml::GetOrCreateCompiledOperatorApi(
+      &dml_if_op_desc, DML_EXECUTION_FLAG_NONE, L"Quantize_SelectScale");
   compiled_if_op->Execute(
       {dml::utils::ResourceFromStorageView(condition_storage),
        dml::utils::ResourceFromStorageView(const_1_storage),
@@ -293,10 +284,9 @@ void Quantize::quantize(const StorageView& input,
   tile_op_def.Repeats = repeats_for_tile.data();
 
   DML_OPERATOR_DESC dml_tile_op_desc = {DML_OPERATOR_TILE, &tile_op_def};
-  dml::Operator* compiled_tile_op =
-      dml::DMLOperatorCache::instance().GetOrCreateCompiledOperator(
-          dml_dev, &dml_tile_op_desc, DML_EXECUTION_FLAG_NONE,
-          L"TileScaleForQuantize_Computed");
+  dml::Operator* compiled_tile_op = dml::GetOrCreateCompiledOperatorApi(
+      &dml_tile_op_desc, DML_EXECUTION_FLAG_NONE,
+      L"TileScaleForQuantize_Computed");
 
   // The input to tile is the 'scale.buffer()' which holds computed scales,
   // as 'scale' now directly informs scale_tile_input_desc.
@@ -323,10 +313,9 @@ void Quantize::quantize(const StorageView& input,
 
   DML_OPERATOR_DESC dml_quantize_op_desc{
       DML_OPERATOR_ELEMENT_WISE_QUANTIZE_LINEAR, &quantize_op_definition};
-  dml::Operator* compiled_quantize_op =
-      dml::DMLOperatorCache::instance().GetOrCreateCompiledOperator(
-          dml_dev, &dml_quantize_op_desc, DML_EXECUTION_FLAG_NONE,
-          L"ElementWiseQuantizeLinear_F32_S8_WithComputedTiledScale");
+  dml::Operator* compiled_quantize_op = dml::GetOrCreateCompiledOperatorApi(
+      &dml_quantize_op_desc, DML_EXECUTION_FLAG_NONE,
+      L"ElementWiseQuantizeLinear_F32_S8_WithComputedTiledScale");
 
   compiled_quantize_op->Execute(
       {dml::utils::ResourceFromStorageView(input),
@@ -348,10 +337,9 @@ void Quantize::quantize(const StorageView& input,
 
   DML_OPERATOR_DESC dml_recip_op_desc = {DML_OPERATOR_ELEMENT_WISE_RECIP,
                                          &recip_op_def};
-  dml::Operator* compiled_recip_op =
-      dml::DMLOperatorCache::instance().GetOrCreateCompiledOperator(
-          dml_dev, &dml_recip_op_desc, DML_EXECUTION_FLAG_NONE,
-          L"Quantize_FinalReciprocalScale");
+  dml::Operator* compiled_recip_op = dml::GetOrCreateCompiledOperatorApi(
+      &dml_recip_op_desc, DML_EXECUTION_FLAG_NONE,
+      L"Quantize_FinalReciprocalScale");
 
   compiled_recip_op->Execute({dml::utils::ResourceFromStorageView(scale)},
                              {dml::utils::ResourceFromStorageView(scale)});

@@ -207,16 +207,16 @@ bool has_directml_device() {
     g_device = std::make_unique<Device>(
         selected_adapter.Get(),  // The chosen hardware adapter
         featureLevel, dmlFeatureLevel,
-        false,                           // debugLayersEnabled
-        D3D12_COMMAND_LIST_TYPE_DIRECT,  // commandListType
-        1,                               // dispatchRepeat
-        true,                            // uavBarrierAfterDispatch
-        false,                           // aliasingBarrierAfterDispatch
-        false,                           // clearShaderCaches
-        false,                           // disableGpuTimeout
-        false,                           // enableDred
-        false,                           // disableBackgroundProcessing
-        false,                           // setStablePowerState
+        false,                            // debugLayersEnabled
+        D3D12_COMMAND_LIST_TYPE_COMPUTE,  // commandListType
+        1,                                // dispatchRepeat
+        true,                             // uavBarrierAfterDispatch
+        false,                            // aliasingBarrierAfterDispatch
+        false,                            // clearShaderCaches
+        false,                            // disableGpuTimeout
+        false,                            // enableDred
+        false,                            // disableBackgroundProcessing
+        false,                            // setStablePowerState
         false,  // preferCustomHeaps (false means use default behavior which
                 // might use custom if available and preferred by device.h
                 // logic)

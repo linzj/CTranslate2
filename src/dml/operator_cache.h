@@ -14,6 +14,9 @@ class Device;
 
 class DMLOperatorCache {
  public:
+  explicit DMLOperatorCache(Device*);
+  ~DMLOperatorCache();
+
   // Returns the singleton instance of the cache.
   static DMLOperatorCache& instance();
 
@@ -22,8 +25,7 @@ class DMLOperatorCache {
   // for operator creation and compilation. op_desc: The description of the
   // operator to get or create. flags: Execution flags for compiling the
   // operator. Returns a ComPtr to the compiled DML operator.
-  Operator* GetOrCreateCompiledOperator(Device* device,
-                                        const DML_OPERATOR_DESC* op_desc,
+  Operator* GetOrCreateCompiledOperator(const DML_OPERATOR_DESC* op_desc,
                                         DML_EXECUTION_FLAGS flags,
                                         PCWSTR name = nullptr);
 
@@ -32,10 +34,6 @@ class DMLOperatorCache {
   void Clear();
 
  private:
-  // Private constructor and destructor for singleton pattern.
-  DMLOperatorCache() = default;
-  ~DMLOperatorCache() = default;
-
   // Delete copy constructor and assignment operator.
   DMLOperatorCache(const DMLOperatorCache&) = delete;
   DMLOperatorCache& operator=(const DMLOperatorCache&) = delete;
@@ -55,7 +53,8 @@ class DMLOperatorCache {
                                  const DML_BUFFER_TENSOR_DESC* buffer_desc);
 
   std::unordered_map<std::string, std::unique_ptr<Operator>> _cache;
-  std::mutex _mutex;  // Mutex to protect cache access.
+  std::mutex _mutex;      // Mutex to protect cache access.
+  class Device* _device;  // The DML device used for operator creation.
 };
 
 // Global helper function to easily get or create a compiled operator using the
