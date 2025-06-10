@@ -10,6 +10,7 @@ class Device;
 class Operator {
  public:
   explicit Operator(Device* device,
+                    DML_OPERATOR_TYPE type,
                     ComPtr<IDMLCompiledOperator>&& compiled_operator);
   ~Operator();
 
@@ -19,10 +20,13 @@ class Operator {
   void Execute(const std::vector<ID3D12Resource*>& input_resources,
                const std::vector<ID3D12Resource*>& output_resources);
 
+  DML_OPERATOR_TYPE GetType() const { return m_type; }
+
  private:
   ComPtr<IDMLCompiledOperator> m_compiledOperator;
   ComPtr<ID3D12Resource> m_persistentResource;
   std::optional<DML_BUFFER_BINDING> m_persistentResourceBinding;
+  DML_OPERATOR_TYPE m_type;
 };
 }  // namespace dml
 }  // namespace ctranslate2

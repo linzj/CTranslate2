@@ -819,8 +819,8 @@ Operator* DMLOperatorCache::GetOrCreateCompiledOperator(
       dml_operator.Get(), flags, IID_PPV_ARGS(&compiled_operator)));
   if (name)
     compiled_operator->SetName(name);
-  std::unique_ptr<Operator> operator_obj =
-      std::make_unique<Operator>(_device, std::move(compiled_operator));
+  std::unique_ptr<Operator> operator_obj(
+      new Operator(_device, op_desc->Type, std::move(compiled_operator)));
 
   if (kCacheEnabled) {
     // Re-lock to insert into the cache
