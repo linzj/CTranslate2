@@ -221,6 +221,7 @@ class Device {
  private:
   void EnsureDxcInterfaces();
   void SetDescriptorHeap(ID3D12DescriptorHeap* descriptorHeap);
+  void ExecuteCommandListInternal();
 
  private:
   std::shared_ptr<D3d12Module> m_d3dModule;
@@ -240,6 +241,7 @@ class Device {
   D3D12_COMMAND_LIST_TYPE m_commandListType = D3D12_COMMAND_LIST_TYPE_COMPUTE;
   Microsoft::WRL::ComPtr<ID3D12CommandAllocator> m_commandAllocator;
   Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> m_commandList;
+
   std::unordered_set<Microsoft::WRL::ComPtr<IGraphicsUnknown>,
                      ComPtrHasher<IGraphicsUnknown>>
       m_temporaryResources;
@@ -252,6 +254,7 @@ class Device {
   std::unique_ptr<DMLOperatorCache> m_operatorCache;
 
   DWORD m_callbackCookie = 0;
+  int m_recordCommands = 0;
   bool m_restoreBackgroundProcessing = false;
   bool m_restoreStablePowerState = false;
   bool m_useCustomHeaps = false;

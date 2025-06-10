@@ -1,5 +1,4 @@
 #include "dxdevice.h"
-#include <spdlog/spdlog.h>
 #include "bucketized_buffer_allocator.h"
 #include "command_queue.h"
 #include "common.h"
@@ -10,11 +9,16 @@
 #include <assert.h>
 #include <dxgi1_6.h>
 
+#include <spdlog/spdlog.h>
+
 #if defined(max)
 #undef max
 #endif
 
 using Microsoft::WRL::ComPtr;
+
+constexpr const int kDescriptorCount = 1024;
+constexpr const int kMaxRecordCommands = 128;
 
 static void __stdcall DebugMessageCallback(D3D12_MESSAGE_CATEGORY cat,
                                            D3D12_MESSAGE_SEVERITY sev,
@@ -167,7 +171,8 @@ Device::Device(IAdapter* adapter,
   THROW_IF_FAILED(m_d3d->CheckFeatureSupport(
       D3D12_FEATURE_FEATURE_LEVELS, &featureLevels, sizeof(featureLevels)));
 
-  m_descriptorPool = std::make_unique<DescriptorPool>(m_d3d.Get(), 256);
+  m_descriptorPool =
+      std::make_unique<DescriptorPool>(m_d3d.Get(), kDescriptorCount);
   m_allocator = std::make_unique<BucketizedBufferAllocator>(this);
   m_operatorCache = std::make_unique<DMLOperatorCache>(this);
 #if 0
@@ -621,6 +626,7 @@ Microsoft::WRL::ComPtr<ID3D12Resource> Device::Upload(uint64_t totalSize,
       m_commandList->ResourceBarrier(_countof(barriers), barriers);
 
       m_temporaryResources.emplace(std::move(uploadBuffer));
+      ExecuteCommandList();
     }
   }
 
@@ -690,24 +696,28 @@ void Device::Download(Microsoft::WRL::ComPtr<ID3D12Resource> buffer,
   resourceToMap->Unmap(0, nullptr);
 }
 
-void Device::ExecuteCommandList() {
+void Device::ExecuteCommandListInternal() {
   THROW_IF_FAILED(m_commandList->Close());
 
   ID3D12CommandList* commandLists[] = {m_commandList.Get()};
   m_queue->ExecuteCommandLists(_countof(commandLists), commandLists);
+  m_currentDescriptorHeap = nullptr;
+  m_recordCommands = 0;
+}
+
+void Device::ExecuteCommandList() {
+  ExecuteCommandListInternal();
   THROW_IF_FAILED(m_commandList->Reset(m_commandAllocator.Get(), nullptr));
   m_needResetAllocator = true;
 }
 
 void Device::ExecuteCommandListAndWait() {
-  THROW_IF_FAILED(m_commandList->Close());
-
-  ID3D12CommandList* commandLists[] = {m_commandList.Get()};
-  m_queue->ExecuteCommandLists(_countof(commandLists), commandLists);
+  ExecuteCommandListInternal();
   WaitForGpuWorkToComplete();
   THROW_IF_FAILED(m_d3d->GetDeviceRemovedReason());
   THROW_IF_FAILED(m_commandAllocator->Reset());
   THROW_IF_FAILED(m_commandList->Reset(m_commandAllocator.Get(), nullptr));
+  m_needResetAllocator = false;
 
   m_temporaryResources.clear();
 }
@@ -984,7 +994,9 @@ void Device::InitializeOperator(
     auto uav = CD3DX12_RESOURCE_BARRIER::UAV(nullptr);
     m_commandList->ResourceBarrier(1, &uav);
   }
-  ExecuteCommandList();
+  if (++m_recordCommands > kMaxRecordCommands) {
+    ExecuteCommandList();
+  }
 }
 
 void Device::ExecuteOperator(IDMLCompiledOperator* op,
@@ -1035,9 +1047,11 @@ void Device::ExecuteOperator(IDMLCompiledOperator* op,
   SetDescriptorHeap(descriptorRange.heap);
   m_commandRecorder->RecordDispatch(m_commandList.Get(), op,
                                     bindingTable.Get());
-
-  // Barrier all outputs.
-  ExecuteCommandList();
+  auto uav = CD3DX12_RESOURCE_BARRIER::UAV(nullptr);
+  m_commandList->ResourceBarrier(1, &uav);
+  if (++m_recordCommands > kMaxRecordCommands) {
+    ExecuteCommandList();
+  }
 }
 
 void Device::ExecuteOperator(IDMLCompiledOperator* op,
@@ -1077,10 +1091,10 @@ void Device::SetDescriptorHeap(ID3D12DescriptorHeap* descriptorHeap) {
   if (descriptorHeap != nullptr) {
     if (descriptorHeap != m_currentDescriptorHeap) {
       m_currentDescriptorHeap = descriptorHeap;
+      ID3D12DescriptorHeap* descriptorHeaps[] = {descriptorHeap};
+      m_commandList->SetDescriptorHeaps(ARRAYSIZE(descriptorHeaps),
+                                        descriptorHeaps);
     }
-    ID3D12DescriptorHeap* descriptorHeaps[] = {descriptorHeap};
-    m_commandList->SetDescriptorHeaps(ARRAYSIZE(descriptorHeaps),
-                                      descriptorHeaps);
   }
 }
 
