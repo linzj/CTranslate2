@@ -1032,8 +1032,6 @@ void Device::ExecuteOperator(IDMLCompiledOperator* op,
                                     bindingTable.Get());
 
   // Barrier all outputs.
-  auto uav = CD3DX12_RESOURCE_BARRIER::UAV(nullptr);
-  m_commandList->ResourceBarrier(1, &uav);
   ExecuteCommandList();
 }
 

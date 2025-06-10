@@ -141,6 +141,9 @@ namespace ctranslate2 {
       (void)device_index;
       return false;
 #endif
+    case Device::DirectML:
+      (void)device_index;
+      return false;
     case Device::CPU:
       return cpu::has_gemm_backend(ComputeType::INT8);
     default:

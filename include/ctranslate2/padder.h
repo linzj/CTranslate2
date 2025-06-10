@@ -11,7 +11,8 @@ namespace ctranslate2 {
   public:
     static inline bool allow_padding_removal(const Device device,
                                              const ComputeType compute_type) {
-      return device == Device::CPU || compute_type != ComputeType::FLOAT16;
+      return (device == Device::CPU || compute_type != ComputeType::FLOAT16) &&
+             (device != Device::DirectML);
     }
 
     // If max_time is negative, it is set to the maximum length.
