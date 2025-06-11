@@ -495,42 +495,21 @@ void primitives<Device::DirectML>::add(T a, const T* x, T* y, dim_t size) {
   auto dml_device = dml::get_dml_device();
   auto dxdevice = dml::get_device();
 
-  // DML_ELEMENT_WISE_ADD requires tensors of the same size, so we tile the
-  // scalar first.
   StorageView a_scalar_storage(a, Device::DirectML);
-  dml::utils::DmlTensorDescBundle a_scalar_bundle(a_scalar_storage);
-
-  const std::vector<UINT> tiled_dims = {1, 1, 1, static_cast<UINT>(size)};
-  StorageView a_tiled_storage({1, 1, 1, size}, type_to_dtype<T>::value,
-                              Device::DirectML);
-  dml::utils::DmlTensorDescBundle a_tiled_bundle(a_tiled_storage);
-
-  // Create and execute the Tile operator to broadcast the scalar.
-  DML_TILE_OPERATOR_DESC tile_desc = {};
-  tile_desc.InputTensor = &a_scalar_bundle.get_tensor_desc();
-  tile_desc.OutputTensor = &a_tiled_bundle.get_tensor_desc();
-  const UINT repeats[] = {1, 1, 1, static_cast<UINT>(size)};
-  tile_desc.RepeatsCount = ARRAYSIZE(repeats);
-  tile_desc.Repeats = repeats;
-
-  DML_OPERATOR_DESC tile_op_desc = {};
-  tile_op_desc.Type = DML_OPERATOR_TILE;
-  tile_op_desc.Desc = &tile_desc;
-
-  dml::Operator* tile_op = dml::GetOrCreateCompiledOperatorApi(
-      &tile_op_desc, DML_EXECUTION_FLAG_NONE);
-
-  tile_op->Execute({dml::utils::ResourceFromStorageView(a_scalar_storage)},
-                   {dml::utils::ResourceFromStorageView(a_tiled_storage)});
+  StorageView input;
+  input.view(const_cast<T*>(x), Shape{1, 1, 1, size});
+  dml::utils::DmlTensorDescBundle a_scalar_bundle(
+      dml::utils::DmlTensorDescBundle::broadCastForStorageView(
+          input, a_scalar_storage));
 
   // Create and execute the Add operator.
-  dml::utils::DmlTensorDescBundle b_bundle(dml::get_dml_data_type<T>(),
-                                           tiled_dims, nullptr);
-  dml::utils::DmlTensorDescBundle output_bundle(dml::get_dml_data_type<T>(),
-                                                tiled_dims, nullptr);
+  dml::utils::DmlTensorDescBundle b_bundle(input);
+  dml::utils::DmlTensorDescBundle output_bundle(
+      dml::get_dml_data_type<T>(), {1, 1, 1, static_cast<UINT>(size)}, nullptr);
 
   DML_ELEMENT_WISE_ADD_OPERATOR_DESC add_desc = {};
-  add_desc.ATensor = &a_tiled_bundle.get_tensor_desc();  // Use the tiled tensor
+  add_desc.ATensor =
+      &a_scalar_bundle.get_tensor_desc();  // Use the tiled tensor
   add_desc.BTensor = &b_bundle.get_tensor_desc();
   add_desc.OutputTensor = &output_bundle.get_tensor_desc();
 
@@ -541,7 +520,7 @@ void primitives<Device::DirectML>::add(T a, const T* x, T* y, dim_t size) {
   dml::Operator* add_op = dml::GetOrCreateCompiledOperatorApi(
       &add_op_desc, DML_EXECUTION_FLAG_NONE);
 
-  add_op->Execute({dml::utils::ResourceFromStorageView(a_tiled_storage),
+  add_op->Execute({dml::utils::ResourceFromStorageView(a_scalar_storage),
                    dml::utils::ResourceFromRawBuffer(x)},
                   {dml::utils::ResourceFromRawBuffer(y)});
 }
@@ -634,37 +613,19 @@ void primitives<Device::DirectML>::mul(T a, const T* x, T* y, dim_t size) {
 
   // Tile the scalar to match the other tensor's dimensions.
   StorageView a_scalar_storage(a, Device::DirectML);
-  dml::utils::DmlTensorDescBundle a_scalar_bundle(a_scalar_storage);
-
-  const std::vector<UINT> tiled_dims = {1, 1, 1, static_cast<UINT>(size)};
-  StorageView a_tiled_storage({1, 1, 1, size}, type_to_dtype<T>::value,
-                              Device::DirectML);
-  dml::utils::DmlTensorDescBundle a_tiled_bundle(a_tiled_storage);
-
-  DML_TILE_OPERATOR_DESC tile_desc = {};
-  tile_desc.InputTensor = &a_scalar_bundle.get_tensor_desc();
-  tile_desc.OutputTensor = &a_tiled_bundle.get_tensor_desc();
-  const UINT repeats[] = {1, 1, 1, static_cast<UINT>(size)};
-  tile_desc.RepeatsCount = ARRAYSIZE(repeats);
-  tile_desc.Repeats = repeats;
-
-  DML_OPERATOR_DESC tile_op_desc = {};
-  tile_op_desc.Type = DML_OPERATOR_TILE;
-  tile_op_desc.Desc = &tile_desc;
-
-  dml::Operator* tile_op = dml::GetOrCreateCompiledOperatorApi(
-      &tile_op_desc, DML_EXECUTION_FLAG_NONE);
-  tile_op->Execute({dml::utils::ResourceFromStorageView(a_scalar_storage)},
-                   {dml::utils::ResourceFromStorageView(a_tiled_storage)});
+  StorageView input;
+  input.view(const_cast<T*>(x), Shape{1, 1, 1, size});
+  dml::utils::DmlTensorDescBundle a_scalar_bundle(
+      dml::utils::DmlTensorDescBundle::broadCastForStorageView(
+          input, a_scalar_storage));
 
   // Perform element-wise multiplication.
-  dml::utils::DmlTensorDescBundle b_bundle(dml::get_dml_data_type<T>(),
-                                           tiled_dims, nullptr);
-  dml::utils::DmlTensorDescBundle output_bundle(dml::get_dml_data_type<T>(),
-                                                tiled_dims, nullptr);
+  dml::utils::DmlTensorDescBundle b_bundle(input);
+  dml::utils::DmlTensorDescBundle output_bundle(
+      dml::get_dml_data_type<T>(), {1, 1, 1, static_cast<UINT>(size)}, nullptr);
 
   DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC mul_desc = {};
-  mul_desc.ATensor = &a_tiled_bundle.get_tensor_desc();
+  mul_desc.ATensor = &a_scalar_bundle.get_tensor_desc();
   mul_desc.BTensor = &b_bundle.get_tensor_desc();
   mul_desc.OutputTensor = &output_bundle.get_tensor_desc();
 
@@ -674,7 +635,7 @@ void primitives<Device::DirectML>::mul(T a, const T* x, T* y, dim_t size) {
 
   dml::Operator* mul_op = dml::GetOrCreateCompiledOperatorApi(
       &mul_op_desc, DML_EXECUTION_FLAG_NONE);
-  mul_op->Execute({dml::utils::ResourceFromStorageView(a_tiled_storage),
+  mul_op->Execute({dml::utils::ResourceFromStorageView(a_scalar_storage),
                    dml::utils::ResourceFromRawBuffer(x)},
                   {dml::utils::ResourceFromRawBuffer(y)});
 }
@@ -1277,39 +1238,20 @@ void primitives<Device::DirectML>::max(T a, const T* x, T* y, dim_t size) {
   auto dml_device = dml::get_dml_device();
   auto dxdevice = dml::get_device();
 
-  // Tile the scalar to match the other tensor's dimensions.
   StorageView a_scalar_storage(a, Device::DirectML);
-  dml::utils::DmlTensorDescBundle a_scalar_bundle(a_scalar_storage);
-
-  const std::vector<UINT> tiled_dims = {1, 1, 1, static_cast<UINT>(size)};
-  StorageView a_tiled_storage({1, 1, 1, size}, type_to_dtype<T>::value,
-                              Device::DirectML);
-  dml::utils::DmlTensorDescBundle a_tiled_bundle(a_tiled_storage);
-
-  DML_TILE_OPERATOR_DESC tile_desc = {};
-  tile_desc.InputTensor = &a_scalar_bundle.get_tensor_desc();
-  tile_desc.OutputTensor = &a_tiled_bundle.get_tensor_desc();
-  const UINT repeats[] = {1, 1, 1, static_cast<UINT>(size)};
-  tile_desc.RepeatsCount = ARRAYSIZE(repeats);
-  tile_desc.Repeats = repeats;
-
-  DML_OPERATOR_DESC tile_op_desc = {};
-  tile_op_desc.Type = DML_OPERATOR_TILE;
-  tile_op_desc.Desc = &tile_desc;
-
-  dml::Operator* tile_op = dml::GetOrCreateCompiledOperatorApi(
-      &tile_op_desc, DML_EXECUTION_FLAG_NONE);
-  tile_op->Execute({dml::utils::ResourceFromStorageView(a_scalar_storage)},
-                   {dml::utils::ResourceFromStorageView(a_tiled_storage)});
+  StorageView input;
+  input.view(const_cast<T*>(x), Shape{1, 1, 1, size});
+  dml::utils::DmlTensorDescBundle a_scalar_bundle(
+      dml::utils::DmlTensorDescBundle::broadCastForStorageView(
+          input, a_scalar_storage));
 
   // Perform element-wise max.
-  dml::utils::DmlTensorDescBundle b_bundle(dml::get_dml_data_type<T>(),
-                                           tiled_dims, nullptr);
-  dml::utils::DmlTensorDescBundle output_bundle(dml::get_dml_data_type<T>(),
-                                                tiled_dims, nullptr);
+  dml::utils::DmlTensorDescBundle b_bundle(input);
+  dml::utils::DmlTensorDescBundle output_bundle(
+      dml::get_dml_data_type<T>(), {1, 1, 1, static_cast<UINT>(size)}, nullptr);
 
   DML_ELEMENT_WISE_MAX_OPERATOR_DESC max_desc = {};
-  max_desc.ATensor = &a_tiled_bundle.get_tensor_desc();
+  max_desc.ATensor = &a_scalar_bundle.get_tensor_desc();
   max_desc.BTensor = &b_bundle.get_tensor_desc();
   max_desc.OutputTensor = &output_bundle.get_tensor_desc();
 
@@ -1319,7 +1261,7 @@ void primitives<Device::DirectML>::max(T a, const T* x, T* y, dim_t size) {
 
   dml::Operator* max_op = dml::GetOrCreateCompiledOperatorApi(
       &max_op_desc, DML_EXECUTION_FLAG_NONE);
-  max_op->Execute({dml::utils::ResourceFromStorageView(a_tiled_storage),
+  max_op->Execute({dml::utils::ResourceFromStorageView(a_scalar_storage),
                    dml::utils::ResourceFromRawBuffer(x)},
                   {dml::utils::ResourceFromRawBuffer(y)});
 }
@@ -1370,39 +1312,20 @@ void primitives<Device::DirectML>::min(T a, const T* x, T* y, dim_t size) {
   auto dml_device = dml::get_dml_device();
   auto dxdevice = dml::get_device();
 
-  // Tile the scalar to match the other tensor's dimensions.
   StorageView a_scalar_storage(a, Device::DirectML);
-  dml::utils::DmlTensorDescBundle a_scalar_bundle(a_scalar_storage);
-
-  const std::vector<UINT> tiled_dims = {1, 1, 1, static_cast<UINT>(size)};
-  StorageView a_tiled_storage({1, 1, 1, size}, type_to_dtype<T>::value,
-                              Device::DirectML);
-  dml::utils::DmlTensorDescBundle a_tiled_bundle(a_tiled_storage);
-
-  DML_TILE_OPERATOR_DESC tile_desc = {};
-  tile_desc.InputTensor = &a_scalar_bundle.get_tensor_desc();
-  tile_desc.OutputTensor = &a_tiled_bundle.get_tensor_desc();
-  const UINT repeats[] = {1, 1, 1, static_cast<UINT>(size)};
-  tile_desc.RepeatsCount = ARRAYSIZE(repeats);
-  tile_desc.Repeats = repeats;
-
-  DML_OPERATOR_DESC tile_op_desc = {};
-  tile_op_desc.Type = DML_OPERATOR_TILE;
-  tile_op_desc.Desc = &tile_desc;
-
-  dml::Operator* tile_op = dml::GetOrCreateCompiledOperatorApi(
-      &tile_op_desc, DML_EXECUTION_FLAG_NONE);
-  tile_op->Execute({dml::utils::ResourceFromStorageView(a_scalar_storage)},
-                   {dml::utils::ResourceFromStorageView(a_tiled_storage)});
+  StorageView input;
+  input.view(const_cast<T*>(x), Shape{1, 1, 1, size});
+  dml::utils::DmlTensorDescBundle a_scalar_bundle(
+      dml::utils::DmlTensorDescBundle::broadCastForStorageView(
+          input, a_scalar_storage));
 
   // Perform element-wise min.
-  dml::utils::DmlTensorDescBundle b_bundle(dml::get_dml_data_type<T>(),
-                                           tiled_dims, nullptr);
-  dml::utils::DmlTensorDescBundle output_bundle(dml::get_dml_data_type<T>(),
-                                                tiled_dims, nullptr);
+  dml::utils::DmlTensorDescBundle b_bundle(input);
+  dml::utils::DmlTensorDescBundle output_bundle(
+      dml::get_dml_data_type<T>(), {1, 1, 1, static_cast<UINT>(size)}, nullptr);
 
   DML_ELEMENT_WISE_MIN_OPERATOR_DESC min_desc = {};
-  min_desc.ATensor = &a_tiled_bundle.get_tensor_desc();
+  min_desc.ATensor = &a_scalar_bundle.get_tensor_desc();
   min_desc.BTensor = &b_bundle.get_tensor_desc();
   min_desc.OutputTensor = &output_bundle.get_tensor_desc();
 
@@ -1412,7 +1335,7 @@ void primitives<Device::DirectML>::min(T a, const T* x, T* y, dim_t size) {
 
   dml::Operator* min_op = dml::GetOrCreateCompiledOperatorApi(
       &min_op_desc, DML_EXECUTION_FLAG_NONE);
-  min_op->Execute({dml::utils::ResourceFromStorageView(a_tiled_storage),
+  min_op->Execute({dml::utils::ResourceFromStorageView(a_scalar_storage),
                    dml::utils::ResourceFromRawBuffer(x)},
                   {dml::utils::ResourceFromRawBuffer(y)});
 }
