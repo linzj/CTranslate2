@@ -92,142 +92,43 @@ void SoftMax::compute(const StorageView& input,
             seq_indices_buffer_binding_bundle});
     compiled_fill_seq_op->Execute({}, fill_seq_output_bundle.get_descs());
 
-    // batch_size of lengths for LESS_THAN.
-    StorageView tiled_sequence_indices_gpu(DataType::INT32, output.device());
-    // Target shape [batch_size, depth]
-    tiled_sequence_indices_gpu.resize(Shape{batch_size, depth});
+    // 1.b Prepare broadcast-enabled tensor descriptors for the LESS_THAN
+    // operation. Instead of physically tiling the `sequence_indices` and
+    // `lengths` tensors, we create DML tensor descriptors that instruct DML to
+    // broadcast them during the element-wise comparison. This is more efficient
+    // as it avoids allocating and writing to large intermediate tensors.
 
-    // dml_dims_vec is {static_cast<UINT>(batch_size), static_cast<UINT>(depth)}
-    dml::utils::DmlTensorDescBundle tiled_sequence_indices_desc_bundle(
-        DML_TENSOR_DATA_TYPE_INT32,  // Data type of the tiled tensor
-        dml_dims_vec,                // Target dimensions [batch_size, depth]
-        nullptr,                     // Strides (can be null for contiguous)
-        tiled_sequence_indices_gpu.size() * sizeof(int32_t));  // Total size
-    const DML_TENSOR_DESC& dml_tiled_sequence_indices_desc_ref =
-        tiled_sequence_indices_desc_bundle.get_tensor_desc();
+    // For `sequence_indices_gpu` (physical shape [1, depth]):
+    // Broadcast to [batch_size, depth] by setting stride for the batch
+    // dimension to 0.
+    std::vector<UINT> bcast_iota_dims = {static_cast<UINT>(batch_size),
+                                         static_cast<UINT>(depth)};
+    std::vector<UINT> bcast_iota_strides = {
+        0, 1};  // Stride 0 for batch, 1 for depth
+    dml::utils::DmlTensorDescBundle bcast_sequence_indices_desc_bundle(
+        DML_TENSOR_DATA_TYPE_INT32, bcast_iota_dims, &bcast_iota_strides,
+        sequence_indices_gpu.size() * sizeof(int32_t));
+    const DML_TENSOR_DESC& dml_bcast_sequence_indices_desc_ref =
+        bcast_sequence_indices_desc_bundle.get_tensor_desc();
 
-    DML_TILE_OPERATOR_DESC tile_op_desc_iota = {};
-    // Input is [1, depth] (output of FILL_SEQUENCE)
-    tile_op_desc_iota.InputTensor = &dml_sequence_indices_desc_ref;
-    // Output is [batch_size, depth]
-    tile_op_desc_iota.OutputTensor = &dml_tiled_sequence_indices_desc_ref;
-    // Repeat batch_size times along dim 0, 1 time along dim 1
-    UINT repeats_array_iota[] = {static_cast<UINT>(batch_size), 1};
-    tile_op_desc_iota.RepeatsCount = ARRAYSIZE(repeats_array_iota);
-    tile_op_desc_iota.Repeats = repeats_array_iota;
-    DML_OPERATOR_DESC tile_op_meta_desc_iota = {DML_OPERATOR_TILE,
-                                                &tile_op_desc_iota};
-    auto compiled_tile_op_iota =
-        dml::GetOrCreateCompiledOperatorApi(&tile_op_meta_desc_iota);
+    // For `lengths` tensor (physical shape [batch_size]):
+    // Treat as [batch_size, 1] and broadcast to [batch_size, depth]
+    // by setting the stride for the depth dimension to 0.
+    std::vector<UINT> bcast_lengths_dims = {static_cast<UINT>(batch_size),
+                                            static_cast<UINT>(depth)};
+    std::vector<UINT> bcast_lengths_strides = {
+        1, 0};  // Stride 1 for batch, 0 for depth
+    dml::utils::DmlTensorDescBundle bcast_lengths_desc_bundle(
+        DML_TENSOR_DATA_TYPE_INT32, bcast_lengths_dims, &bcast_lengths_strides,
+        lengths->size() * sizeof(int32_t));
+    const DML_TENSOR_DESC& dml_bcast_lengths_desc_ref =
+        bcast_lengths_desc_bundle.get_tensor_desc();
 
-    dml::utils::DmlBufferBindingBundle
-        tiled_seq_indices_buffer_binding_for_tile_output_bundle(
-            dml::utils::ResourceFromStorageView(tiled_sequence_indices_gpu), 0,
-            tiled_sequence_indices_desc_bundle.get_buffer_desc()
-                .TotalTensorSizeInBytes);
-    const DML_BINDING_DESC tiled_seq_indices_binding_tile_output =
-        tiled_seq_indices_buffer_binding_for_tile_output_bundle.get_desc();
-
-    dml::utils::DmlBindingArrayBundle tile_op_iota_input_bundle(
-        std::vector<dml::utils::DmlBufferBindingBundle>{
-            seq_indices_buffer_binding_bundle});
-    dml::utils::DmlBindingArrayBundle tile_op_iota_output_bundle(
-        std::vector<dml::utils::DmlBufferBindingBundle>{
-            tiled_seq_indices_buffer_binding_for_tile_output_bundle});
-    compiled_tile_op_iota->Execute(
-        tile_op_iota_input_bundle.get_descs(),  // Renamed
-        tile_op_iota_output_bundle.get_descs());
-
-    // 1.c Prepare the original `lengths` tensor for tiling by describing it as
-    // 2D [batch_size, 1] The physical buffer is still 1D, but DML needs a 2D
-    // descriptor for the TILE operator's input.
-    std::vector<UINT> lengths_input_tile_dims = {static_cast<UINT>(batch_size),
-                                                 1};
-    // Stride 1 for batch, 0 for the new dimension of size 1
-    std::vector<UINT> lengths_input_tile_strides = {1, 0};
-
-    // Manually create the DML_BUFFER_TENSOR_DESC for the lengths tensor to make
-    // it appear as [batch_size, 1]
-    DML_BUFFER_TENSOR_DESC lengths_buffer_tensor_desc_for_tile_input = {};
-    // lengths are int32_t
-    lengths_buffer_tensor_desc_for_tile_input.DataType =
-        DML_TENSOR_DATA_TYPE_INT32;
-    lengths_buffer_tensor_desc_for_tile_input.Flags = DML_TENSOR_FLAG_NONE;
-    lengths_buffer_tensor_desc_for_tile_input.DimensionCount =
-        static_cast<UINT>(lengths_input_tile_dims.size());
-    lengths_buffer_tensor_desc_for_tile_input.Sizes =
-        lengths_input_tile_dims.data();
-    lengths_buffer_tensor_desc_for_tile_input.Strides =
-        lengths_input_tile_strides.data();
-    // TotalTensorSizeInBytes must refer to the actual physical size of the
-    // `lengths` StorageView buffer.
-    lengths_buffer_tensor_desc_for_tile_input.TotalTensorSizeInBytes =
-        lengths->size() * sizeof(int32_t);
-    lengths_buffer_tensor_desc_for_tile_input.GuaranteedBaseOffsetAlignment = 0;
-
-    // This will be InputTensor for TILE
-    DML_TENSOR_DESC dml_lengths_input_for_tile_desc = {};
-    dml_lengths_input_for_tile_desc.Type = DML_TENSOR_TYPE_BUFFER;
-    dml_lengths_input_for_tile_desc.Desc =
-        &lengths_buffer_tensor_desc_for_tile_input;
-
-    // Binding for the original lengths buffer, using its actual physical size.
-    dml::utils::DmlBufferBindingBundle original_lengths_buffer_binding_bundle(
+    // The binding for the `lengths` tensor is straightforward, pointing to its
+    // resource.
+    dml::utils::DmlBufferBindingBundle lengths_buffer_binding_bundle(
         dml::utils::ResourceFromStorageView(*lengths), 0,
-        lengths_buffer_tensor_desc_for_tile_input.TotalTensorSizeInBytes);
-    const DML_BINDING_DESC dml_binding_for_lengths_tile_input =
-        original_lengths_buffer_binding_bundle.get_desc();
-
-    // 1.d Tile the "lengths-as-2D" tensor ([batch_size, 1]) to [batch_size,
-    // depth]
-    StorageView tiled_lengths_gpu(DataType::INT32, output.device());
-    // Target shape
-    tiled_lengths_gpu.resize(Shape{batch_size, depth});
-
-    // Output tensor descriptor for tiled_lengths_gpu (shape [batch_size,
-    // depth]) dml_dims_vec is {batch_size, depth}
-    dml::utils::DmlTensorDescBundle tiled_lengths_output_desc_bundle(
-        DML_TENSOR_DATA_TYPE_INT32,
-        dml_dims_vec,  // shape [batch_size, depth]
-        nullptr,       // Contiguous strides for the output
-        tiled_lengths_gpu.size() * sizeof(int32_t));
-    const DML_TENSOR_DESC& dml_tiled_lengths_desc_actual_output_ref =
-        tiled_lengths_output_desc_bundle.get_tensor_desc();
-
-    DML_TILE_OPERATOR_DESC tile_op_desc_lengths = {};
-    // Input is 2D: [batch_size, 1]
-    tile_op_desc_lengths.InputTensor = &dml_lengths_input_for_tile_desc;
-    // Output is 2D: [batch_size, depth]
-    tile_op_desc_lengths.OutputTensor =
-        &dml_tiled_lengths_desc_actual_output_ref;
-    // Repeat existing batch dim once, repeat new depth dim `depth` times
-    UINT repeats_array_lengths[] = {1, static_cast<UINT>(depth)};
-    tile_op_desc_lengths.RepeatsCount = ARRAYSIZE(repeats_array_lengths);
-    tile_op_desc_lengths.Repeats = repeats_array_lengths;
-    DML_OPERATOR_DESC tile_op_meta_desc_lengths = {DML_OPERATOR_TILE,
-                                                   &tile_op_desc_lengths};
-    auto compiled_tile_op_lengths =
-        dml::GetOrCreateCompiledOperatorApi(&tile_op_meta_desc_lengths);
-
-    dml::utils::DmlBufferBindingBundle
-        tiled_lengths_buffer_binding_for_tile_output_bundle(
-            dml::utils::ResourceFromStorageView(tiled_lengths_gpu), 0,
-            tiled_lengths_output_desc_bundle.get_buffer_desc()
-                .TotalTensorSizeInBytes);
-    const DML_BINDING_DESC tiled_lengths_binding_tile_output =
-        tiled_lengths_buffer_binding_for_tile_output_bundle.get_desc();
-
-    // Input to this TILE op uses the original_lengths_buffer_binding (referring
-    // to the actual 1D lengths StorageView buffer)
-    dml::utils::DmlBindingArrayBundle tile_op_lengths_input_bundle(
-        std::vector<dml::utils::DmlBufferBindingBundle>{
-            original_lengths_buffer_binding_bundle});
-    dml::utils::DmlBindingArrayBundle tile_op_lengths_output_bundle(
-        std::vector<dml::utils::DmlBufferBindingBundle>{
-            tiled_lengths_buffer_binding_for_tile_output_bundle});
-    compiled_tile_op_lengths->Execute(
-        tile_op_lengths_input_bundle.get_descs(),
-        tile_op_lengths_output_bundle.get_descs());
+        lengths->size() * sizeof(int32_t));
 
     // 1.e Create Condition Tensor using
     // DML_OPERATOR_ELEMENT_WISE_LOGICAL_LESS_THAN
@@ -240,10 +141,10 @@ void SoftMax::compute(const StorageView& input,
         condition_desc_bundle.get_tensor_desc();
 
     DML_ELEMENT_WISE_LOGICAL_LESS_THAN_OPERATOR_DESC less_than_op_desc = {};
-    // Tiled iota [batch_size, depth]
-    less_than_op_desc.ATensor = &dml_tiled_sequence_indices_desc_ref;
-    // Tiled lengths [batch_size, depth]
-    less_than_op_desc.BTensor = &dml_tiled_lengths_desc_actual_output_ref;
+    // Broadcasted iota [batch_size, depth]
+    less_than_op_desc.ATensor = &dml_bcast_sequence_indices_desc_ref;
+    // Broadcasted lengths [batch_size, depth]
+    less_than_op_desc.BTensor = &dml_bcast_lengths_desc_ref;
     // Output [batch_size, depth]
     less_than_op_desc.OutputTensor = &dml_condition_desc_ref;
     DML_OPERATOR_DESC less_than_op_meta_desc = {
@@ -258,11 +159,11 @@ void SoftMax::compute(const StorageView& input,
     const DML_BINDING_DESC condition_binding_cmp_output =
         condition_buffer_binding_for_cmp_output_bundle.get_desc();
 
-    // Inputs to LESS_THAN are tiled_sequence_indices and tiled_lengths
+    // Inputs to LESS_THAN are the original (but broadcastable) sequence_indices
+    // and lengths tensors.
     dml::utils::DmlBindingArrayBundle less_than_inputs_bundle(
         std::vector<dml::utils::DmlBufferBindingBundle>{
-            tiled_seq_indices_buffer_binding_for_tile_output_bundle,
-            tiled_lengths_buffer_binding_for_tile_output_bundle});
+            seq_indices_buffer_binding_bundle, lengths_buffer_binding_bundle});
     dml::utils::DmlBindingArrayBundle less_than_output_bundle(
         std::vector<dml::utils::DmlBufferBindingBundle>{
             condition_buffer_binding_for_cmp_output_bundle});

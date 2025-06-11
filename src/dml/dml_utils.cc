@@ -377,6 +377,7 @@ void DmlTensorDescBundle::init_from_details(DML_TENSOR_DATA_TYPE dml_dtype,
   tensor_desc_internal.Type = DML_TENSOR_TYPE_BUFFER;
   tensor_desc_internal.Desc = &buffer_desc_internal;
 }
+
 DmlTensorDescBundle::DmlTensorDescBundle(
     DML_TENSOR_DATA_TYPE dataType,
     const std::vector<UINT>& dimensions,
