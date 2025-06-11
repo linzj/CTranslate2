@@ -117,6 +117,25 @@ class DmlTensorDescBundle {
                       const std::vector<UINT>* strides,
                       UINT64 total_tensor_size_in_bytes = 0);
 
+  // @brief Constructor for creating a DmlTensorDescBundle with advanced layout
+  // control, including broadcasting, dimension coercion, and alignment.
+  // @param dataType The DML data type of the tensor.
+  // @param dimensions The target dimensions of the tensor, which can include
+  // broadcasted dimensions.
+  // @param nonBroadcastDimensions The physical dimensions of the source tensor.
+  // Used to calculate strides for broadcasting.
+  // @param coerceAxis If set to a value less than the rank of `dimensions`, the
+  // tensor shape is flattened into a 2D tensor.
+  //        All dimensions up to `coerceAxis` (exclusive) are collapsed into the
+  //        first dimension, and the rest are collapsed into the second. Set to
+  //        >= rank to disable.
+  // @param placement Controls padding with '1's. Positive values add leading
+  // '1's, negative values add trailing '1's.
+  // @param leftAlignedDimensionCount Specifies how many dimensions from the
+  // start of the `dimensions` array are treated as left-aligned. The remaining
+  // are right-aligned. This is crucial for broadcasting non-contiguous tensors.
+  // @param minDimensionCount The minimum rank of the output tensor description.
+  // @param guaranteedBaseOffsetAlignment Memory alignment hint for DML.
   DmlTensorDescBundle(DML_TENSOR_DATA_TYPE dataType,
                       const std::vector<UINT>& dimensions,
                       const std::vector<UINT>& nonBroadcastDimensions,

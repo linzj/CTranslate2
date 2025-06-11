@@ -237,64 +237,30 @@ void Quantize::quantize(const StorageView& input,
        dml::utils::ResourceFromStorageView(scale_if_amax_not_zero_storage)},
       {dml::utils::ResourceFromStorageView(scale)});
 
-  // --- Tile Scale Tensor (using the 'scale' that was just computed) ---
-  // 'scale' now contains the computed scales, with shape e.g. [B, 1, ..., 1]
-  // (rank of input) for an input [B, D1, ..., DN-1].
-  // This 'scale' StorageView is directly suitable for the tile operation.
-  Shape input_shape_ct = input.shape();
+  // --- Quantize Operation using Broadcasted Scale ---
+  // The scale tensor will be broadcast to the input tensor's shape using a
+  // specialized constructor for the tensor descriptor.
+  const Shape& input_shape_ct = input.shape();
 
-  // The 'scale' StorageView itself has the correct buffer and shape for the
-  // tile input. The shape was set by scale.resize(computed_scale_shape_ct)
-  // earlier, which is [input.dim(0), 1, ..., 1] with rank matching input. We
-  // can use 'scale' directly for the DML tensor descriptor and the tile
-  // operation.
+  auto dml_input_dims =
+      dml::utils::to_dml_dims(input_shape_ct, input.size(), true);
+  auto dml_scale_dims =
+      dml::utils::to_dml_dims(scale.shape(), scale.size(), true);
 
-  dml::utils::DmlTensorDescBundle scale_tile_input_desc(scale);
+  dml::utils::DmlTensorDescBundle broadcasted_scale_desc(
+      dml::utils::get_dml_data_type(scale.dtype()),
+      dml_input_dims,  // Desired dimensions after broadcasting
+      dml_scale_dims,  // Original dimensions of the scale tensor
+      static_cast<int32_t>(
+          dml_input_dims.size()),  // coerceAxis >= rank disables it.
+      0,                           // placement
+      input.rank() > 1
+          ? 1
+          : 0,  // leftAlignedDimensionCount. 1 for left-aligned batch dim.
+      0,        // minDimensionCount
+      0         // guaranteedBaseOffsetAlignment
+  );
 
-  std::vector<UINT> repeats_for_tile(
-      scale_tile_input_desc.get_sizes_vec().size());
-  for (size_t i = 0; i < repeats_for_tile.size(); ++i) {
-    // 'scale' shape is [input.dim(0), 1, ..., 1] (rank of input)
-    // 'input_shape_ct' is [input.dim(0), D1, ..., DN-1]
-    // True for i=0, as scale.dim(0) is input.dim(0)
-    if (scale.dim(i) == input_shape_ct[i]) {
-      repeats_for_tile[i] = 1;
-    } else if (scale.dim(i) == 1) {
-      // True for i > 0, where scale.dim(i) is 1
-      repeats_for_tile[i] = static_cast<UINT>(input_shape_ct[i]);
-    } else {
-      // This case should ideally not be hit if scale is shaped as [dim0, 1,
-      // ..., 1] and dim0 matches input_shape_ct[0].
-      THROW_INVALID_ARGUMENT("Scale dimension " + std::to_string(i) + " (" +
-                             std::to_string(scale.dim(i)) +
-                             ") must match input dimension (" +
-                             std::to_string(input_shape_ct[i]) +
-                             ") or be 1 for broadcasting in tile.");
-    }
-  }
-
-  StorageView tiled_scale_storage(input_shape_ct, scale.dtype(),
-                                  Device::DirectML);
-  dml::utils::DmlTensorDescBundle tiled_scale_output_desc(tiled_scale_storage);
-
-  DML_TILE_OPERATOR_DESC tile_op_def = {};
-  tile_op_def.InputTensor = &scale_tile_input_desc.get_tensor_desc();
-  tile_op_def.OutputTensor = &tiled_scale_output_desc.get_tensor_desc();
-  tile_op_def.RepeatsCount = static_cast<UINT>(repeats_for_tile.size());
-  tile_op_def.Repeats = repeats_for_tile.data();
-
-  DML_OPERATOR_DESC dml_tile_op_desc = {DML_OPERATOR_TILE, &tile_op_def};
-  dml::Operator* compiled_tile_op = dml::GetOrCreateCompiledOperatorApi(
-      &dml_tile_op_desc, DML_EXECUTION_FLAG_NONE,
-      L"TileScaleForQuantize_Computed");
-
-  // The input to tile is the 'scale.buffer()' which holds computed scales,
-  // as 'scale' now directly informs scale_tile_input_desc.
-  compiled_tile_op->Execute(
-      {dml::utils::ResourceFromStorageView(scale)},
-      {dml::utils::ResourceFromStorageView(tiled_scale_storage)});
-
-  // --- Quantize Operation using Tiled Scale ---
   if (output.dtype() != DataType::INT8) {
     THROW_INVALID_ARGUMENT(
         "Output StorageView for int8 quantization must have DataType::INT8.");
@@ -305,9 +271,9 @@ void Quantize::quantize(const StorageView& input,
 
   DML_ELEMENT_WISE_QUANTIZE_LINEAR_OPERATOR_DESC quantize_op_definition{};
   quantize_op_definition.InputTensor = &input_desc.get_tensor_desc();
-  // Use the tiled computed scale
+  // Use the broadcasted computed scale
   quantize_op_definition.ScaleTensor =
-      &tiled_scale_output_desc.get_tensor_desc();
+      &broadcasted_scale_desc.get_tensor_desc();
   quantize_op_definition.ZeroPointTensor = nullptr;
   quantize_op_definition.OutputTensor = &output_desc.get_tensor_desc();
 
@@ -315,11 +281,12 @@ void Quantize::quantize(const StorageView& input,
       DML_OPERATOR_ELEMENT_WISE_QUANTIZE_LINEAR, &quantize_op_definition};
   dml::Operator* compiled_quantize_op = dml::GetOrCreateCompiledOperatorApi(
       &dml_quantize_op_desc, DML_EXECUTION_FLAG_NONE,
-      L"ElementWiseQuantizeLinear_F32_S8_WithComputedTiledScale");
+      L"ElementWiseQuantizeLinear_F32_S8_WithComputedBroadcastedScale");
 
   compiled_quantize_op->Execute(
       {dml::utils::ResourceFromStorageView(input),
-       dml::utils::ResourceFromStorageView(tiled_scale_storage),
+       dml::utils::ResourceFromStorageView(
+           scale),              /* Use original scale buffer */
        nullptr /*ZeroPoint*/},  // ZeroPoint tensor is explicitly null for int8
                                 // symmetric quantization in DML
       {dml::utils::ResourceFromStorageView(output)});
