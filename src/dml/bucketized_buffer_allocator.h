@@ -34,7 +34,7 @@ class BucketizedBufferAllocator {
   Device* m_device;
   std::vector<Bucket> m_pool;
 
-  static constexpr uint32_t c_minResourceSizeExponent = 16;  // 2^16 = 64KB
+  static constexpr uint32_t c_minResourceSizeExponent = 4;  // 2^4 = 16
 
   bool m_roundingEnabled = true;
 };

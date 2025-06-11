@@ -63,6 +63,10 @@ BucketizedBufferAllocator::~BucketizedBufferAllocator() = default;
 Microsoft::WRL::ComPtr<IResourceWrapper> BucketizedBufferAllocator::Alloc(
     uint64_t size,
     D3D12_RESOURCE_FLAGS resourceFlags) {
+  constexpr uint64_t tensor_size_mask =
+      ~(DML_MINIMUM_BUFFER_TENSOR_ALIGNMENT - 1);
+  size = (size + DML_MINIMUM_BUFFER_TENSOR_ALIGNMENT - 1) & tensor_size_mask;
+
   uint32_t bucketIndex = GetBucketIndexFromSize(size);
   uint64_t bucketSize = GetBucketSizeFromIndex(bucketIndex);
 
