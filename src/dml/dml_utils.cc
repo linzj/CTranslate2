@@ -377,6 +377,147 @@ void DmlTensorDescBundle::init_from_details(DML_TENSOR_DATA_TYPE dml_dtype,
   tensor_desc_internal.Type = DML_TENSOR_TYPE_BUFFER;
   tensor_desc_internal.Desc = &buffer_desc_internal;
 }
+DmlTensorDescBundle::DmlTensorDescBundle(
+    DML_TENSOR_DATA_TYPE dataType,
+    const std::vector<UINT>& dimensions,
+    const std::vector<UINT>& nonBroadcastDimensions,
+    int32_t coerceAxis,
+    int32_t placement,
+    int32_t leftAlignedDimensionCount,
+    uint32_t minDimensionCount,
+    uint32_t guaranteedBaseOffsetAlignment) {
+  tensor_desc_internal.Type = DML_TENSOR_TYPE_BUFFER;
+  tensor_desc_internal.Desc = &buffer_desc_internal;
+  buffer_desc_internal.DataType = dataType;
+  if (coerceAxis < 0)
+    THROW_INVALID_ARGUMENT("coerceAxis must be non-negative");
+
+  const std::vector<UINT>* sizes_ptr = &dimensions;
+  std::vector<UINT> coercedSizes;
+  if (dimensions.size() > 1 &&
+      coerceAxis < static_cast<int32_t>(dimensions.size())) {
+    UINT dimension0 = 1u;
+    UINT dimension1 = dimensions[coerceAxis];
+
+    for (int32_t i = 0; i < coerceAxis; ++i) {
+      dimension0 *= dimensions[i];
+    }
+
+    for (size_t i = static_cast<int64_t>(coerceAxis) + 1,
+                ci = dimensions.size();
+         i < ci; ++i) {
+      dimension1 *= dimensions[i];
+    }
+
+    coercedSizes.push_back(dimension0);
+    coercedSizes.push_back(dimension1);
+    sizes_ptr = &coercedSizes;
+  }
+
+  const auto& sizes = *sizes_ptr;
+  const int32_t rank = static_cast<int32_t>(sizes.size());
+  leftAlignedDimensionCount =
+      leftAlignedDimensionCount < 0
+          ? std::max(0, leftAlignedDimensionCount + rank)
+          : std::min(rank, leftAlignedDimensionCount);
+
+  buffer_desc_internal.DimensionCount =
+      std::max(rank, (int32_t)minDimensionCount);
+  if (buffer_desc_internal.DimensionCount > DML_TENSOR_DIMENSION_COUNT_MAX1)
+    THROW_INVALID_ARGUMENT(
+        "DmlTensorDescBundle dimension count cannot exceed " +
+        std::to_string(DML_TENSOR_DIMENSION_COUNT_MAX1));
+
+  internal_sizes_vec.assign(DML_TENSOR_DIMENSION_COUNT_MAX1, 1);
+
+  {
+    const int32_t totalFillerCount = buffer_desc_internal.DimensionCount - rank;
+    const int32_t leadingFillerCount =
+        std::clamp(placement, 0, totalFillerCount);
+    const int32_t remainingFillerCount = totalFillerCount - leadingFillerCount;
+    const int32_t trailingFillerCount =
+        std::clamp(-placement, 0, remainingFillerCount);
+    const int32_t middleFillerCount =
+        remainingFillerCount - trailingFillerCount;
+    const int32_t firstRightAlignedDim =
+        leadingFillerCount + leftAlignedDimensionCount + middleFillerCount;
+
+    int i = 0, j = 0;
+    while (j < leadingFillerCount) {
+      internal_sizes_vec[j++] = 1;
+    }
+    while (i < leftAlignedDimensionCount) {
+      internal_sizes_vec[j++] = sizes[i++];
+    }
+    while (j < firstRightAlignedDim) {
+      internal_sizes_vec[j++] = 1;
+    }
+    while (i < rank) {
+      internal_sizes_vec[j++] = sizes[i++];
+    }
+  }
+
+  internal_sizes_vec.resize(buffer_desc_internal.DimensionCount);
+
+  bool useStrides = false;
+  internal_strides_vec.clear();
+
+  if (dimensions != nonBroadcastDimensions) {
+    if (!std::equal(dimensions.begin(), dimensions.end(),
+                    &internal_sizes_vec[buffer_desc_internal.DimensionCount -
+                                        dimensions.size()])) {
+      THROW_INVALID_ARGUMENT(
+          "Broadcasting is only supported for contiguously right-aligned "
+          "dimensions");
+    }
+
+    useStrides = true;
+    internal_strides_vec.resize(buffer_desc_internal.DimensionCount);
+
+    auto nonBroadcastDimsIter = nonBroadcastDimensions.rbegin();
+    uint32_t elementCount = 1;
+    for (int descDimIndex = buffer_desc_internal.DimensionCount - 1;
+         descDimIndex >= 0; --descDimIndex) {
+      if (nonBroadcastDimsIter == nonBroadcastDimensions.rend() ||
+          (*nonBroadcastDimsIter == 1)) {
+        internal_strides_vec[descDimIndex] = 0;
+      } else {
+        internal_strides_vec[descDimIndex] = elementCount;
+        elementCount *= (*nonBroadcastDimsIter);
+      }
+      if (nonBroadcastDimsIter != nonBroadcastDimensions.rend()) {
+        ++nonBroadcastDimsIter;
+      }
+    }
+  }
+
+  buffer_desc_internal.Sizes = internal_sizes_vec.data();
+  buffer_desc_internal.Strides =
+      useStrides ? internal_strides_vec.data() : nullptr;
+  buffer_desc_internal.Flags = DML_TENSOR_FLAG_NONE;
+  buffer_desc_internal.GuaranteedBaseOffsetAlignment =
+      guaranteedBaseOffsetAlignment;
+
+  buffer_desc_internal.TotalTensorSizeInBytes = DMLCalcBufferTensorSize(
+      buffer_desc_internal.DataType, buffer_desc_internal.DimensionCount,
+      internal_sizes_vec.data(),
+      useStrides ? internal_strides_vec.data() : nullptr);
+
+  size_t non_bcast_bytes =
+      get_dml_element_size_in_bytes(buffer_desc_internal.DataType);
+  if (!nonBroadcastDimensions.empty()) {
+    for (auto dim : nonBroadcastDimensions)
+      non_bcast_bytes *= dim;
+  } else {
+    non_bcast_bytes = 0;
+  }
+
+  if (buffer_desc_internal.TotalTensorSizeInBytes < non_bcast_bytes) {
+    THROW_INVALID_ARGUMENT(
+        "TotalTensorSizeInBytes is smaller than what is required by the "
+        "physical dimensions of the tensor");
+  }
+}
 
 Microsoft::WRL::ComPtr<IResourceWrapper> CreateDmlConstantTensor(
     dml::Device* resolved_ct2_dml_device,
@@ -425,49 +566,6 @@ DmlBufferBindingBundle::DmlBufferBindingBundle(ID3D12Resource* resource,
   }
   // Ensure the resource is kept alive until the next dispatch
   dml::get_device()->KeepAliveUntilNextCommandListDispatch(resource);
-}
-
-DmlTensorDescBundle DmlTensorDescBundle::broadCastForStorageView(
-    const StorageView& target,
-    const StorageView& to_broadcast) {
-  if (to_broadcast.rank() > 1) {
-    throw std::invalid_argument(
-        "Broadcasting only supports scalar or 1D tensors for the source to "
-        "broadcast.");
-  }
-  if (to_broadcast.empty()) {
-    throw std::invalid_argument("Cannot broadcast an empty tensor.");
-  }
-
-  // broadcast_dims takes the shape of the target.
-  std::vector<UINT> broadcast_dims = to_dml_dims(target.shape(), target.size());
-  // The strides will be all 0 for a scalar broadcast, and one non-zero for
-  // vector.
-  std::vector<UINT> broadcast_strides(broadcast_dims.size(), 0);
-
-  if (to_broadcast.rank() == 1 && to_broadcast.size() > 1) {
-    int broadcast_axis = -1;
-    for (int i = static_cast<int>(target.rank()) - 1; i >= 0; --i) {
-      if (target.dim(i) == to_broadcast.dim(0)) {
-        broadcast_axis = i;
-        break;
-      }
-    }
-
-    if (broadcast_axis != -1) {
-      broadcast_strides[broadcast_axis] = 1;
-    } else {
-      throw std::invalid_argument(
-          "The dimension of the tensor to broadcast (" +
-          std::to_string(to_broadcast.dim(0)) +
-          ") does not match any dimension of the target tensor, and it's not a "
-          "scalar-like tensor of size 1.");
-    }
-  }
-
-  return DmlTensorDescBundle(to_broadcast.dtype(), broadcast_dims,
-                             &broadcast_strides,
-                             to_broadcast.reserved_memory());
 }
 
 }  // namespace utils

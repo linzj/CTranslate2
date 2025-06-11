@@ -64,7 +64,7 @@ class DMLOperatorCache {
 // available to provide the IDMLDevice.
 Operator* GetOrCreateCompiledOperatorApi(
     const DML_OPERATOR_DESC* op_desc,
-    DML_EXECUTION_FLAGS flags = DML_EXECUTION_FLAG_DISABLE_META_COMMANDS,
+    DML_EXECUTION_FLAGS flags = DML_EXECUTION_FLAG_NONE,
     PCWSTR name = nullptr);
 
 }  // namespace dml

@@ -498,9 +498,13 @@ void primitives<Device::DirectML>::add(T a, const T* x, T* y, dim_t size) {
   StorageView a_scalar_storage(a, Device::DirectML);
   StorageView input;
   input.view(const_cast<T*>(x), Shape{1, 1, 1, size});
+  const auto target_dims = dml::utils::to_dml_dims(input.shape(), input.size());
+  const auto physical_dims = dml::utils::to_dml_dims(a_scalar_storage.shape(),
+                                                     a_scalar_storage.size());
   dml::utils::DmlTensorDescBundle a_scalar_bundle(
-      dml::utils::DmlTensorDescBundle::broadCastForStorageView(
-          input, a_scalar_storage));
+      dml::utils::get_dml_data_type(a_scalar_storage.dtype()), target_dims,
+      physical_dims, (int32_t)target_dims.size(), 0, 0,
+      (uint32_t)target_dims.size(), 0);
 
   // Create and execute the Add operator.
   dml::utils::DmlTensorDescBundle b_bundle(input);
@@ -615,9 +619,13 @@ void primitives<Device::DirectML>::mul(T a, const T* x, T* y, dim_t size) {
   StorageView a_scalar_storage(a, Device::DirectML);
   StorageView input;
   input.view(const_cast<T*>(x), Shape{1, 1, 1, size});
+  const auto target_dims = dml::utils::to_dml_dims(input.shape(), input.size());
+  const auto physical_dims = dml::utils::to_dml_dims(a_scalar_storage.shape(),
+                                                     a_scalar_storage.size());
   dml::utils::DmlTensorDescBundle a_scalar_bundle(
-      dml::utils::DmlTensorDescBundle::broadCastForStorageView(
-          input, a_scalar_storage));
+      dml::utils::get_dml_data_type(a_scalar_storage.dtype()), target_dims,
+      physical_dims, (int32_t)target_dims.size(), 0, 0,
+      (uint32_t)target_dims.size(), 0);
 
   // Perform element-wise multiplication.
   dml::utils::DmlTensorDescBundle b_bundle(input);
@@ -1241,9 +1249,13 @@ void primitives<Device::DirectML>::max(T a, const T* x, T* y, dim_t size) {
   StorageView a_scalar_storage(a, Device::DirectML);
   StorageView input;
   input.view(const_cast<T*>(x), Shape{1, 1, 1, size});
+  const auto target_dims = dml::utils::to_dml_dims(input.shape(), input.size());
+  const auto physical_dims = dml::utils::to_dml_dims(a_scalar_storage.shape(),
+                                                     a_scalar_storage.size());
   dml::utils::DmlTensorDescBundle a_scalar_bundle(
-      dml::utils::DmlTensorDescBundle::broadCastForStorageView(
-          input, a_scalar_storage));
+      dml::utils::get_dml_data_type(a_scalar_storage.dtype()), target_dims,
+      physical_dims, (int32_t)target_dims.size(), 0, 0,
+      (uint32_t)target_dims.size(), 0);
 
   // Perform element-wise max.
   dml::utils::DmlTensorDescBundle b_bundle(input);
@@ -1315,9 +1327,13 @@ void primitives<Device::DirectML>::min(T a, const T* x, T* y, dim_t size) {
   StorageView a_scalar_storage(a, Device::DirectML);
   StorageView input;
   input.view(const_cast<T*>(x), Shape{1, 1, 1, size});
+  const auto target_dims = dml::utils::to_dml_dims(input.shape(), input.size());
+  const auto physical_dims = dml::utils::to_dml_dims(a_scalar_storage.shape(),
+                                                     a_scalar_storage.size());
   dml::utils::DmlTensorDescBundle a_scalar_bundle(
-      dml::utils::DmlTensorDescBundle::broadCastForStorageView(
-          input, a_scalar_storage));
+      dml::utils::get_dml_data_type(a_scalar_storage.dtype()), target_dims,
+      physical_dims, (int32_t)target_dims.size(), 0, 0,
+      (uint32_t)target_dims.size(), 0);
 
   // Perform element-wise min.
   dml::utils::DmlTensorDescBundle b_bundle(input);

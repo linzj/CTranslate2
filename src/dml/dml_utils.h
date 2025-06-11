@@ -117,6 +117,14 @@ class DmlTensorDescBundle {
                       const std::vector<UINT>* strides,
                       UINT64 total_tensor_size_in_bytes = 0);
 
+  DmlTensorDescBundle(DML_TENSOR_DATA_TYPE dataType,
+                      const std::vector<UINT>& dimensions,
+                      const std::vector<UINT>& nonBroadcastDimensions,
+                      int32_t coerceAxis,
+                      int32_t placement,
+                      int32_t leftAlignedDimensionCount,
+                      uint32_t minDimensionCount,
+                      uint32_t guaranteedBaseOffsetAlignment);
   const DML_BUFFER_TENSOR_DESC& get_buffer_desc() const {
     return buffer_desc_internal;
   }
@@ -136,10 +144,6 @@ class DmlTensorDescBundle {
   void set_data_type(DML_TENSOR_DATA_TYPE dml_dtype) {
     buffer_desc_internal.DataType = dml_dtype;
   }
-
-  static DmlTensorDescBundle broadCastForStorageView(
-      const StorageView& target,
-      const StorageView& to_broadcast);
 
  private:
   std::vector<UINT> internal_sizes_vec;

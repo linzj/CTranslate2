@@ -154,9 +154,14 @@ void Conv1D::compute(const StorageView& input,
     {
       dml::utils::DmlTensorDescBundle a_desc(tmp_float);
 
+      const auto target_dims =
+          dml::utils::to_dml_dims(tmp_float.shape(), tmp_float.size());
+      const auto physical_dims =
+          dml::utils::to_dml_dims(input_scale.shape(), input_scale.size());
       dml::utils::DmlTensorDescBundle b_desc(
-          dml::utils::DmlTensorDescBundle::broadCastForStorageView(
-              tmp_float, input_scale));
+          dml::utils::get_dml_data_type(input_scale.dtype()), target_dims,
+          physical_dims, (int32_t)target_dims.size(), 0, 0,
+          (uint32_t)target_dims.size(), 0);
 
       dml::utils::DmlTensorDescBundle out_desc(tmp_float2);
       DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC op_desc{
@@ -182,9 +187,14 @@ void Conv1D::compute(const StorageView& input,
     // 3c. Multiply by weight_scale (*qscale)
     {
       dml::utils::DmlTensorDescBundle a_desc(tmp_float2);
+      const auto target_dims =
+          dml::utils::to_dml_dims(tmp_float2.shape(), tmp_float2.size());
+      const auto physical_dims =
+          dml::utils::to_dml_dims(qscale->shape(), qscale->size());
       dml::utils::DmlTensorDescBundle b_desc(
-          dml::utils::DmlTensorDescBundle::broadCastForStorageView(tmp_float2,
-                                                                   *qscale));
+          dml::utils::get_dml_data_type(qscale->dtype()), target_dims,
+          physical_dims, (int32_t)target_dims.size(), 0, 0,
+          (uint32_t)target_dims.size(), 0);
       dml::utils::DmlTensorDescBundle out_desc(final_float_output);
       DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC op_desc{
           &a_desc.get_tensor_desc(), &b_desc.get_tensor_desc(),
@@ -209,9 +219,14 @@ void Conv1D::compute(const StorageView& input,
     // 4. Add bias
     if (bias) {
       dml::utils::DmlTensorDescBundle a_desc(final_float_output);
+      const auto target_dims = dml::utils::to_dml_dims(
+          final_float_output.shape(), final_float_output.size());
+      const auto physical_dims =
+          dml::utils::to_dml_dims(bias->shape(), bias->size());
       dml::utils::DmlTensorDescBundle b_desc(
-          dml::utils::DmlTensorDescBundle::broadCastForStorageView(
-              final_float_output, *bias));
+          dml::utils::get_dml_data_type(bias->dtype()), target_dims,
+          physical_dims, (int32_t)target_dims.size(), 0, 0,
+          (uint32_t)target_dims.size(), 0);
       dml::utils::DmlTensorDescBundle out_desc(output);
 
       DML_ELEMENT_WISE_ADD_OPERATOR_DESC op_desc{&a_desc.get_tensor_desc(),
