@@ -317,11 +317,9 @@ void DmlTensorDescBundle::init_from_storage(
       static_cast<UINT>(internal_sizes_vec.size());
   buffer_desc_internal.Sizes = internal_sizes_vec.data();
 
-  UINT64 total_bytes =
-      static_cast<UINT64>(storage.size()) * storage.item_size();
-
-  calculate_strides_and_total_size(dml_dtype, internal_sizes_vec,
-                                   strides_override, total_bytes);
+  UINT64 total_bytes = DMLCalcBufferTensorSize(
+      dml_dtype, internal_sizes_vec.size(), internal_sizes_vec.data(),
+      strides_override ? strides_override->data() : nullptr);
 
   buffer_desc_internal.TotalTensorSizeInBytes =
       total_bytes;  // Use the possibly refined total_bytes
