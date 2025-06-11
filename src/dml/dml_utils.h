@@ -137,6 +137,10 @@ class DmlTensorDescBundle {
     buffer_desc_internal.DataType = dml_dtype;
   }
 
+  static DmlTensorDescBundle broadCastForStorageView(
+      const StorageView& target,
+      const StorageView& to_broadcast);
+
  private:
   std::vector<UINT> internal_sizes_vec;
   std::vector<UINT> internal_strides_vec;  // May be empty if Strides = nullptr
@@ -149,10 +153,6 @@ class DmlTensorDescBundle {
                          const std::vector<UINT>& sizes_in,
                          const std::vector<UINT>* strides_in,
                          UINT64 total_tensor_size_bytes_in);
-  void calculate_strides_and_total_size(DML_TENSOR_DATA_TYPE dml_dtype,
-                                        const std::vector<UINT>& sizes,
-                                        const std::vector<UINT>* strides_input,
-                                        UINT64& total_size_in_bytes_ref);
 };
 
 // Helper to wrap an existing DML_BUFFER_TENSOR_DESC into a DML_TENSOR_DESC

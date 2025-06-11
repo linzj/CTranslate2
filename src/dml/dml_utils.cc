@@ -320,6 +320,9 @@ void DmlTensorDescBundle::init_from_storage(
   UINT64 total_bytes = DMLCalcBufferTensorSize(
       dml_dtype, internal_sizes_vec.size(), internal_sizes_vec.data(),
       strides_override ? strides_override->data() : nullptr);
+  if (strides_override) {
+    internal_strides_vec = *strides_override;
+  }
 
   buffer_desc_internal.TotalTensorSizeInBytes =
       total_bytes;  // Use the possibly refined total_bytes
@@ -359,8 +362,12 @@ void DmlTensorDescBundle::init_from_details(DML_TENSOR_DATA_TYPE dml_dtype,
   buffer_desc_internal.Sizes = internal_sizes_vec.data();
 
   UINT64 final_total_bytes = total_tensor_size_bytes_in;
-  calculate_strides_and_total_size(dml_dtype, internal_sizes_vec, strides_in,
-                                   final_total_bytes);
+  final_total_bytes = DMLCalcBufferTensorSize(
+      dml_dtype, internal_sizes_vec.size(), internal_sizes_vec.data(),
+      strides_in ? strides_in->data() : nullptr);
+  if (strides_in) {
+    internal_strides_vec = *strides_in;
+  }
 
   buffer_desc_internal.TotalTensorSizeInBytes = final_total_bytes;
   buffer_desc_internal.Strides =
@@ -369,108 +376,6 @@ void DmlTensorDescBundle::init_from_details(DML_TENSOR_DATA_TYPE dml_dtype,
 
   tensor_desc_internal.Type = DML_TENSOR_TYPE_BUFFER;
   tensor_desc_internal.Desc = &buffer_desc_internal;
-}
-
-void DmlTensorDescBundle::calculate_strides_and_total_size(
-    DML_TENSOR_DATA_TYPE dml_dtype,
-    const std::vector<UINT>& current_sizes,  // internal_sizes_vec
-    const std::vector<UINT>*
-        strides_input,               // User-provided strides (can be nullptr)
-    UINT64& total_size_in_bytes_ref  // Input: preferred total size or 0.
-                                     // Output: calculated total size.
-) {
-  internal_strides_vec.clear();
-  const size_t rank = current_sizes.size();
-
-  if (strides_input) {
-    internal_strides_vec = *strides_input;
-    if (internal_strides_vec.size() != rank && rank > 0) {
-      THROW_INVALID_ARGUMENT(
-          "Provided strides_override rank does not match tensor rank.");
-    }
-  } else {
-#if 0
-    if (rank > 0) {
-      internal_strides_vec.resize(rank);
-      internal_strides_vec[rank - 1] = 1;
-      for (int i = static_cast<int>(rank) - 2; i >= 0; --i) {
-        UINT next_dim_size = current_sizes[i + 1];
-        internal_strides_vec[i] = internal_strides_vec[i + 1] *
-                                  (next_dim_size == 0 ? 1 : next_dim_size);
-      }
-      // Handle cases where a dimension is 0, leading to 0 elements.
-      bool has_zero_dim = false;
-      for (UINT s : current_sizes) {
-        if (s == 0) {
-          has_zero_dim = true;
-          break;
-        }
-      }
-      if (has_zero_dim) {
-        // if any dim is 0, all strides for that and outer become effectively 0.
-        // This requires careful definition. For total size calc, 0 elements = 0
-        // bytes. DML itself might treat strides differently for zero-sized
-        // dimensions for broadcasting, but for TotalTensorSizeInBytes for a
-        // non-broadcasted buffer, 0 elements mean 0 bytes. If the goal is
-        // broadcasting a zero-size dim, its stride being 0 is fine. Standard
-        // contiguous stride calculation might give non-zero strides for dims
-        // outside a 0 dim. Example: shape {2,0,3}. Contiguous strides: {0,3,1}.
-        // Here `internal_strides_vec` is okay.
-      }
-    }
-#else
-    internal_strides_vec.clear();
-#endif
-  }
-  // If total size wasn't provided, calculate it.
-  if (total_size_in_bytes_ref == 0) {
-    UINT dimensionCount = static_cast<UINT>(current_sizes.size());
-    const UINT* sizes = current_sizes.empty() ? nullptr : current_sizes.data();
-    const UINT* strides =
-        internal_strides_vec.empty() ? nullptr : internal_strides_vec.data();
-    total_size_in_bytes_ref =
-        DMLCalcBufferTensorSize(dml_dtype, dimensionCount, sizes, strides);
-  } else {
-    // total_size_in_bytes_ref was provided, use it (but verify consistency if
-    // strides are also given)
-    if (!internal_strides_vec.empty() && rank > 0) {
-      UINT64 calculated_min_bytes_from_strides = 0;
-      bool has_zero_dim_for_stride_calc = false;
-      for (UINT s : current_sizes)
-        if (s == 0) {
-          has_zero_dim_for_stride_calc = true;
-          break;
-        }
-
-      if (rank > 0 && !has_zero_dim_for_stride_calc) {  // Only if all dims > 0
-        UINT64 max_offset = 0;
-        for (size_t i = 0; i < rank; ++i) {
-          if (current_sizes[i] > 0) {  // only add to offset if dim is not 0
-            max_offset += (static_cast<UINT64>(current_sizes[i]) - 1) *
-                          internal_strides_vec[i];
-          }
-        }
-        calculated_min_bytes_from_strides =
-            (max_offset + 1) * get_dml_element_size_in_bytes(dml_dtype);
-      } else if (has_zero_dim_for_stride_calc) {
-        calculated_min_bytes_from_strides =
-            0;  // Tensor is empty if any dimension is 0
-      }
-
-      // This is a soft check; DML will do the hard validation.
-      // User-provided TotalTensorSizeInBytes might be larger due to
-      // padding/allocations. It must be AT LEAST
-      // calculated_min_bytes_from_strides.
-      if (total_size_in_bytes_ref < calculated_min_bytes_from_strides &&
-          !has_zero_dim_for_stride_calc) {
-        // Allow provided total_size_in_bytes_ref if it implies a different
-        // physical layout (e.g. a view into a larger buffer) However, for
-        // typical "create tensor" ops, it should match or be larger. For this
-        // utility, we primarily focus on logical size matching. Let DML ops
-        // validate this.
-      }
-    }
-  }
 }
 
 Microsoft::WRL::ComPtr<IResourceWrapper> CreateDmlConstantTensor(
@@ -520,6 +425,49 @@ DmlBufferBindingBundle::DmlBufferBindingBundle(ID3D12Resource* resource,
   }
   // Ensure the resource is kept alive until the next dispatch
   dml::get_device()->KeepAliveUntilNextCommandListDispatch(resource);
+}
+
+DmlTensorDescBundle DmlTensorDescBundle::broadCastForStorageView(
+    const StorageView& target,
+    const StorageView& to_broadcast) {
+  if (to_broadcast.rank() > 1) {
+    throw std::invalid_argument(
+        "Broadcasting only supports scalar or 1D tensors for the source to "
+        "broadcast.");
+  }
+  if (to_broadcast.empty()) {
+    throw std::invalid_argument("Cannot broadcast an empty tensor.");
+  }
+
+  // broadcast_dims takes the shape of the target.
+  std::vector<UINT> broadcast_dims = to_dml_dims(target.shape(), target.size());
+  // The strides will be all 0 for a scalar broadcast, and one non-zero for
+  // vector.
+  std::vector<UINT> broadcast_strides(broadcast_dims.size(), 0);
+
+  if (to_broadcast.rank() == 1 && to_broadcast.size() > 1) {
+    int broadcast_axis = -1;
+    for (int i = static_cast<int>(target.rank()) - 1; i >= 0; --i) {
+      if (target.dim(i) == to_broadcast.dim(0)) {
+        broadcast_axis = i;
+        break;
+      }
+    }
+
+    if (broadcast_axis != -1) {
+      broadcast_strides[broadcast_axis] = 1;
+    } else {
+      throw std::invalid_argument(
+          "The dimension of the tensor to broadcast (" +
+          std::to_string(to_broadcast.dim(0)) +
+          ") does not match any dimension of the target tensor, and it's not a "
+          "scalar-like tensor of size 1.");
+    }
+  }
+
+  return DmlTensorDescBundle(to_broadcast.dtype(), broadcast_dims,
+                             &broadcast_strides,
+                             to_broadcast.reserved_memory());
 }
 
 }  // namespace utils
