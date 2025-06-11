@@ -922,8 +922,8 @@ Operator* GetOrCreateCompiledOperatorApi(const DML_OPERATOR_DESC* op_desc,
                                          PCWSTR name) {
   // Assumes get_dml_device() is available in ctranslate2::dml namespace
   // and returns the current IDMLDevice*.
-  return DMLOperatorCache::instance().GetOrCreateCompiledOperator(
-      op_desc, flags | DML_EXECUTION_FLAG_DISABLE_META_COMMANDS, name);
+  return DMLOperatorCache::instance().GetOrCreateCompiledOperator(op_desc,
+                                                                  flags, name);
 }
 
 }  // namespace dml
