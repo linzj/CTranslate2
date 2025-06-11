@@ -484,6 +484,16 @@ void DMLOperatorCache::GenerateCacheKeyForDesc(
       append_bytes(key_stream, desc->GroupCount);
       break;
     }
+    case DML_OPERATOR_MATRIX_MULTIPLY_INTEGER: {
+      auto desc = static_cast<const DML_MATRIX_MULTIPLY_INTEGER_OPERATOR_DESC*>(
+          op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->ATensor);
+      SerializeTensorDesc(key_stream, desc->AZeroPointTensor);
+      SerializeTensorDesc(key_stream, desc->BTensor);
+      SerializeTensorDesc(key_stream, desc->BZeroPointTensor);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      break;
+    }
     case DML_OPERATOR_MEAN_VARIANCE_NORMALIZATION2: {
       auto desc =
           static_cast<const DML_MEAN_VARIANCE_NORMALIZATION2_OPERATOR_DESC*>(

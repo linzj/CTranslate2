@@ -815,6 +815,112 @@ void primitives<Device::DirectML>::tanh(const T* x, T* y, dim_t size) {
 
 // Matrix operations
 template <>
+template <>
+void primitives<Device::DirectML>::gemm<int8_t, int32_t>(
+    bool a_is_packed,
+    bool b_is_packed,
+    bool transpose_a,
+    bool transpose_b,
+    dim_t m,
+    dim_t n,
+    dim_t k,
+    float alpha,
+    const int8_t* a,
+    dim_t lda,
+    const int8_t* b,
+    dim_t ldb,
+    float beta,
+    int32_t* c,
+    dim_t ldc,
+    const int32_t* a_shift_compensation) {
+  if (a_is_packed || b_is_packed) {
+    throw std::runtime_error(
+        "DirectML backend does not support packed GEMM formats for INT8");
+  }
+  if (alpha != 1.0f) {
+    throw std::runtime_error(
+        "DirectML INT8 GEMM implementation only supports alpha=1.0");
+  }
+
+  auto dxdevice = dml::get_device();
+
+  dim_t a_op_rows = m;
+  dim_t a_op_cols = k;
+  dim_t a_mem_rows = transpose_a ? k : m;
+  std::vector<UINT> a_dims = {1, 1, (UINT)a_op_rows, (UINT)a_op_cols};
+  std::vector<UINT> a_strides;
+  if (transpose_a) {
+    a_strides = {(UINT)(lda * a_mem_rows), (UINT)(lda * a_mem_rows), 1,
+                 (UINT)lda};
+  } else {
+    a_strides = {(UINT)(lda * a_mem_rows), (UINT)(lda * a_mem_rows), (UINT)lda,
+                 1};
+  }
+  dml::utils::DmlTensorDescBundle a_bundle(DML_TENSOR_DATA_TYPE_INT8, a_dims,
+                                           &a_strides,
+                                           a_mem_rows * lda * sizeof(int8_t));
+
+  dim_t b_op_rows = k;
+  dim_t b_op_cols = n;
+  dim_t b_mem_rows = transpose_b ? n : k;
+  std::vector<UINT> b_dims = {1, 1, (UINT)b_op_rows, (UINT)b_op_cols};
+  std::vector<UINT> b_strides;
+  if (transpose_b) {
+    b_strides = {(UINT)(ldb * b_mem_rows), (UINT)(ldb * b_mem_rows), 1,
+                 (UINT)ldb};
+  } else {
+    b_strides = {(UINT)(ldb * b_mem_rows), (UINT)(ldb * b_mem_rows), (UINT)ldb,
+                 1};
+  }
+  dml::utils::DmlTensorDescBundle b_bundle(DML_TENSOR_DATA_TYPE_INT8, b_dims,
+                                           &b_strides,
+                                           b_mem_rows * ldb * sizeof(int8_t));
+
+  StorageView matmul_output({(dim_t)m, (dim_t)n}, DataType::INT32,
+                            Device::DirectML);
+  dml::utils::DmlTensorDescBundle c_bundle(matmul_output);
+
+  DML_MATRIX_MULTIPLY_INTEGER_OPERATOR_DESC matmul_desc = {};
+  matmul_desc.ATensor = &a_bundle.get_tensor_desc();
+  matmul_desc.BTensor = &b_bundle.get_tensor_desc();
+  matmul_desc.OutputTensor = &c_bundle.get_tensor_desc();
+
+  DML_OPERATOR_DESC op_desc = {DML_OPERATOR_MATRIX_MULTIPLY_INTEGER,
+                               &matmul_desc};
+
+  dml::Operator* matmul_op =
+      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+
+  matmul_op->Execute({dml::utils::ResourceFromRawBuffer(a), nullptr,
+                      dml::utils::ResourceFromRawBuffer(b), nullptr},
+                     {dml::utils::ResourceFromStorageView(matmul_output)});
+
+  StorageView c_view({(dim_t)m, (dim_t)n}, c, Device::DirectML);
+
+  if (beta != 0.0f) {
+    if (beta != 1.0f) {
+      throw std::runtime_error(
+          "DirectML INT8 GEMM implementation only supports beta 0.0 or 1.0");
+    }
+
+    // In-place add: c = c + matmul_output
+    add(matmul_output.data<int32_t>(), c, c, m * n);
+
+  } else {
+    // c = matmul_output
+    copy(matmul_output.data<int32_t>(), c, m * n);
+  }
+
+  if (a_shift_compensation) {
+    // Broadcast add of compensation vector to each row of c
+    // The add_batch_broadcast in this codebase appears to have (a, b, c) where
+    // 'a' is broadcast to 'b', and 'c' is the output. If 'b' and 'c' are the
+    // same buffer, it's an in-place update.
+    add_batch_broadcast(a_shift_compensation, c, c, n, m * n, 0);
+  }
+}
+
+template <>
 template <typename In, typename Out>
 void primitives<Device::DirectML>::gemm(bool a_is_packed,
                                         bool b_is_packed,
@@ -2511,23 +2617,6 @@ template void primitives<Device::DirectML>::gemm<float16_t, float16_t>(
     float16_t*,
     dim_t,
     const float16_t*);
-template void primitives<Device::DirectML>::gemm<int8_t, int32_t>(
-    bool,
-    bool,
-    bool,
-    bool,
-    dim_t,
-    dim_t,
-    dim_t,
-    float,
-    const int8_t*,
-    dim_t,
-    const int8_t*,
-    dim_t,
-    float,
-    int32_t*,
-    dim_t,
-    const int32_t*);
 
 template void primitives<Device::DirectML>::gemm_batch_strided<float, float>(
     bool,

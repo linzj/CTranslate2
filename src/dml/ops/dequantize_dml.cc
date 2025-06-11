@@ -2,6 +2,7 @@
 
 #include "ctranslate2/ops/dequantize.h"
 #include "dml/backend_dml.h"
+#include "dml/common.h"
 #include "dml/dml_utils.h"
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
@@ -86,10 +87,20 @@ void Dequantize::dequantize<Device::DirectML, int8_t, float>(
     }
     scale_strides_ptr = &scale_strides_vec;
   } else {  // Scale has same shape as input or is scalar and will broadcast
-    scale_sizes_vec = dml::utils::to_dml_dims(scale.shape(), scale.size());
-    // if scale_strides_vec is empty (nullptr), DML implies contiguous based on
-    // scale_sizes_vec. If scale is scalar, to_dml_dims makes it {1}, DML
-    // broadcasts correctly.
+    if (scale.size() == 1) {
+      // If scale is effectively a scalar (size == 1), we must manually
+      // broadcast it for DML's element-wise ops, which expect compatible tensor
+      // shapes. We set its shape to match the input tensor's shape and provide
+      // strides of 0. This instructs DML to reuse the single scalar value
+      // across all dimensions.
+      scale_sizes_vec = dml_input_shape_vec;
+      scale_strides_vec.assign(input.rank(), 0);
+      scale_strides_ptr = &scale_strides_vec;
+    } else {
+      scale_sizes_vec = dml::utils::to_dml_dims(scale.shape(), scale.size());
+      // For other cases (e.g., per-channel scale), the shape is handled
+      // by other logic branches or is expected to be compatible.
+    }
   }
 
   // Important: DmlTensorDescBundle for scale needs to know the *original*
@@ -116,7 +127,6 @@ void Dequantize::dequantize<Device::DirectML, int8_t, float>(
   auto divide_compiled_op =
       dml::GetOrCreateCompiledOperatorApi(&divide_op_desc);
 
-  // Bind division inputs and outputs
   // Bind division inputs and outputs
   DML_BUFFER_BINDING div_input1_buffer_binding =
       dml::utils::create_buffer_binding(
@@ -667,9 +677,24 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
                            {final_y_output_binding_desc});
   } else {
     // Copy current output to final output
+    D3D12_RESOURCE_BARRIER barriers[] = {
+        CD3DX12_RESOURCE_BARRIER::Transition(
+            y_buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_COPY_DEST),
+        CD3DX12_RESOURCE_BARRIER::Transition(
+            current_output.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_COPY_SOURCE)};
+    command_list->ResourceBarrier(_countof(barriers), barriers);
     command_list->CopyBufferRegion(y_buffer, 0, current_output.Get(), 0,
                                    y.size() * sizeof(float));
-    device->ExecuteCommandList();
+    D3D12_RESOURCE_BARRIER barriers2[] = {
+        CD3DX12_RESOURCE_BARRIER::Transition(
+            y_buffer, D3D12_RESOURCE_STATE_COPY_DEST,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+        CD3DX12_RESOURCE_BARRIER::Transition(
+            current_output.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS)};
+    command_list->ResourceBarrier(_countof(barriers2), barriers2);
   }
 }
 
