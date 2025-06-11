@@ -895,28 +895,92 @@ void primitives<Device::DirectML>::gemm<int8_t, int32_t>(
                       dml::utils::ResourceFromRawBuffer(b), nullptr},
                      {dml::utils::ResourceFromStorageView(matmul_output)});
 
-  StorageView c_view({(dim_t)m, (dim_t)n}, c, Device::DirectML);
+  // If C is contiguous (ldc == n), use the existing fast path which is
+  // optimized for this case. Otherwise, use DML operators that can handle
+  // strided memory.
+  if (ldc == n) {
+    if (beta != 0.0f) {
+      if (beta != 1.0f) {
+        throw std::runtime_error(
+            "DirectML INT8 GEMM implementation only supports beta 0.0 or 1.0");
+      }
+      add(matmul_output.data<int32_t>(), c, c, m * n);
+    } else {
+      copy(matmul_output.data<int32_t>(), c, m * n);
+    }
+    if (a_shift_compensation) {
+      add_batch_broadcast(a_shift_compensation, c, c, n, m * n, 0);
+    }
+  } else {
+    // C is not contiguous (ldc > n).
+    UINT c_dims[] = {1, 1, static_cast<UINT>(m), static_cast<UINT>(n)};
+    UINT c_strides[] = {static_cast<UINT>(ldc * m), static_cast<UINT>(ldc * m),
+                        static_cast<UINT>(ldc), 1};
+    const auto c_total_bytes = static_cast<UINT64>(m) * ldc * sizeof(int32_t);
 
-  if (beta != 0.0f) {
-    if (beta != 1.0f) {
-      throw std::runtime_error(
-          "DirectML INT8 GEMM implementation only supports beta 0.0 or 1.0");
+    DML_BUFFER_TENSOR_DESC c_buffer_desc = {};
+    c_buffer_desc.DataType = DML_TENSOR_DATA_TYPE_INT32;
+    c_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
+    c_buffer_desc.DimensionCount = 4;
+    c_buffer_desc.Sizes = c_dims;
+    c_buffer_desc.Strides = c_strides;
+    c_buffer_desc.TotalTensorSizeInBytes = c_total_bytes;
+    DML_TENSOR_DESC c_desc = {DML_TENSOR_TYPE_BUFFER, &c_buffer_desc};
+
+    dml::utils::DmlTensorDescBundle matmul_bundle(matmul_output);
+
+    if (beta != 0.0f) {
+      if (beta != 1.0f) {
+        throw std::runtime_error(
+            "DirectML INT8 GEMM implementation only supports beta 0.0 or 1.0");
+      }
+      // In-place add: c = matmul_output + c
+      DML_ELEMENT_WISE_ADD_OPERATOR_DESC add_desc = {};
+      add_desc.ATensor = &matmul_bundle.get_tensor_desc();
+      add_desc.BTensor = &c_desc;
+      add_desc.OutputTensor = &c_desc;
+      DML_OPERATOR_DESC op_desc = {DML_OPERATOR_ELEMENT_WISE_ADD, &add_desc};
+      dml::Operator* add_op = dml::GetOrCreateCompiledOperatorApi(
+          &op_desc, DML_EXECUTION_FLAG_NONE);
+      add_op->Execute({dml::utils::ResourceFromStorageView(matmul_output),
+                       dml::utils::ResourceFromRawBuffer(c)},
+                      {dml::utils::ResourceFromRawBuffer(c)});
+    } else {
+      // c = matmul_output (contiguous to strided copy)
+      DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC identity_desc = {};
+      identity_desc.InputTensor = &matmul_bundle.get_tensor_desc();
+      identity_desc.OutputTensor = &c_desc;
+      DML_OPERATOR_DESC op_desc = {DML_OPERATOR_ELEMENT_WISE_IDENTITY,
+                                   &identity_desc};
+      dml::Operator* copy_op = dml::GetOrCreateCompiledOperatorApi(
+          &op_desc, DML_EXECUTION_FLAG_NONE);
+      copy_op->Execute({dml::utils::ResourceFromStorageView(matmul_output)},
+                       {dml::utils::ResourceFromRawBuffer(c)});
     }
 
-    // In-place add: c = c + matmul_output
-    add(matmul_output.data<int32_t>(), c, c, m * n);
+    if (a_shift_compensation) {
+      // Broadcast add of compensation vector to each row of c.
+      UINT shift_dims[] = {1, 1, 1, static_cast<UINT>(n)};
+      DML_BUFFER_TENSOR_DESC shift_buffer_desc = {};
+      shift_buffer_desc.DataType = DML_TENSOR_DATA_TYPE_INT32;
+      shift_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
+      shift_buffer_desc.DimensionCount = 4;
+      shift_buffer_desc.Sizes = shift_dims;
+      shift_buffer_desc.TotalTensorSizeInBytes =
+          static_cast<UINT64>(n) * sizeof(int32_t);
+      DML_TENSOR_DESC shift_desc = {DML_TENSOR_TYPE_BUFFER, &shift_buffer_desc};
 
-  } else {
-    // c = matmul_output
-    copy(matmul_output.data<int32_t>(), c, m * n);
-  }
-
-  if (a_shift_compensation) {
-    // Broadcast add of compensation vector to each row of c
-    // The add_batch_broadcast in this codebase appears to have (a, b, c) where
-    // 'a' is broadcast to 'b', and 'c' is the output. If 'b' and 'c' are the
-    // same buffer, it's an in-place update.
-    add_batch_broadcast(a_shift_compensation, c, c, n, m * n, 0);
+      DML_ELEMENT_WISE_ADD_OPERATOR_DESC add_desc = {};
+      add_desc.ATensor = &c_desc;
+      add_desc.BTensor = &shift_desc;  // Broadcast
+      add_desc.OutputTensor = &c_desc;
+      DML_OPERATOR_DESC op_desc = {DML_OPERATOR_ELEMENT_WISE_ADD, &add_desc};
+      dml::Operator* add_op = dml::GetOrCreateCompiledOperatorApi(
+          &op_desc, DML_EXECUTION_FLAG_NONE);
+      add_op->Execute({dml::utils::ResourceFromRawBuffer(c),
+                       dml::utils::ResourceFromRawBuffer(a_shift_compensation)},
+                      {dml::utils::ResourceFromRawBuffer(c)});
+    }
   }
 }
 
