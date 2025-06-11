@@ -8,6 +8,74 @@
 namespace ctranslate2 {
 namespace dml {
 namespace utils {
+namespace {
+inline UINT64 DMLCalcBufferTensorSize(DML_TENSOR_DATA_TYPE dataType,
+                                      UINT dimensionCount,
+                                      _In_reads_(dimensionCount)
+                                          const UINT* sizes,
+                                      _In_reads_opt_(dimensionCount)
+                                          const UINT* strides) {
+  UINT elementSizeInBits = 0;
+  switch (dataType) {
+    case DML_TENSOR_DATA_TYPE_FLOAT32:
+    case DML_TENSOR_DATA_TYPE_UINT32:
+    case DML_TENSOR_DATA_TYPE_INT32:
+      elementSizeInBits = 32;
+      break;
+
+    case DML_TENSOR_DATA_TYPE_FLOAT16:
+    case DML_TENSOR_DATA_TYPE_UINT16:
+    case DML_TENSOR_DATA_TYPE_INT16:
+      elementSizeInBits = 16;
+      break;
+
+    case DML_TENSOR_DATA_TYPE_UINT8:
+    case DML_TENSOR_DATA_TYPE_INT8:
+      elementSizeInBits = 8;
+      break;
+
+#if DML_TARGET_VERSION >= 0x6300
+    case DML_TENSOR_DATA_TYPE_UINT4:
+    case DML_TENSOR_DATA_TYPE_INT4:
+      elementSizeInBits = 4;
+      break;
+#endif
+
+    case DML_TENSOR_DATA_TYPE_FLOAT64:
+    case DML_TENSOR_DATA_TYPE_UINT64:
+    case DML_TENSOR_DATA_TYPE_INT64:
+      elementSizeInBits = 64;
+      break;
+
+    default:
+      return 0;  // Invalid data type
+  }
+
+  UINT64 minimumImpliedSizeInBits = 0;
+  if (!strides) {
+    minimumImpliedSizeInBits = sizes[0];
+    for (UINT i = 1; i < dimensionCount; ++i) {
+      minimumImpliedSizeInBits *= sizes[i];
+    }
+    minimumImpliedSizeInBits *= elementSizeInBits;
+  } else {
+    UINT indexOfLastElement = 0;
+    for (UINT i = 0; i < dimensionCount; ++i) {
+      indexOfLastElement += (sizes[i] - 1) * strides[i];
+    }
+
+    minimumImpliedSizeInBits =
+        (static_cast<UINT64>(indexOfLastElement) + 1) * elementSizeInBits;
+  }
+
+  UINT64 minimumImpliedSizeInBytes = (minimumImpliedSizeInBits + 7) / 8;
+
+  // Round up to the nearest 4 bytes.
+  minimumImpliedSizeInBytes = (minimumImpliedSizeInBytes + 3) & ~3ull;
+
+  return minimumImpliedSizeInBytes;
+}
+}  // namespace
 
 // --- Data Type & Size Utilities ---
 
@@ -356,34 +424,17 @@ void DmlTensorDescBundle::calculate_strides_and_total_size(
     internal_strides_vec.clear();
 #endif
   }
-
-  if (total_size_in_bytes_ref ==
-      0) {  // If total size wasn't provided, calculate it.
-    UINT64 num_elements = 1;
-    if (rank ==
-        0) {  // Scalar by rank, assume 1 element unless sizes_vec indicates {0}
-      if (!current_sizes.empty() && current_sizes[0] == 0)
-        num_elements = 0;
-      else
-        num_elements = 1;
-
-    } else {
-      bool has_zero_dim = false;
-      for (UINT s : current_sizes) {
-        if (s == 0) {
-          has_zero_dim = true;
-          break;
-        }
-        num_elements *= s;
-      }
-      if (has_zero_dim)
-        num_elements = 0;
-    }
+  // If total size wasn't provided, calculate it.
+  if (total_size_in_bytes_ref == 0) {
+    UINT dimensionCount = static_cast<UINT>(current_sizes.size());
+    const UINT* sizes = current_sizes.empty() ? nullptr : current_sizes.data();
+    const UINT* strides =
+        internal_strides_vec.empty() ? nullptr : internal_strides_vec.data();
     total_size_in_bytes_ref =
-        num_elements * get_dml_element_size_in_bytes(dml_dtype);
-
-  } else {  // total_size_in_bytes_ref was provided, use it (but verify
-            // consistency if strides are also given)
+        DMLCalcBufferTensorSize(dml_dtype, dimensionCount, sizes, strides);
+  } else {
+    // total_size_in_bytes_ref was provided, use it (but verify consistency if
+    // strides are also given)
     if (!internal_strides_vec.empty() && rank > 0) {
       UINT64 calculated_min_bytes_from_strides = 0;
       bool has_zero_dim_for_stride_calc = false;

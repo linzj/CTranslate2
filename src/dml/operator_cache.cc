@@ -434,6 +434,56 @@ void DMLOperatorCache::GenerateCacheKeyForDesc(
       }
       break;
     }
+    case DML_OPERATOR_QUANTIZED_LINEAR_CONVOLUTION: {
+      auto desc =
+          static_cast<const DML_QUANTIZED_LINEAR_CONVOLUTION_OPERATOR_DESC*>(
+              op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputTensor);
+      SerializeTensorDesc(key_stream, desc->InputScaleTensor);
+      SerializeTensorDesc(key_stream,
+                          desc->InputZeroPointTensor);  // Handles null
+      SerializeTensorDesc(key_stream, desc->FilterTensor);
+      SerializeTensorDesc(key_stream, desc->FilterScaleTensor);
+      SerializeTensorDesc(key_stream,
+                          desc->FilterZeroPointTensor);   // Handles null
+      SerializeTensorDesc(key_stream, desc->BiasTensor);  // Handles null
+      SerializeTensorDesc(key_stream, desc->OutputScaleTensor);
+      SerializeTensorDesc(key_stream,
+                          desc->OutputZeroPointTensor);  // Handles null
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      append_bytes(key_stream, desc->DimensionCount);
+      append_bytes_array(key_stream, desc->Strides,
+                         desc->DimensionCount * sizeof(UINT));
+      append_bytes_array(key_stream, desc->Dilations,
+                         desc->DimensionCount * sizeof(UINT));
+      append_bytes_array(key_stream, desc->StartPadding,
+                         desc->DimensionCount * sizeof(UINT));
+      append_bytes_array(key_stream, desc->EndPadding,
+                         desc->DimensionCount * sizeof(UINT));
+      append_bytes(key_stream, desc->GroupCount);
+      break;
+    }
+    case DML_OPERATOR_CONVOLUTION_INTEGER: {
+      auto desc = static_cast<const DML_CONVOLUTION_INTEGER_OPERATOR_DESC*>(
+          op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputTensor);
+      SerializeTensorDesc(key_stream, desc->InputZeroPointTensor);
+      SerializeTensorDesc(key_stream, desc->FilterTensor);
+      SerializeTensorDesc(key_stream,
+                          desc->FilterZeroPointTensor);  // Handles null
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      append_bytes(key_stream, desc->DimensionCount);
+      append_bytes_array(key_stream, desc->Strides,
+                         desc->DimensionCount * sizeof(UINT));
+      append_bytes_array(key_stream, desc->Dilations,
+                         desc->DimensionCount * sizeof(UINT));
+      append_bytes_array(key_stream, desc->StartPadding,
+                         desc->DimensionCount * sizeof(UINT));
+      append_bytes_array(key_stream, desc->EndPadding,
+                         desc->DimensionCount * sizeof(UINT));
+      append_bytes(key_stream, desc->GroupCount);
+      break;
+    }
     case DML_OPERATOR_MEAN_VARIANCE_NORMALIZATION2: {
       auto desc =
           static_cast<const DML_MEAN_VARIANCE_NORMALIZATION2_OPERATOR_DESC*>(
@@ -746,6 +796,26 @@ void DMLOperatorCache::GenerateCacheKeyForDesc(
       SerializeTensorDesc(key_stream, desc->OutputTensor);
       break;
     }
+    case DML_OPERATOR_ELEMENT_WISE_DEQUANTIZE_LINEAR: {
+      auto desc =
+          static_cast<const DML_ELEMENT_WISE_DEQUANTIZE_LINEAR_OPERATOR_DESC*>(
+              op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputTensor);
+      SerializeTensorDesc(key_stream, desc->ScaleTensor);
+      SerializeTensorDesc(key_stream, desc->ZeroPointTensor);  // Handles null
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      break;
+    }
+    case DML_OPERATOR_DYNAMIC_QUANTIZE_LINEAR: {
+      auto desc = static_cast<const DML_DYNAMIC_QUANTIZE_LINEAR_OPERATOR_DESC*>(
+          op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->InputTensor);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      SerializeTensorDesc(key_stream, desc->OutputScaleTensor);
+      SerializeTensorDesc(key_stream,
+                          desc->OutputZeroPointTensor);  // Handles null
+      break;
+    }
     case DML_OPERATOR_ELEMENT_WISE_RECIP: {
       auto desc = static_cast<const DML_ELEMENT_WISE_RECIP_OPERATOR_DESC*>(
           op_desc->Desc);
@@ -842,8 +912,8 @@ Operator* GetOrCreateCompiledOperatorApi(const DML_OPERATOR_DESC* op_desc,
                                          PCWSTR name) {
   // Assumes get_dml_device() is available in ctranslate2::dml namespace
   // and returns the current IDMLDevice*.
-  return DMLOperatorCache::instance().GetOrCreateCompiledOperator(op_desc,
-                                                                  flags, name);
+  return DMLOperatorCache::instance().GetOrCreateCompiledOperator(
+      op_desc, flags | DML_EXECUTION_FLAG_DISABLE_META_COMMANDS, name);
 }
 
 }  // namespace dml
