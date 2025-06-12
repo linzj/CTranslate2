@@ -439,7 +439,6 @@ Device::CreatePreferredDeviceMemoryBuffer(uint64_t sizeInBytes,
                                           uint64_t alignment,
                                           D3D12_HEAP_FLAGS heapFlags) {
   auto resource_wrapper = m_allocator->Alloc(sizeInBytes, resourceFlags);
-  KeepAliveUntilNextCommandListDispatch(resource_wrapper);
   return resource_wrapper;
 }
 
