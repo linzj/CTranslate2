@@ -22,137 +22,94 @@ void Dequantize::dequantize<Device::DirectML, int8_t, float>(
 
   const dim_t depth = input.dim(-1);
 
-  // Step 1: Cast int8 input to float
-  StorageView float_input(input.shape(), DataType::FLOAT32, Device::DirectML);
+  // Step 1: Compute reciprocal of scale (1.0f / scale).
+  // This is because DML's DEQUANTIZE op multiplies by scale, while
+  // ctranslate2's definition divides. We compute 1/scale and then use it in the
+  // DEQUANTIZE op. The RECIP op does not support broadcasting, so input and
+  // output tensors must have the same dimensions.
+  StorageView reciprocal_scale(scale.shape(), scale.dtype(), scale.device());
 
-  // Create cast operation
-  dml::utils::DmlTensorDescBundle input_desc_bundle(input);  // INT8
-  // float_input is StorageView(input.shape(), DataType::FLOAT32,
-  // Device::DirectML)
-  dml::utils::DmlTensorDescBundle float_cast_output_desc_bundle(
-      float_input);  // FLOAT32
+  dml::utils::DmlTensorDescBundle scale_desc_bundle(scale);
+  dml::utils::DmlTensorDescBundle recip_output_desc_bundle(reciprocal_scale);
 
-  DML_CAST_OPERATOR_DESC cast_desc = {
-      .InputTensor = &input_desc_bundle.get_tensor_desc(),
-      .OutputTensor = &float_cast_output_desc_bundle.get_tensor_desc()};
+  DML_ELEMENT_WISE_RECIP_OPERATOR_DESC recip_desc = {
+      .InputTensor = &scale_desc_bundle.get_tensor_desc(),
+      .OutputTensor = &recip_output_desc_bundle.get_tensor_desc(),
+      .ScaleBias = nullptr};
 
-  DML_OPERATOR_DESC cast_op_desc = {.Type = DML_OPERATOR_CAST,
-                                    .Desc = &cast_desc};
+  DML_OPERATOR_DESC recip_op_desc = {.Type = DML_OPERATOR_ELEMENT_WISE_RECIP,
+                                     .Desc = &recip_desc};
+  auto recip_compiled_op = dml::GetOrCreateCompiledOperatorApi(&recip_op_desc);
 
-  auto cast_compiled_op = dml::GetOrCreateCompiledOperatorApi(&cast_op_desc);
+  DML_BUFFER_BINDING scale_binding = dml::utils::create_buffer_binding(
+      dml::utils::ResourceFromStorageView(scale), 0,
+      scale.size() * sizeof(float));
+  std::vector<DML_BINDING_DESC> recip_input_bindings = {
+      dml::utils::create_binding_desc(&scale_binding)};
 
-  // Bind cast inputs and outputs
-  // Bind cast inputs and outputs
-  DML_BUFFER_BINDING cast_input_buffer_binding =
-      dml::utils::create_buffer_binding(
-          dml::utils::ResourceFromStorageView(input), 0,
-          input.size() * sizeof(int8_t));
-  DML_BINDING_DESC cast_input_binding_desc =
-      dml::utils::create_binding_desc(&cast_input_buffer_binding);
+  DML_BUFFER_BINDING recip_output_binding = dml::utils::create_buffer_binding(
+      dml::utils::ResourceFromStorageView(reciprocal_scale), 0,
+      reciprocal_scale.size() * sizeof(float));
+  std::vector<DML_BINDING_DESC> recip_output_bindings = {
+      dml::utils::create_binding_desc(&recip_output_binding)};
 
-  DML_BUFFER_BINDING cast_output_buffer_binding =
-      dml::utils::create_buffer_binding(
-          dml::utils::ResourceFromStorageView(float_input), 0,
-          float_input.size() * sizeof(float));
-  DML_BINDING_DESC cast_output_binding_desc =
-      dml::utils::create_binding_desc(&cast_output_buffer_binding);
+  recip_compiled_op->Execute(recip_input_bindings, recip_output_bindings);
 
-  cast_compiled_op->Execute({cast_input_binding_desc},
-                            {cast_output_binding_desc});
+  // Step 2: Dequantize using DML_ELEMENT_WISE_DEQUANTIZE_LINEAR.
+  // This operation implicitly handles the int8 -> float32 cast and multiplies
+  // by the (reciprocal) scale. The (reciprocal) scale tensor might need to be
+  // broadcast to match the input tensor's shape.
 
-  // Step 2: Element-wise division (float_input / scale)
+  dml::utils::DmlTensorDescBundle input_desc_bundle(input);
 
-  // Handle scale broadcasting - scale is typically per-channel (depth
-  // dimension)
-  // dimension)
-  // The float_cast_output_desc_bundle uses input_sizes for its .Sizes member
-  std::vector<UINT> dml_input_shape_vec =
-      dml::utils::to_dml_dims(input.shape(), input.size());
-  std::vector<UINT> scale_sizes_vec;
-  std::vector<UINT> scale_strides_vec;  // Keep this alive if used
-  const std::vector<UINT>* scale_strides_ptr = nullptr;
-
-  if (scale.size() == depth &&
-      input.rank() > 0) {  // Ensure input is not scalar
-    // Scale has same number of elements as the last dimension of input
-    // Broadcast scale to match input shape
-    scale_sizes_vec = dml_input_shape_vec;  // Target shape for broadcasting
-    scale_strides_vec.resize(
-        input.rank(), 0);  // Initialize all strides to 0 for broadcasting
-
-    if (!scale_strides_vec
-             .empty()) {             // Should not be empty if input.rank() > 0
-      scale_strides_vec.back() = 1;  // Normal stride for the last dimension
-                                     // that matches scale's actual data
-    }
-    scale_strides_ptr = &scale_strides_vec;
-  } else {  // Scale has same shape as input or is scalar and will broadcast
-    if (scale.size() == 1) {
-      // If scale is effectively a scalar (size == 1), we must manually
-      // broadcast it for DML's element-wise ops, which expect compatible tensor
-      // shapes. We set its shape to match the input tensor's shape and provide
-      // strides of 0. This instructs DML to reuse the single scalar value
-      // across all dimensions.
-      scale_sizes_vec = dml_input_shape_vec;
-      scale_strides_vec.assign(input.rank(), 0);
-      scale_strides_ptr = &scale_strides_vec;
-    } else {
-      scale_sizes_vec = dml::utils::to_dml_dims(scale.shape(), scale.size());
-      // For other cases (e.g., per-channel scale), the shape is handled
-      // by other logic branches or is expected to be compatible.
-    }
-  }
-
-  // Important: DmlTensorDescBundle for scale needs to know the *original*
-  // number of elements in scale storage for TotalTensorSizeInBytes, even if its
-  // Sizes/Strides are for broadcasting.
-  dml::utils::DmlTensorDescBundle scale_desc_bundle(
-      scale.dtype(),    // FLOAT32
-      scale_sizes_vec,  // This can be the broadcasted shape
-      scale_strides_ptr,
-      scale.size() * sizeof(float)  // Use original scale storage size
+  // The reciprocal scale tensor is broadcast to the input tensor's shape.
+  const auto& dml_input_shape_vec = input_desc_bundle.get_sizes_vec();
+  std::vector<UINT> pyhsical_scale_shape = dml::utils::to_dml_dims(
+      reciprocal_scale.shape(), reciprocal_scale.size());
+  pyhsical_scale_shape.push_back(1);
+  dml::utils::DmlTensorDescBundle broadcast_reciprocal_scale_desc_bundle(
+      dml::utils::get_dml_data_type(reciprocal_scale.dtype()),
+      dml_input_shape_vec,   // Target dimensions for broadcasting
+      pyhsical_scale_shape,  // Physical (non-broadcast) dimensions
+      static_cast<int32_t>(dml_input_shape_vec.size()),  // coerceAxis: >= rank
+                                                         // disables flattening
+      0,  // placement: no padding with '1's
+      0,  // leftAlignedDimensionCount: 0 for right-aligned broadcast
+      0,  // minDimensionCount
+      0   // guaranteedBaseOffsetAlignment
   );
 
-  dml::utils::DmlTensorDescBundle div_output_desc_bundle(output);  // FLOAT32
+  dml::utils::DmlTensorDescBundle output_desc_bundle(output);
 
-  DML_ELEMENT_WISE_DIVIDE_OPERATOR_DESC divide_desc = {
-      .ATensor = &float_cast_output_desc_bundle
-                      .get_tensor_desc(),  // Output from previous CAST
-      .BTensor = &scale_desc_bundle.get_tensor_desc(),
-      .OutputTensor = &div_output_desc_bundle.get_tensor_desc()};
+  DML_ELEMENT_WISE_DEQUANTIZE_LINEAR_OPERATOR_DESC dequantize_desc = {
+      .InputTensor = &input_desc_bundle.get_tensor_desc(),
+      .ScaleTensor = &broadcast_reciprocal_scale_desc_bundle.get_tensor_desc(),
+      .ZeroPointTensor = nullptr,
+      .OutputTensor = &output_desc_bundle.get_tensor_desc()};
 
-  DML_OPERATOR_DESC divide_op_desc = {.Type = DML_OPERATOR_ELEMENT_WISE_DIVIDE,
-                                      .Desc = &divide_desc};
+  DML_OPERATOR_DESC dequantize_op_desc = {
+      .Type = DML_OPERATOR_ELEMENT_WISE_DEQUANTIZE_LINEAR,
+      .Desc = &dequantize_desc};
+  auto dequantize_compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(&dequantize_op_desc);
 
-  auto divide_compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&divide_op_desc);
+  dml::utils::DmlBufferBindingBundle dequant_input_binding(
+      dml::utils::ResourceFromStorageView(input), 0,
+      input.size() * sizeof(int8_t));
+  dml::utils::DmlBufferBindingBundle dequant_scale_binding(
+      dml::utils::ResourceFromStorageView(reciprocal_scale), 0,
+      reciprocal_scale.size() * sizeof(float));
 
-  // Bind division inputs and outputs
-  DML_BUFFER_BINDING div_input1_buffer_binding =
-      dml::utils::create_buffer_binding(
-          dml::utils::ResourceFromStorageView(float_input), 0,
-          float_input.size() * sizeof(float));
+  dml::utils::DmlBindingArrayBundle dequant_input_bindings(
+      {dequant_input_binding, dequant_scale_binding, nullptr});
 
-  DML_BUFFER_BINDING div_input2_buffer_binding =
-      dml::utils::create_buffer_binding(
-          dml::utils::ResourceFromStorageView(scale), 0,
-          scale.size() * sizeof(float));
+  dml::utils::DmlBufferBindingBundle dequant_output_binding(
+      dml::utils::ResourceFromStorageView(output), 0,
+      output.size() * sizeof(float));
 
-  DML_BUFFER_BINDING div_output_buffer_binding =
-      dml::utils::create_buffer_binding(
-          dml::utils::ResourceFromStorageView(output), 0,
-          output.size() * sizeof(float));
-
-  std::vector<DML_BINDING_DESC> div_input_bindings_vec_desc = {
-      dml::utils::create_binding_desc(&div_input1_buffer_binding),
-      dml::utils::create_binding_desc(&div_input2_buffer_binding)};
-
-  std::vector<DML_BINDING_DESC> div_output_bindings_vec_desc = {
-      dml::utils::create_binding_desc(&div_output_buffer_binding)};
-
-  divide_compiled_op->Execute(div_input_bindings_vec_desc,
-                              div_output_bindings_vec_desc);
-}
+  dequantize_compiled_op->Execute(dequant_input_bindings.get_descs(),
+                                  {dequant_output_binding.get_desc()});
+}  // namespace ops
 
 template <>
 void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
@@ -364,8 +321,7 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
   cast_desc_gemm.InputTensor = &c_desc_bundle.get_tensor_desc();
   cast_desc_gemm.OutputTensor = &intermediate_desc_bundle.get_tensor_desc();
 
-  DML_OPERATOR_DESC cast_op_desc = {};
-  DML_OPERATOR_DESC cast_op_desc_gemm = {};  // Renamed
+  DML_OPERATOR_DESC cast_op_desc_gemm = {};
   cast_op_desc_gemm.Type = DML_OPERATOR_CAST;
   cast_op_desc_gemm.Desc = &cast_desc_gemm;
 
