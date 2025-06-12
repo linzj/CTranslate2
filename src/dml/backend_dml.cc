@@ -35,16 +35,17 @@ class AdapterSelectionPolicy {
     ComPtr<IDXGIAdapter1> adapter;
     DXGI_ADAPTER_DESC1 desc;
     bool is_dedicated_adapter;
+    UINT adapter_index;
     bool is_amd;
 
-    // Custom comparison for sorting: dedicated adapters first, then AMD
+    // Custom comparison for sorting: dedicated adapters first, then by index
     bool operator<(const AdapterInfo& other) const {
       // Prioritize dedicated adapters (true > false)
       if (is_dedicated_adapter != other.is_dedicated_adapter) {
         return is_dedicated_adapter > other.is_dedicated_adapter;
       }
-      // Then prioritize AMD (true > false)
-      return is_amd > other.is_amd;
+      // Then prioritize by adapter index (lower is better)
+      return adapter_index < other.adapter_index;
     }
   };
 
@@ -180,6 +181,7 @@ bool has_directml_device() {
         AdapterSelectionPolicy::AdapterInfo info;
         info.adapter = current_adapter;
         info.desc = desc;
+        info.adapter_index = adapter_idx;
         info.is_dedicated_adapter = AdapterSelectionPolicy::IsDedicatedAdapter(
             current_adapter.Get(), g_d3d12_module);
         // AMD Vendor ID: 0x1002
