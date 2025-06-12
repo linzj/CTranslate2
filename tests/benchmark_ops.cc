@@ -894,6 +894,79 @@ void benchmark_conv1d(Device device) {
   }
 }
 
+void benchmark_conv1d_qscale(Device device) {
+  if (!kCheckCorrectness) {
+    StorageView x({1, 1280, 3000}, DataType::FLOAT32,
+                  device);  // Batch, Channels, Width
+    StorageView weight({1280, 128, 3}, DataType::INT8,
+                       device);                          // Out, In, Kernel
+    StorageView bias({1280}, DataType::FLOAT32, device);  // Out
+    StorageView qscale({1280}, 2.5f, device);  // Use a realistic scale.
+    StorageView y(DataType::FLOAT32, device);
+    const ops::Conv1D conv_op{2, 1, 1, 10};  // stride, padding, dilation, groups
+    BENCHMARK(conv_op(x, weight, bias, y, &qscale), 100);
+  } else {
+    const Shape x_shape = {1, 1280, 3000};
+    const Shape weight_shape = {1280, 128,
+                                3};  // Filters, InputChannels, KernelWidth
+    const Shape bias_shape = {weight_shape[0]};  // Filters
+    const Shape qscale_shape = {weight_shape[0]};
+    const int stride = 2;
+    const int padding = 1;
+    const int groups = 10;
+    const ops::Conv1D conv_op{stride, padding, 1, groups};
+    const DataType out_dtype = DataType::FLOAT32;
+
+    std::vector<float> x_data =
+        rand_vector(x_shape[0] * x_shape[1] * x_shape[2]);
+    const dim_t weight_size =
+        weight_shape[0] * weight_shape[1] * weight_shape[2];
+    std::vector<float> weight_data_f = rand_vector(weight_size);
+    std::vector<int8_t> weight_data(weight_size);
+    float max_abs = 0.f;
+    for (const auto& v : weight_data_f)
+      max_abs = std::max(max_abs, std::abs(v));
+    const float scale = 127.f / (max_abs > 1e-9f ? max_abs : 127.f);
+    for (dim_t i = 0; i < weight_size; ++i) {
+      const float val_scaled = weight_data_f[i] * scale;
+      weight_data[i] = static_cast<int8_t>(
+          std::round(std::max(-127.f, std::min(127.f, val_scaled))));
+    }
+    std::vector<float> bias_data = rand_vector(bias_shape[0]);
+    std::vector<float> qscale_data(qscale_shape[0], 2.5f);
+
+    StorageView x_device(x_shape, x_data, device);
+    StorageView weight_device(weight_shape, weight_data, device);
+    StorageView bias_device(bias_shape, bias_data, device);
+    StorageView qscale_device(qscale_shape, qscale_data, device);
+    StorageView y_device(out_dtype, device);
+
+    StorageView x_cpu(x_shape, x_data, Device::CPU);
+    StorageView weight_cpu(weight_shape, weight_data, Device::CPU);
+    StorageView bias_cpu(bias_shape, bias_data, Device::CPU);
+    StorageView qscale_cpu(qscale_shape, qscale_data, Device::CPU);
+    StorageView y_cpu(out_dtype, Device::CPU);
+
+    conv_op(x_device, weight_device, bias_device, y_device, &qscale_device);
+    conv_op(x_cpu, weight_cpu, bias_cpu, y_cpu, &qscale_cpu);
+
+    StorageView y_device_cpu_copy(out_dtype, Device::CPU);
+    y_device_cpu_copy.copy_from(y_device, true);
+
+    std::ostringstream error_log;
+    // For quantized ops, allow for a few mismatches due to potential rounding
+    // differences between device and CPU.
+    int total_mismatches = dispatch_compare_views(
+        y_device_cpu_copy, y_cpu, "Conv1D Qscale Output", error_log);
+
+    if (total_mismatches > 5) {
+      std::cerr << error_log.str() << std::endl;
+      throw std::runtime_error("Conv1D with qscale output mismatch details:\n" +
+                               error_log.str());
+    }
+  }
+}
+
 void benchmark_gumbel_max(Device device) {
   const dim_t num_samples =
       4;  // Number of samples to draw, equivalent to k in TopK
@@ -1070,6 +1143,8 @@ int main(int argc, char* argv[]) {
     benchmark_dequantize(device);
   else if (op == "conv1d")
     benchmark_conv1d(device);
+  else if (op == "conv1d_qscale")
+    benchmark_conv1d_qscale(device);
   else if (op == "gumbel_max")
     benchmark_gumbel_max(device);
   else if (op == "bias_add")
