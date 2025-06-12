@@ -13,10 +13,6 @@ namespace ops {
 
 class RotaryDMLCompute {
  private:
-  dml::Device* device_;
-  DataType ct2_data_type_;
-  DML_TENSOR_DATA_TYPE dml_data_type_;
-
   void multiply_tensors(const StorageView& a,
                         const StorageView& b,
                         StorageView& output) {
@@ -89,7 +85,7 @@ class RotaryDMLCompute {
     dml::utils::DmlTensorDescBundle input_desc(input);
     dml::utils::DmlTensorDescBundle output_desc(output);
     DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC op_desc = {
-        &input_desc.get_tensor_desc(), &output_desc.get_tensor_desc()};
+        &input_desc.get_tensor_desc(), &output_desc.get_tensor_desc(), nullptr};
     DML_OPERATOR_DESC dml_op_desc = {DML_OPERATOR_ELEMENT_WISE_IDENTITY,
                                      &op_desc};
     auto* op = dml::GetOrCreateCompiledOperatorApi(&dml_op_desc);
@@ -134,10 +130,7 @@ class RotaryDMLCompute {
   }
 
  public:
-  RotaryDMLCompute(dml::Device* device, DataType ct2_data_type)
-      : device_(device),
-        ct2_data_type_(ct2_data_type),
-        dml_data_type_(dml::utils::get_dml_data_type(ct2_data_type)) {}
+  RotaryDMLCompute(dml::Device* device, DataType ct2_data_type) {}
 
   void compute(const StorageView& input,
                const StorageView& sin,

@@ -145,6 +145,10 @@ class DmlTensorDescBundle {
                       uint32_t minDimensionCount,
                       uint32_t guaranteedBaseOffsetAlignment);
 
+  static DmlTensorDescBundle broadcastFromSeach(
+      const StorageView& storage,
+      const std::vector<UINT>& target_dims);
+
   const DML_BUFFER_TENSOR_DESC& get_buffer_desc() const {
     return buffer_desc_internal;
   }

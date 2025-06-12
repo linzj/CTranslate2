@@ -520,6 +520,35 @@ DmlTensorDescBundle::DmlTensorDescBundle(
   }
 }
 
+DmlTensorDescBundle DmlTensorDescBundle::broadcastFromSeach(
+    const StorageView& tensor,
+    const std::vector<UINT>& target_dims) {
+  auto physical_shape =
+      dml::utils::to_dml_dims(tensor.shape(), tensor.size(), false);
+  if (physical_shape.empty()) {
+    physical_shape.push_back(1);
+  }
+  if (physical_shape.size() < target_dims.size()) {
+    auto it = std::search(target_dims.begin(), target_dims.end(),
+                          physical_shape.begin(), physical_shape.end());
+    if (it != target_dims.end()) {
+      size_t index = std::distance(target_dims.begin(), it);
+      std::vector<UINT> new_shape(index, 1);
+      new_shape.insert(new_shape.end(), physical_shape.begin(),
+                       physical_shape.end());
+      new_shape.resize(target_dims.size(), 1);
+      physical_shape = new_shape;
+    } else {
+      while (physical_shape.size() < target_dims.size()) {
+        physical_shape.push_back(1);
+      }
+    }
+  }
+  return dml::utils::DmlTensorDescBundle(
+      dml::utils::get_dml_data_type(tensor.dtype()), target_dims,
+      physical_shape, static_cast<int32_t>(target_dims.size()), 0, 0, 0, 0);
+}
+
 Microsoft::WRL::ComPtr<IResourceWrapper> CreateDmlConstantTensor(
     dml::Device* resolved_ct2_dml_device,
     DML_SCALAR_UNION resolved_scalar_value,
