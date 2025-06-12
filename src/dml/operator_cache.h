@@ -52,7 +52,7 @@ class DMLOperatorCache {
   void SerializeBufferTensorDesc(std::ostringstream& key_stream,
                                  const DML_BUFFER_TENSOR_DESC* buffer_desc);
 
-  std::unordered_map<std::string, std::unique_ptr<Operator>> _cache;
+  std::unordered_map<std::string, Microsoft::WRL::ComPtr<Operator>> _cache;
   std::mutex _mutex;      // Mutex to protect cache access.
   class Device* _device;  // The DML device used for operator creation.
 };

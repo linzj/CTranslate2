@@ -10,6 +10,7 @@
 namespace ctranslate2 {
 namespace dml {
 constexpr static const bool kCacheEnabled = true;
+using Microsoft::WRL::ComPtr;
 
 // Helper function to append raw bytes of a value to the ostringstream.
 template <typename T>
@@ -879,7 +880,7 @@ Operator* DMLOperatorCache::GetOrCreateCompiledOperator(
         SPDLOG_DEBUG(("Cache HIT for key prefix: " +
                       key.substr(0, std::min(key.length(), (size_t)16)) + "\n")
                          .c_str());
-        return it->second.get();
+        return it->second.Get();
       }
     }
     SPDLOG_DEBUG(("Cache MISS for key prefix: " +
@@ -899,8 +900,8 @@ Operator* DMLOperatorCache::GetOrCreateCompiledOperator(
       dml_operator.Get(), flags, IID_PPV_ARGS(&compiled_operator)));
   if (name)
     compiled_operator->SetName(name);
-  std::unique_ptr<Operator> operator_obj(
-      new Operator(_device, op_desc->Type, std::move(compiled_operator)));
+  ComPtr<Operator> operator_obj(Microsoft::WRL::Make<Operator>(
+      _device, op_desc->Type, std::move(compiled_operator)));
 
   if (kCacheEnabled) {
     // Re-lock to insert into the cache
@@ -908,12 +909,14 @@ Operator* DMLOperatorCache::GetOrCreateCompiledOperator(
     // Double-check if another thread created it in the meantime
     auto it = _cache.find(key);
     if (it != _cache.end()) {
-      return it->second.get();  // Another thread created and inserted it
+      return it->second.Get();  // Another thread created and inserted it
     }
-    _cache[key] = std::move(operator_obj);
-    return _cache[key].get();
+    _cache[key] = operator_obj;
   }
-  return operator_obj.release();
+  if (!kCacheEnabled) {
+    _device->KeepAliveUntilNextCommandListDispatch(operator_obj);
+  }
+  return operator_obj.Get();
 }
 
 // Implementation of the global helper function

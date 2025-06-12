@@ -2,12 +2,16 @@
 #include <vector>
 #include "dxmodule.h"
 
+#include <wrl/implements.h>
+
 namespace ctranslate2 {
 namespace dml {
 using Microsoft::WRL::ComPtr;
 class Device;
 
-class Operator {
+class Operator : public Microsoft::WRL::RuntimeClass<
+          Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
+          IUnknown> {
  public:
   explicit Operator(Device* device,
                     DML_OPERATOR_TYPE type,
