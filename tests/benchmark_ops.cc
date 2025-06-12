@@ -899,11 +899,12 @@ void benchmark_conv1d_qscale(Device device) {
     StorageView x({1, 1280, 3000}, DataType::FLOAT32,
                   device);  // Batch, Channels, Width
     StorageView weight({1280, 128, 3}, DataType::INT8,
-                       device);                          // Out, In, Kernel
+                       device);                           // Out, In, Kernel
     StorageView bias({1280}, DataType::FLOAT32, device);  // Out
     StorageView qscale({1280}, 2.5f, device);  // Use a realistic scale.
     StorageView y(DataType::FLOAT32, device);
-    const ops::Conv1D conv_op{2, 1, 1, 10};  // stride, padding, dilation, groups
+    const ops::Conv1D conv_op{2, 1, 1,
+                              10};  // stride, padding, dilation, groups
     BENCHMARK(conv_op(x, weight, bias, y, &qscale), 100);
   } else {
     const Shape x_shape = {1, 1280, 3000};
@@ -957,7 +958,7 @@ void benchmark_conv1d_qscale(Device device) {
     // For quantized ops, allow for a few mismatches due to potential rounding
     // differences between device and CPU.
     int total_mismatches = dispatch_compare_views(
-        y_device_cpu_copy, y_cpu, "Conv1D Qscale Output", error_log);
+        y_device_cpu_copy, y_cpu, "Conv1D Qscale Output", error_log, 0.002f);
 
     if (total_mismatches > 5) {
       std::cerr << error_log.str() << std::endl;

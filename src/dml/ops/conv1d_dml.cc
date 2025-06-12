@@ -183,7 +183,7 @@ void Conv1D::compute(const StorageView& input,
       dml_op->Execute(inputs.get_descs(), outputs.get_descs());
     }
 
-    // 3c. Multiply by weight_scale (*qscale)
+    // 3c. Multiply by weight_scale (*1/qscale)
     {
       dml::utils::DmlTensorDescBundle a_desc(tmp_float2);
       const auto target_dims =
@@ -195,10 +195,10 @@ void Conv1D::compute(const StorageView& input,
           physical_dims, (int32_t)target_dims.size(), 0, 0,
           (uint32_t)target_dims.size(), 0);
       dml::utils::DmlTensorDescBundle out_desc(final_float_output);
-      DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC op_desc{
+      DML_ELEMENT_WISE_DIVIDE_OPERATOR_DESC op_desc{
           &a_desc.get_tensor_desc(), &b_desc.get_tensor_desc(),
           &out_desc.get_tensor_desc()};
-      DML_OPERATOR_DESC dml_op_desc_wrapper{DML_OPERATOR_ELEMENT_WISE_MULTIPLY,
+      DML_OPERATOR_DESC dml_op_desc_wrapper{DML_OPERATOR_ELEMENT_WISE_DIVIDE,
                                             &op_desc};
 
       dml::Operator* dml_op = dml::GetOrCreateCompiledOperatorApi(
