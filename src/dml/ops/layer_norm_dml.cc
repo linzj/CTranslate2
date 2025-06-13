@@ -41,17 +41,22 @@ void LayerNorm::compute(const StorageView* beta,
     scale_bias_dml_dims = {1};
   }
 
-  dml::utils::DmlTensorDescBundle input_desc_bundle(input);
-  dml::utils::DmlTensorDescBundle output_desc_bundle(*output_ptr);
-  dml::utils::DmlTensorDescBundle scale_desc_bundle(
-      gamma->dtype(), scale_bias_dml_dims, nullptr,
-      gamma->size() * gamma->item_size());
-  dml::utils::DmlTensorDescBundle bias_desc_bundle(
-      beta->dtype(), scale_bias_dml_dims, nullptr,
-      beta->size() * beta->item_size());
+  dml::utils::DmlOperatorDescBundle op_desc_bundle;
+  dml::utils::DmlTensorDescBundle& input_desc_bundle =
+      op_desc_bundle.AddInput(input);
+  dml::utils::DmlTensorDescBundle& scale_desc_bundle =
+      op_desc_bundle.AddInput(gamma->dtype(), scale_bias_dml_dims, nullptr,
+                              gamma->size() * gamma->item_size());
+  dml::utils::DmlTensorDescBundle& bias_desc_bundle =
+      op_desc_bundle.AddInput(beta->dtype(), scale_bias_dml_dims, nullptr,
+                              beta->size() * beta->item_size());
+  dml::utils::DmlTensorDescBundle& output_desc_bundle =
+      op_desc_bundle.AddOutput(*output_ptr);
 
   UINT normalization_axis = static_cast<UINT>(axis);
-  DML_MEAN_VARIANCE_NORMALIZATION2_OPERATOR_DESC mvn_desc = {};
+  DML_MEAN_VARIANCE_NORMALIZATION2_OPERATOR_DESC& mvn_desc =
+      op_desc_bundle
+          .GetOperatorDesc<DML_MEAN_VARIANCE_NORMALIZATION2_OPERATOR_DESC>();
   mvn_desc.InputTensor = &input_desc_bundle.get_tensor_desc();
   mvn_desc.ScaleTensor = &scale_desc_bundle.get_tensor_desc();
   mvn_desc.BiasTensor = &bias_desc_bundle.get_tensor_desc();
@@ -62,9 +67,8 @@ void LayerNorm::compute(const StorageView* beta,
   mvn_desc.UseVariance = TRUE;
   mvn_desc.Epsilon = _epsilon;
 
-  DML_OPERATOR_DESC op_desc = {DML_OPERATOR_MEAN_VARIANCE_NORMALIZATION2,
-                               &mvn_desc};
-  auto* compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
+  auto* compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(std::move(op_desc_bundle));
 
   std::vector<dml::utils::DmlBufferBindingBundle> input_bundles;
   input_bundles.emplace_back(dml::utils::ResourceFromStorageView(input));

@@ -44,19 +44,18 @@ void TopPMask::compute(const StorageView& input,
 
   // Step 1: TopK to sort probabilities
   {
-    dml::utils::DmlTensorDescBundle probs_desc(probs);
-    dml::utils::DmlTensorDescBundle sorted_probs_desc(sorted_probs);
-    dml::utils::DmlTensorDescBundle sorted_indices_desc(sorted_indices);
-
-    DML_TOP_K1_OPERATOR_DESC topk_desc = {};
+    dml::utils::DmlOperatorDescBundle op_desc;
+    auto& probs_desc = op_desc.AddInput(probs);
+    auto& sorted_probs_desc = op_desc.AddOutput(sorted_probs);
+    auto& sorted_indices_desc = op_desc.AddOutput(sorted_indices);
+    auto& topk_desc = op_desc.GetOperatorDesc<DML_TOP_K1_OPERATOR_DESC>();
     topk_desc.InputTensor = &probs_desc.get_tensor_desc();
     topk_desc.OutputValueTensor = &sorted_probs_desc.get_tensor_desc();
     topk_desc.OutputIndexTensor = &sorted_indices_desc.get_tensor_desc();
     topk_desc.Axis = 1;
     topk_desc.K = static_cast<UINT>(depth);
     topk_desc.AxisDirection = DML_AXIS_DIRECTION_DECREASING;
-    DML_OPERATOR_DESC op_desc = {DML_OPERATOR_TOP_K1, &topk_desc};
-    auto* op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
+    auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_desc));
 
     dml::utils::DmlBindingArrayBundle inputs(
         {dml::utils::DmlBufferBindingBundle(
@@ -71,17 +70,17 @@ void TopPMask::compute(const StorageView& input,
 
   // Step 2: Cumulative sum
   {
-    dml::utils::DmlTensorDescBundle sorted_probs_desc(sorted_probs);
-    dml::utils::DmlTensorDescBundle cumsum_desc(cumsum);
-    DML_CUMULATIVE_SUMMATION_OPERATOR_DESC cumsum_op_desc = {};
+    dml::utils::DmlOperatorDescBundle op_desc;
+    auto& sorted_probs_desc = op_desc.AddInput(sorted_probs);
+    auto& cumsum_desc = op_desc.AddOutput(cumsum);
+    auto& cumsum_op_desc =
+        op_desc.GetOperatorDesc<DML_CUMULATIVE_SUMMATION_OPERATOR_DESC>();
     cumsum_op_desc.InputTensor = &sorted_probs_desc.get_tensor_desc();
     cumsum_op_desc.OutputTensor = &cumsum_desc.get_tensor_desc();
     cumsum_op_desc.Axis = 1;
     cumsum_op_desc.AxisDirection = DML_AXIS_DIRECTION_INCREASING;
     cumsum_op_desc.HasExclusiveSum = TRUE;
-    DML_OPERATOR_DESC op_desc = {DML_OPERATOR_CUMULATIVE_SUMMATION,
-                                 &cumsum_op_desc};
-    auto* op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
+    auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_desc));
 
     dml::utils::DmlBindingArrayBundle inputs(
         {dml::utils::DmlBufferBindingBundle(
@@ -95,18 +94,16 @@ void TopPMask::compute(const StorageView& input,
   // Step 3: Compare cumsum < p
   {
     threshold.fill(static_cast<T>(_p));
-    dml::utils::DmlTensorDescBundle cumsum_desc(cumsum);
-    dml::utils::DmlTensorDescBundle threshold_desc(threshold);
-    dml::utils::DmlTensorDescBundle mask_desc(mask);
-
-    DML_ELEMENT_WISE_LOGICAL_LESS_THAN_OPERATOR_DESC op_payload = {};
+    dml::utils::DmlOperatorDescBundle op_desc;
+    auto& cumsum_desc = op_desc.AddInput(cumsum);
+    auto& threshold_desc = op_desc.AddInput(threshold);
+    auto& mask_desc = op_desc.AddOutput(mask);
+    auto& op_payload = op_desc.GetOperatorDesc<
+        DML_ELEMENT_WISE_LOGICAL_LESS_THAN_OPERATOR_DESC>();
     op_payload.ATensor = &cumsum_desc.get_tensor_desc();
     op_payload.BTensor = &threshold_desc.get_tensor_desc();
     op_payload.OutputTensor = &mask_desc.get_tensor_desc();
-
-    DML_OPERATOR_DESC op_desc = {DML_OPERATOR_ELEMENT_WISE_LOGICAL_LESS_THAN,
-                                 &op_payload};
-    auto* op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
+    auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_desc));
 
     dml::utils::DmlBindingArrayBundle inputs(
         {dml::utils::DmlBufferBindingBundle(
@@ -121,16 +118,17 @@ void TopPMask::compute(const StorageView& input,
 
   // Step 4: Gather original input values in sorted order
   {
-    dml::utils::DmlTensorDescBundle input_desc(input);
-    dml::utils::DmlTensorDescBundle sorted_indices_desc(sorted_indices);
-    dml::utils::DmlTensorDescBundle gathered_desc(gathered_input);
-    DML_GATHER_ELEMENTS_OPERATOR_DESC op_payload = {};
+    dml::utils::DmlOperatorDescBundle op_desc;
+    auto& input_desc = op_desc.AddInput(input);
+    auto& sorted_indices_desc = op_desc.AddInput(sorted_indices);
+    auto& gathered_desc = op_desc.AddOutput(gathered_input);
+    auto& op_payload =
+        op_desc.GetOperatorDesc<DML_GATHER_ELEMENTS_OPERATOR_DESC>();
     op_payload.InputTensor = &input_desc.get_tensor_desc();
     op_payload.IndicesTensor = &sorted_indices_desc.get_tensor_desc();
     op_payload.OutputTensor = &gathered_desc.get_tensor_desc();
     op_payload.Axis = 1;
-    DML_OPERATOR_DESC op_desc = {DML_OPERATOR_GATHER_ELEMENTS, &op_payload};
-    auto* op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
+    auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_desc));
 
     dml::utils::DmlBindingArrayBundle inputs(
         {dml::utils::DmlBufferBindingBundle(
@@ -147,17 +145,18 @@ void TopPMask::compute(const StorageView& input,
   // mask
   {
     mask_value.fill(static_cast<T>(_mask_value));
-    dml::utils::DmlTensorDescBundle mask_desc(mask);
-    dml::utils::DmlTensorDescBundle gathered_desc(gathered_input);
-    dml::utils::DmlTensorDescBundle mask_val_desc(mask_value);
-    dml::utils::DmlTensorDescBundle masked_gathered_desc(masked_gathered);
-    DML_ELEMENT_WISE_IF_OPERATOR_DESC op_payload = {};
+    dml::utils::DmlOperatorDescBundle op_desc;
+    auto& mask_desc = op_desc.AddInput(mask);
+    auto& gathered_desc = op_desc.AddInput(gathered_input);
+    auto& mask_val_desc = op_desc.AddInput(mask_value);
+    auto& masked_gathered_desc = op_desc.AddOutput(masked_gathered);
+    auto& op_payload =
+        op_desc.GetOperatorDesc<DML_ELEMENT_WISE_IF_OPERATOR_DESC>();
     op_payload.ConditionTensor = &mask_desc.get_tensor_desc();
     op_payload.ATensor = &gathered_desc.get_tensor_desc();
     op_payload.BTensor = &mask_val_desc.get_tensor_desc();
     op_payload.OutputTensor = &masked_gathered_desc.get_tensor_desc();
-    DML_OPERATOR_DESC op_desc = {DML_OPERATOR_ELEMENT_WISE_IF, &op_payload};
-    auto* op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
+    auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_desc));
 
     dml::utils::DmlBindingArrayBundle inputs(
         {dml::utils::DmlBufferBindingBundle(
@@ -175,19 +174,18 @@ void TopPMask::compute(const StorageView& input,
   // Step 6: Scatter results back to original positions
   {
     output.zero();
-    dml::utils::DmlTensorDescBundle output_desc(output);
-    dml::utils::DmlTensorDescBundle sorted_indices_desc(sorted_indices);
-    dml::utils::DmlTensorDescBundle masked_gathered_desc(masked_gathered);
-
-    DML_SCATTER_ELEMENTS_OPERATOR_DESC op_payload = {};
+    dml::utils::DmlOperatorDescBundle op_desc;
+    auto& output_desc = op_desc.AddOutput(output);
+    auto& sorted_indices_desc = op_desc.AddInput(sorted_indices);
+    auto& masked_gathered_desc = op_desc.AddInput(masked_gathered);
+    auto& op_payload =
+        op_desc.GetOperatorDesc<DML_SCATTER_ELEMENTS_OPERATOR_DESC>();
     op_payload.InputTensor = &output_desc.get_tensor_desc();
     op_payload.IndicesTensor = &sorted_indices_desc.get_tensor_desc();
     op_payload.UpdatesTensor = &masked_gathered_desc.get_tensor_desc();
     op_payload.OutputTensor = &output_desc.get_tensor_desc();
     op_payload.Axis = 1;
-
-    DML_OPERATOR_DESC op_desc = {DML_OPERATOR_SCATTER_ELEMENTS, &op_payload};
-    auto* op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
+    auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_desc));
 
     dml::utils::DmlBindingArrayBundle inputs(
         {dml::utils::DmlBufferBindingBundle(

@@ -1,6 +1,7 @@
 #include "operator_cache.h"
 #include "backend_dml.h"
 #include "common.h"
+#include "dml_utils.h"
 #include "operator.h"
 
 #include <spdlog/spdlog.h>
@@ -48,7 +49,6 @@ DMLOperatorCache& DMLOperatorCache::instance() {
 void DMLOperatorCache::Clear() {
   std::lock_guard<std::mutex> lock(_mutex);
   _cache.clear();
-  SPDLOG_DEBUG("DMLOperatorCache cleared.");
 }
 
 void DMLOperatorCache::SerializeBufferTensorDesc(
@@ -865,35 +865,29 @@ std::string DMLOperatorCache::GenerateCacheKey(const DML_OPERATOR_DESC* op_desc,
 }
 
 Operator* DMLOperatorCache::GetOrCreateCompiledOperator(
-    const DML_OPERATOR_DESC* op_desc,
+    utils::DmlOperatorDescBundle&& op_desc,
     DML_EXECUTION_FLAGS flags,
     PCWSTR name) {
   std::string key;
   if (kCacheEnabled) {
-    key = GenerateCacheKey(op_desc, flags);
+    key = GenerateCacheKey(&op_desc.get_desc(), flags);
 
     // Scope for the lock
     {
       std::lock_guard<std::mutex> lock(_mutex);
       auto it = _cache.find(key);
       if (it != _cache.end()) {
-        SPDLOG_DEBUG(("Cache HIT for key prefix: " +
-                      key.substr(0, std::min(key.length(), (size_t)16)) + "\n")
-                         .c_str());
         return it->second.Get();
       }
     }
-    SPDLOG_DEBUG(("Cache MISS for key prefix: " +
-                  key.substr(0, std::min(key.length(), (size_t)16)) + "\n")
-                     .c_str());
   }
 
   auto dml_device = _device->DML();
   // Not found, create and compile. This is done outside the lock to avoid
   // holding it during potentially long operations.
   Microsoft::WRL::ComPtr<IDMLOperator> dml_operator;
-  THROW_IF_FAILED(
-      dml_device->CreateOperator(op_desc, IID_PPV_ARGS(&dml_operator)));
+  THROW_IF_FAILED(dml_device->CreateOperator(&op_desc.get_desc(),
+                                             IID_PPV_ARGS(&dml_operator)));
 
   Microsoft::WRL::ComPtr<IDMLCompiledOperator> compiled_operator;
   THROW_IF_FAILED(dml_device->CompileOperator(
@@ -901,7 +895,7 @@ Operator* DMLOperatorCache::GetOrCreateCompiledOperator(
   if (name)
     compiled_operator->SetName(name);
   ComPtr<Operator> operator_obj(Microsoft::WRL::Make<Operator>(
-      _device, op_desc->Type, std::move(compiled_operator)));
+      _device, std::move(op_desc), std::move(compiled_operator)));
 
   if (kCacheEnabled) {
     // Re-lock to insert into the cache
@@ -920,13 +914,14 @@ Operator* DMLOperatorCache::GetOrCreateCompiledOperator(
 }
 
 // Implementation of the global helper function
-Operator* GetOrCreateCompiledOperatorApi(const DML_OPERATOR_DESC* op_desc,
+Operator* GetOrCreateCompiledOperatorApi(utils::DmlOperatorDescBundle&& op_desc,
                                          DML_EXECUTION_FLAGS flags,
                                          PCWSTR name) {
   // Assumes get_dml_device() is available in ctranslate2::dml namespace
   // and returns the current IDMLDevice*.
   return DMLOperatorCache::instance().GetOrCreateCompiledOperator(
-      op_desc, flags | DML_EXECUTION_FLAG_DISABLE_META_COMMANDS, name);
+      std::move(op_desc), flags | DML_EXECUTION_FLAG_DISABLE_META_COMMANDS,
+      name);
 }
 
 }  // namespace dml

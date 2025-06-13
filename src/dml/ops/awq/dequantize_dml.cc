@@ -48,25 +48,28 @@ void DequantizeAwq::dequantize(const StorageView& input,
                     static_cast<UINT>(qout_c) * static_cast<UINT>(G), 8};
   }
 
-  dml::utils::DmlTensorDescBundle input_desc(
-      dml::utils::get_dml_data_type(input.dtype()), input_sizes, nullptr,
-      input.reserved_memory());
-  dml::utils::DmlTensorDescBundle scale_desc(
+  dml::utils::DmlOperatorDescBundle op_desc_bundle;
+  auto& input_desc =
+      op_desc_bundle.AddInput(dml::utils::get_dml_data_type(input.dtype()),
+                              input_sizes, nullptr, input.reserved_memory());
+  auto& scale_desc = op_desc_bundle.AddInput(
       dml::utils::get_dml_data_type(scale.dtype()), broadcasted_sizes,
       &scale_strides, scale.reserved_memory());
-  dml::utils::DmlTensorDescBundle zero_desc(
+  auto& zero_desc = op_desc_bundle.AddInput(
       dml::utils::get_dml_data_type(zero.dtype()), broadcasted_sizes,
       &zero_strides, zero.reserved_memory());
-  dml::utils::DmlTensorDescBundle output_desc(output);
+  auto& output_desc = op_desc_bundle.AddOutput(output);
 
-  DML_ELEMENT_WISE_DEQUANTIZE_LINEAR_OPERATOR_DESC dequantize_desc = {
-      &input_desc.get_tensor_desc(), &scale_desc.get_tensor_desc(),
-      &zero_desc.get_tensor_desc(), &output_desc.get_tensor_desc()};
+  auto& dequantize_desc =
+      op_desc_bundle
+          .GetOperatorDesc<DML_ELEMENT_WISE_DEQUANTIZE_LINEAR_OPERATOR_DESC>();
+  dequantize_desc.InputTensor = &input_desc.get_tensor_desc();
+  dequantize_desc.ScaleTensor = &scale_desc.get_tensor_desc();
+  dequantize_desc.ZeroPointTensor = &zero_desc.get_tensor_desc();
+  dequantize_desc.OutputTensor = &output_desc.get_tensor_desc();
 
-  DML_OPERATOR_DESC op_desc = {DML_OPERATOR_ELEMENT_WISE_DEQUANTIZE_LINEAR,
-                               &dequantize_desc};
-
-  auto* compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
+  auto* compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(std::move(op_desc_bundle));
 
   dml::utils::DmlBindingArrayBundle inputs(
       {dml::utils::DmlBufferBindingBundle(

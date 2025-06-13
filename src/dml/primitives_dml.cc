@@ -61,9 +61,10 @@ void primitives<Device::DirectML>::fill(T* x, T a, dim_t size) {
   // DirectML doesn't have a direct fill operator, so we'll use
   // DML_OPERATOR_FILL_VALUE_CONSTANT which fills with a constant value
 
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
   std::vector<UINT> output_fill_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle output_fill_bundle(
-      dml::get_dml_data_type<T>(), output_fill_dims, nullptr);
+  auto& output_fill_bundle = op_bundle.AddOutput(dml::get_dml_data_type<T>(),
+                                                 output_fill_dims, nullptr);
 
   // Create a value tensor with the constant
   DML_SCALAR_UNION value;
@@ -83,25 +84,23 @@ void primitives<Device::DirectML>::fill(T* x, T a, dim_t size) {
 
   // Alternative approach using FILL_VALUE_CONSTANT if available in your DML
   // version
-  DML_FILL_VALUE_CONSTANT_OPERATOR_DESC fill_constant_desc = {};
+  auto& fill_constant_desc =
+      op_bundle.GetOperatorDesc<DML_FILL_VALUE_CONSTANT_OPERATOR_DESC>();
   fill_constant_desc.OutputTensor = &output_fill_bundle.get_tensor_desc();
   fill_constant_desc.ValueDataType = dml::get_dml_data_type<T>();
   fill_constant_desc.Value = value;
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_FILL_VALUE_CONSTANT;
-  op_desc.Desc = &fill_constant_desc;
-
   dml::Operator* compiled_op;
   try {
     // Attempt to create/compile DML_OPERATOR_FILL_VALUE_CONSTANT
-    compiled_op =
-        dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+    compiled_op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle),
+                                                      DML_EXECUTION_FLAG_NONE);
   } catch (const std::runtime_error& e) {
     // If FILL_VALUE_CONSTANT failed, fall back to ELEMENT_WISE_IDENTITY
-    // Create a small constant buffer for the identity operation input
+    // Create a new op_bundle for the fallback operator.
+    ::ctranslate2::dml::utils::DmlOperatorDescBundle fallback_op_bundle;
     std::vector<UINT> constant_fill_fb_dims = {1, 1, 1, 1u};
-    ::ctranslate2::dml::utils::DmlTensorDescBundle constant_fill_fb_bundle(
+    auto& constant_fill_fb_bundle = fallback_op_bundle.AddInput(
         dml::get_dml_data_type<T>(), constant_fill_fb_dims, nullptr);
 
     // (Assuming the constant buffer resource for 'a' still needs to be handled
@@ -121,20 +120,21 @@ void primitives<Device::DirectML>::fill(T* x, T a, dim_t size) {
     // existing op creation calls first. The problem description is about
     // caching, not fixing underlying logic bugs if any.
 
-    DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC identity_desc = {};
+    auto& identity_desc =
+        fallback_op_bundle
+            .GetOperatorDesc<DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC>();
     identity_desc.InputTensor =
         &constant_fill_fb_bundle
              .get_tensor_desc();  // This is for a buffer of size 1
-    identity_desc.OutputTensor =
-        &output_fill_bundle.get_tensor_desc();  // This output_desc is for the
-                                                // target buffer of 'size'
-
-    op_desc.Type = DML_OPERATOR_ELEMENT_WISE_IDENTITY;
-    op_desc.Desc = &identity_desc;
+    // The output for identity should use the original output_fill_bundle
+    // which was created within the outer op_bundle, so we cannot just AddOutput
+    // it to the fallback_op_bundle. Instead, we can use the same
+    // `output_fill_bundle` directly for its `get_tensor_desc()`.
+    identity_desc.OutputTensor = &output_fill_bundle.get_tensor_desc();
 
     // Attempt to create/compile the fallback DML_OPERATOR_ELEMENT_WISE_IDENTITY
-    compiled_op =
-        dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+    compiled_op = dml::GetOrCreateCompiledOperatorApi(
+        std::move(fallback_op_bundle), DML_EXECUTION_FLAG_NONE);
   }
 
   // For FILL_VALUE_CONSTANT, we don't need input resources
@@ -158,23 +158,14 @@ void primitives<Device::DirectML>::strided_fill(T* x,
   auto dml_device = dml::get_dml_device();
 
   // For strided fill, we need to create a tensor with custom strides
-  UINT dims[] = {1, 1, 1, static_cast<UINT>(size)};
-  UINT strides[] = {static_cast<UINT>(size * inc_x),
-                    static_cast<UINT>(size * inc_x),
-                    static_cast<UINT>(size * inc_x), static_cast<UINT>(inc_x)};
+  std::vector<UINT> dims = {1, 1, 1, static_cast<UINT>(size)};
+  std::vector<UINT> strides = {
+      static_cast<UINT>(size * inc_x), static_cast<UINT>(size * inc_x),
+      static_cast<UINT>(size * inc_x), static_cast<UINT>(inc_x)};
 
-  DML_BUFFER_TENSOR_DESC output_buffer_desc = {};
-  output_buffer_desc.DataType = dml::get_dml_data_type<T>();
-  output_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-  output_buffer_desc.DimensionCount = 4;
-  output_buffer_desc.Sizes = dims;
-  output_buffer_desc.Strides = strides;
-  output_buffer_desc.TotalTensorSizeInBytes = size * inc_x * sizeof(T);
-  output_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
-
-  DML_TENSOR_DESC output_desc = {};
-  output_desc.Type = DML_TENSOR_TYPE_BUFFER;
-  output_desc.Desc = &output_buffer_desc;
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
+  auto& output_desc = op_bundle.AddOutput(dml::get_dml_data_type<T>(), dims,
+                                          &strides, size * inc_x * sizeof(T));
 
   // Use FILL_VALUE_CONSTANT with strided output
   DML_SCALAR_UNION value;
@@ -190,19 +181,16 @@ void primitives<Device::DirectML>::strided_fill(T* x,
     value.Float32 = static_cast<float>(a);
   }
 
-  DML_FILL_VALUE_CONSTANT_OPERATOR_DESC fill_desc = {};
-  fill_desc.OutputTensor = &output_desc;
-  fill_desc.ValueDataType = dml::get_dml_data_type<T>();
-  fill_desc.Value = value;
-
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_FILL_VALUE_CONSTANT;
-  op_desc.Desc = &fill_desc;
+  auto& fill_desc_val =
+      op_bundle.GetOperatorDesc<DML_FILL_VALUE_CONSTANT_OPERATOR_DESC>();
+  fill_desc_val.OutputTensor = &output_desc.get_tensor_desc();
+  fill_desc_val.ValueDataType = dml::get_dml_data_type<T>();
+  fill_desc_val.Value = value;
 
   dml::Operator* compiled_op;
   try {
-    compiled_op =
-        dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+    compiled_op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle),
+                                                      DML_EXECUTION_FLAG_NONE);
   } catch (const std::runtime_error& e) {
     // Fallback: fill entire buffer then use gather to select strided elements
     // This is less efficient but works
@@ -236,38 +224,37 @@ void primitives<Device::DirectML>::indexed_fill(T* x,
   fill(values.data<T>(), a, num_indices);
 
   // Now use scatter to place these values at the specified indices
-  std::vector<UINT> data_if_dims = {1, 1, 1,
-                                    static_cast<UINT>(x_total_elements)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle data_if_bundle(
-      dml::get_dml_data_type<T>(), data_if_dims, nullptr);
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
+  std::vector<UINT> data_if_dims_vec = {1, 1, 1,
+                                        static_cast<UINT>(x_total_elements)};
+  auto& data_if_bundle = op_bundle.AddInput(dml::get_dml_data_type<T>(),
+                                            data_if_dims_vec, nullptr);
 
-  std::vector<UINT> indices_if_dims = {1, 1, 1, static_cast<UINT>(num_indices)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle indices_if_bundle(
-      dml::get_dml_data_type<int32_t>(), indices_if_dims, nullptr);
+  std::vector<UINT> indices_if_dims_vec = {1, 1, 1,
+                                           static_cast<UINT>(num_indices)};
+  auto& indices_if_bundle = op_bundle.AddInput(
+      dml::get_dml_data_type<int32_t>(), indices_if_dims_vec, nullptr);
 
-  std::vector<UINT> updates_if_dims = {1, 1, 1, static_cast<UINT>(num_indices)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle updates_if_bundle(
-      dml::get_dml_data_type<T>(), updates_if_dims, nullptr);
+  std::vector<UINT> updates_if_dims_vec = {1, 1, 1,
+                                           static_cast<UINT>(num_indices)};
+  auto& updates_if_bundle = op_bundle.AddInput(dml::get_dml_data_type<T>(),
+                                               updates_if_dims_vec, nullptr);
 
-  std::vector<UINT> output_if_dims = {1, 1, 1,
-                                      static_cast<UINT>(x_total_elements)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle output_if_bundle(
-      dml::get_dml_data_type<T>(), output_if_dims, nullptr);
+  std::vector<UINT> output_if_dims_vec = {1, 1, 1,
+                                          static_cast<UINT>(x_total_elements)};
+  auto& output_if_bundle = op_bundle.AddOutput(dml::get_dml_data_type<T>(),
+                                               output_if_dims_vec, nullptr);
 
-  DML_SCATTER_OPERATOR_DESC scatter_desc = {};
+  auto& scatter_desc = op_bundle.GetOperatorDesc<DML_SCATTER_OPERATOR_DESC>();
   scatter_desc.InputTensor = &data_if_bundle.get_tensor_desc();
   scatter_desc.IndicesTensor = &indices_if_bundle.get_tensor_desc();
   scatter_desc.UpdatesTensor = &updates_if_bundle.get_tensor_desc();
   scatter_desc.OutputTensor = &output_if_bundle.get_tensor_desc();
   scatter_desc.Axis = 3;  // Last axis
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_SCATTER;
-  op_desc.Desc = &scatter_desc;
-
   dml::Operator* compiled_op;
-  compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  compiled_op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle),
+                                                    DML_EXECUTION_FLAG_NONE);
   // Duplicate the input x to avoid overlapping input and output resources.
   StorageView x_view(Device::DirectML, ctranslate2::type_to_dtype<T>::value);
   IResourceWrapper* input_resource_wrapper =
@@ -342,25 +329,22 @@ template <typename U, typename V>
 void primitives<Device::DirectML>::convert(const U* x, V* y, dim_t size) {
   auto dml_device = dml::get_dml_device();
 
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
   std::vector<UINT> input_convert_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle input_convert_bundle(
-      dml::get_dml_data_type<U>(), input_convert_dims, nullptr);
+  auto& input_convert_bundle = op_bundle.AddInput(dml::get_dml_data_type<U>(),
+                                                  input_convert_dims, nullptr);
 
   std::vector<UINT> output_convert_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle output_convert_bundle(
+  auto& output_convert_bundle = op_bundle.AddOutput(
       dml::get_dml_data_type<V>(), output_convert_dims, nullptr);
 
   // Use DML cast operation
-  DML_CAST_OPERATOR_DESC cast_desc = {};
+  auto& cast_desc = op_bundle.GetOperatorDesc<DML_CAST_OPERATOR_DESC>();
   cast_desc.InputTensor = &input_convert_bundle.get_tensor_desc();
   cast_desc.OutputTensor = &output_convert_bundle.get_tensor_desc();
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_CAST;
-  op_desc.Desc = &cast_desc;
-
-  dml::Operator* compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
   auto dxdevice = dml::get_device();
 
@@ -374,16 +358,17 @@ template <typename T>
 T primitives<Device::DirectML>::sum(const T* array, dim_t size) {
   auto dml_device = dml::get_dml_device();
 
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
   std::vector<UINT> input_sum_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle input_sum_bundle(
-      dml::get_dml_data_type<T>(), input_sum_dims, nullptr);
+  auto& input_sum_bundle =
+      op_bundle.AddInput(dml::get_dml_data_type<T>(), input_sum_dims, nullptr);
 
   StorageView output_storage({1, 1, 1, 1}, type_to_dtype<T>::value,
                              Device::DirectML);
-  ::ctranslate2::dml::utils::DmlTensorDescBundle output_bundle(output_storage);
+  auto& output_bundle = op_bundle.AddOutput(output_storage);
 
   // Use DML reduce sum operation
-  DML_REDUCE_OPERATOR_DESC reduce_desc = {};
+  auto& reduce_desc = op_bundle.GetOperatorDesc<DML_REDUCE_OPERATOR_DESC>();
   reduce_desc.Function = DML_REDUCE_FUNCTION_SUM;
   reduce_desc.InputTensor = &input_sum_bundle.get_tensor_desc();
   reduce_desc.OutputTensor = &output_bundle.get_tensor_desc();
@@ -392,12 +377,8 @@ T primitives<Device::DirectML>::sum(const T* array, dim_t size) {
   reduce_desc.AxisCount = 1;
   reduce_desc.Axes = axes;
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_REDUCE;
-  op_desc.Desc = &reduce_desc;
-
-  dml::Operator* compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
   std::vector<ID3D12Resource*> inputs = {
       dml::utils::ResourceFromRawBuffer(array)};
@@ -413,15 +394,16 @@ template <typename T>
 dim_t primitives<Device::DirectML>::max_element(const T* array, dim_t size) {
   auto dml_device = dml::get_dml_device();
 
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
   std::vector<UINT> input_maxel_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle input_maxel_bundle(
-      dml::get_dml_data_type<T>(), input_maxel_dims, nullptr);
+  auto& input_maxel_bundle = op_bundle.AddInput(dml::get_dml_data_type<T>(),
+                                                input_maxel_dims, nullptr);
 
   StorageView output_storage({1, 1, 1, 1}, DataType::INT32, Device::DirectML);
-  ::ctranslate2::dml::utils::DmlTensorDescBundle output_bundle(output_storage);
+  auto& output_bundle = op_bundle.AddOutput(output_storage);
 
   // Use DML argmax operation
-  DML_ARGMAX_OPERATOR_DESC argmax_desc = {};
+  auto& argmax_desc = op_bundle.GetOperatorDesc<DML_ARGMAX_OPERATOR_DESC>();
   argmax_desc.InputTensor = &input_maxel_bundle.get_tensor_desc();
   argmax_desc.OutputTensor = &output_bundle.get_tensor_desc();
   argmax_desc.AxisCount = 1;
@@ -429,12 +411,8 @@ dim_t primitives<Device::DirectML>::max_element(const T* array, dim_t size) {
   argmax_desc.Axes = &axis;
   argmax_desc.AxisDirection = DML_AXIS_DIRECTION_INCREASING;
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_ARGMAX;
-  op_desc.Desc = &argmax_desc;
-
-  dml::Operator* compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
   std::vector<ID3D12Resource*> inputs = {
       dml::utils::ResourceFromRawBuffer(array)};
@@ -450,15 +428,16 @@ template <typename T>
 T primitives<Device::DirectML>::max(const T* array, dim_t size) {
   auto dml_device = dml::get_dml_device();
 
-  std::vector<UINT> input_maxarr_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle input_maxarr_bundle(
-      dml::get_dml_data_type<T>(), input_maxarr_dims, nullptr);
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
+  std::vector<UINT> input_maxarr_dims_vec = {1, 1, 1, static_cast<UINT>(size)};
+  auto& input_maxarr_bundle = op_bundle.AddInput(
+      dml::get_dml_data_type<T>(), input_maxarr_dims_vec, nullptr);
 
   StorageView output_storage({1, 1, 1, 1}, type_to_dtype<T>::value,
                              Device::DirectML);
-  ::ctranslate2::dml::utils::DmlTensorDescBundle output_bundle(output_storage);
+  auto& output_bundle = op_bundle.AddOutput(output_storage);
 
-  DML_REDUCE_OPERATOR_DESC reduce_desc = {};
+  auto& reduce_desc = op_bundle.GetOperatorDesc<DML_REDUCE_OPERATOR_DESC>();
   reduce_desc.Function = DML_REDUCE_FUNCTION_MAX;
   reduce_desc.InputTensor = &input_maxarr_bundle.get_tensor_desc();
   reduce_desc.OutputTensor = &output_bundle.get_tensor_desc();
@@ -467,12 +446,8 @@ T primitives<Device::DirectML>::max(const T* array, dim_t size) {
   reduce_desc.AxisCount = 1;
   reduce_desc.Axes = axes;
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_REDUCE;
-  op_desc.Desc = &reduce_desc;
-
-  dml::Operator* compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
   std::vector<ID3D12Resource*> inputs = {
       dml::utils::ResourceFromRawBuffer(array)};
@@ -495,28 +470,27 @@ void primitives<Device::DirectML>::add(T a, const T* x, T* y, dim_t size) {
   const auto target_dims = dml::utils::to_dml_dims(input.shape(), input.size());
   const auto physical_dims = dml::utils::to_dml_dims(a_scalar_storage.shape(),
                                                      a_scalar_storage.size());
-  dml::utils::DmlTensorDescBundle a_scalar_bundle(
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
+  auto& a_scalar_bundle = op_bundle.AddInput(
       dml::utils::get_dml_data_type(a_scalar_storage.dtype()), target_dims,
       physical_dims, (int32_t)target_dims.size(), 0, 0,
       (uint32_t)target_dims.size(), 0);
 
   // Create and execute the Add operator.
-  dml::utils::DmlTensorDescBundle b_bundle(input);
-  dml::utils::DmlTensorDescBundle output_bundle(
-      dml::get_dml_data_type<T>(), {1, 1, 1, static_cast<UINT>(size)}, nullptr);
+  auto& b_bundle = op_bundle.AddInput(input);
+  auto& output_bundle = op_bundle.AddOutput(
+      dml::get_dml_data_type<T>(),
+      std::vector<UINT>{1, 1, 1, static_cast<UINT>(size)}, nullptr);
 
-  DML_ELEMENT_WISE_ADD_OPERATOR_DESC add_desc = {};
+  auto& add_desc =
+      op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_ADD_OPERATOR_DESC>();
   add_desc.ATensor =
       &a_scalar_bundle.get_tensor_desc();  // Use the tiled tensor
   add_desc.BTensor = &b_bundle.get_tensor_desc();
   add_desc.OutputTensor = &output_bundle.get_tensor_desc();
 
-  DML_OPERATOR_DESC add_op_desc = {};
-  add_op_desc.Type = DML_OPERATOR_ELEMENT_WISE_ADD;
-  add_op_desc.Desc = &add_desc;
-
   dml::Operator* add_op = dml::GetOrCreateCompiledOperatorApi(
-      &add_op_desc, DML_EXECUTION_FLAG_NONE);
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
   add_op->Execute({dml::utils::ResourceFromStorageView(a_scalar_storage),
                    dml::utils::ResourceFromRawBuffer(x)},
@@ -531,29 +505,27 @@ void primitives<Device::DirectML>::add(const T* a,
                                        dim_t size) {
   auto dml_device = dml::get_dml_device();
 
-  std::vector<UINT> a_add_arr_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle a_add_arr_bundle(
-      dml::get_dml_data_type<T>(), a_add_arr_dims, nullptr);
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
+  std::vector<UINT> a_add_arr_dims_vec = {1, 1, 1, static_cast<UINT>(size)};
+  auto& a_add_arr_bundle = op_bundle.AddInput(dml::get_dml_data_type<T>(),
+                                              a_add_arr_dims_vec, nullptr);
 
   std::vector<UINT> b_add_arr_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle b_add_arr_bundle(
-      dml::get_dml_data_type<T>(), b_add_arr_dims, nullptr);
+  auto& b_add_arr_bundle =
+      op_bundle.AddInput(dml::get_dml_data_type<T>(), b_add_arr_dims, nullptr);
 
   std::vector<UINT> output_add_arr_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle output_add_arr_bundle(
+  auto& output_add_arr_bundle = op_bundle.AddOutput(
       dml::get_dml_data_type<T>(), output_add_arr_dims, nullptr);
 
-  DML_ELEMENT_WISE_ADD_OPERATOR_DESC add_desc = {};
+  auto& add_desc =
+      op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_ADD_OPERATOR_DESC>();
   add_desc.ATensor = &a_add_arr_bundle.get_tensor_desc();
   add_desc.BTensor = &b_add_arr_bundle.get_tensor_desc();
   add_desc.OutputTensor = &output_add_arr_bundle.get_tensor_desc();
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_ELEMENT_WISE_ADD;
-  op_desc.Desc = &add_desc;
-
-  dml::Operator* compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
   auto dxdevice = dml::get_device();
 
@@ -571,29 +543,27 @@ void primitives<Device::DirectML>::sub(const T* a,
                                        dim_t size) {
   auto dml_device = dml::get_dml_device();
 
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
   std::vector<UINT> a_sub_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle a_sub_bundle(
-      dml::get_dml_data_type<T>(), a_sub_dims, nullptr);
+  auto& a_sub_bundle =
+      op_bundle.AddInput(dml::get_dml_data_type<T>(), a_sub_dims, nullptr);
 
   std::vector<UINT> b_sub_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle b_sub_bundle(
-      dml::get_dml_data_type<T>(), b_sub_dims, nullptr);
+  auto& b_sub_bundle =
+      op_bundle.AddInput(dml::get_dml_data_type<T>(), b_sub_dims, nullptr);
 
   std::vector<UINT> output_sub_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle output_sub_bundle(
-      dml::get_dml_data_type<T>(), output_sub_dims, nullptr);
+  auto& output_sub_bundle = op_bundle.AddOutput(dml::get_dml_data_type<T>(),
+                                                output_sub_dims, nullptr);
 
-  DML_ELEMENT_WISE_SUBTRACT_OPERATOR_DESC sub_desc = {};
+  auto& sub_desc =
+      op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_SUBTRACT_OPERATOR_DESC>();
   sub_desc.ATensor = &a_sub_bundle.get_tensor_desc();
   sub_desc.BTensor = &b_sub_bundle.get_tensor_desc();
   sub_desc.OutputTensor = &output_sub_bundle.get_tensor_desc();
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_ELEMENT_WISE_SUBTRACT;
-  op_desc.Desc = &sub_desc;
-
-  dml::Operator* compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
   auto dxdevice = dml::get_device();
 
@@ -616,27 +586,26 @@ void primitives<Device::DirectML>::mul(T a, const T* x, T* y, dim_t size) {
   const auto target_dims = dml::utils::to_dml_dims(input.shape(), input.size());
   const auto physical_dims = dml::utils::to_dml_dims(a_scalar_storage.shape(),
                                                      a_scalar_storage.size());
-  dml::utils::DmlTensorDescBundle a_scalar_bundle(
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
+  auto& a_scalar_bundle = op_bundle.AddInput(
       dml::utils::get_dml_data_type(a_scalar_storage.dtype()), target_dims,
       physical_dims, (int32_t)target_dims.size(), 0, 0,
       (uint32_t)target_dims.size(), 0);
 
   // Perform element-wise multiplication.
-  dml::utils::DmlTensorDescBundle b_bundle(input);
-  dml::utils::DmlTensorDescBundle output_bundle(
-      dml::get_dml_data_type<T>(), {1, 1, 1, static_cast<UINT>(size)}, nullptr);
+  auto& b_bundle = op_bundle.AddInput(input);
+  auto& output_bundle = op_bundle.AddOutput(
+      dml::get_dml_data_type<T>(),
+      std::vector<UINT>{1, 1, 1, static_cast<UINT>(size)}, nullptr);
 
-  DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC mul_desc = {};
+  auto& mul_desc =
+      op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC>();
   mul_desc.ATensor = &a_scalar_bundle.get_tensor_desc();
   mul_desc.BTensor = &b_bundle.get_tensor_desc();
   mul_desc.OutputTensor = &output_bundle.get_tensor_desc();
 
-  DML_OPERATOR_DESC mul_op_desc = {};
-  mul_op_desc.Type = DML_OPERATOR_ELEMENT_WISE_MULTIPLY;
-  mul_op_desc.Desc = &mul_desc;
-
   dml::Operator* mul_op = dml::GetOrCreateCompiledOperatorApi(
-      &mul_op_desc, DML_EXECUTION_FLAG_NONE);
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
   mul_op->Execute({dml::utils::ResourceFromStorageView(a_scalar_storage),
                    dml::utils::ResourceFromRawBuffer(x)},
                   {dml::utils::ResourceFromRawBuffer(y)});
@@ -650,29 +619,27 @@ void primitives<Device::DirectML>::mul(const T* a,
                                        dim_t size) {
   auto dml_device = dml::get_dml_device();
 
-  std::vector<UINT> a_mul_arr_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle a_mul_arr_bundle(
-      dml::get_dml_data_type<T>(), a_mul_arr_dims, nullptr);
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
+  std::vector<UINT> a_mul_arr_dims_vec = {1, 1, 1, static_cast<UINT>(size)};
+  auto& a_mul_arr_bundle = op_bundle.AddInput(dml::get_dml_data_type<T>(),
+                                              a_mul_arr_dims_vec, nullptr);
 
   std::vector<UINT> b_mul_arr_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle b_mul_arr_bundle(
-      dml::get_dml_data_type<T>(), b_mul_arr_dims, nullptr);
+  auto& b_mul_arr_bundle =
+      op_bundle.AddInput(dml::get_dml_data_type<T>(), b_mul_arr_dims, nullptr);
 
   std::vector<UINT> output_mul_arr_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle output_mul_arr_bundle(
+  auto& output_mul_arr_bundle = op_bundle.AddOutput(
       dml::get_dml_data_type<T>(), output_mul_arr_dims, nullptr);
 
-  DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC mul_desc = {};
+  auto& mul_desc =
+      op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC>();
   mul_desc.ATensor = &a_mul_arr_bundle.get_tensor_desc();
   mul_desc.BTensor = &b_mul_arr_bundle.get_tensor_desc();
   mul_desc.OutputTensor = &output_mul_arr_bundle.get_tensor_desc();
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_ELEMENT_WISE_MULTIPLY;
-  op_desc.Desc = &mul_desc;
-
-  dml::Operator* compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
   auto dxdevice = dml::get_device();
 
@@ -688,24 +655,22 @@ template <typename T>
 void primitives<Device::DirectML>::relu(const T* x, T* y, dim_t size) {
   auto dml_device = dml::get_dml_device();
 
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
   std::vector<UINT> input_relu_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle input_relu_bundle(
-      dml::get_dml_data_type<T>(), input_relu_dims, nullptr);
+  auto& input_relu_bundle =
+      op_bundle.AddInput(dml::get_dml_data_type<T>(), input_relu_dims, nullptr);
 
   std::vector<UINT> output_relu_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle output_relu_bundle(
-      dml::get_dml_data_type<T>(), output_relu_dims, nullptr);
+  auto& output_relu_bundle = op_bundle.AddOutput(dml::get_dml_data_type<T>(),
+                                                 output_relu_dims, nullptr);
 
-  DML_ACTIVATION_RELU_OPERATOR_DESC relu_desc = {};
+  auto& relu_desc =
+      op_bundle.GetOperatorDesc<DML_ACTIVATION_RELU_OPERATOR_DESC>();
   relu_desc.InputTensor = &input_relu_bundle.get_tensor_desc();
   relu_desc.OutputTensor = &output_relu_bundle.get_tensor_desc();
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_ACTIVATION_RELU;
-  op_desc.Desc = &relu_desc;
-
-  dml::Operator* compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
   auto dxdevice = dml::get_device();
 
@@ -719,24 +684,22 @@ template <typename T>
 void primitives<Device::DirectML>::sigmoid(const T* x, T* y, dim_t size) {
   auto dml_device = dml::get_dml_device();
 
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
   std::vector<UINT> input_sigmoid_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle input_sigmoid_bundle(
-      dml::get_dml_data_type<T>(), input_sigmoid_dims, nullptr);
+  auto& input_sigmoid_bundle = op_bundle.AddInput(dml::get_dml_data_type<T>(),
+                                                  input_sigmoid_dims, nullptr);
 
   std::vector<UINT> output_sigmoid_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle output_sigmoid_bundle(
+  auto& output_sigmoid_bundle = op_bundle.AddOutput(
       dml::get_dml_data_type<T>(), output_sigmoid_dims, nullptr);
 
-  DML_ACTIVATION_SIGMOID_OPERATOR_DESC sigmoid_desc = {};
+  auto& sigmoid_desc =
+      op_bundle.GetOperatorDesc<DML_ACTIVATION_SIGMOID_OPERATOR_DESC>();
   sigmoid_desc.InputTensor = &input_sigmoid_bundle.get_tensor_desc();
   sigmoid_desc.OutputTensor = &output_sigmoid_bundle.get_tensor_desc();
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_ACTIVATION_SIGMOID;
-  op_desc.Desc = &sigmoid_desc;
-
-  dml::Operator* compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
   auto dxdevice = dml::get_device();
 
@@ -750,24 +713,22 @@ template <typename T>
 void primitives<Device::DirectML>::tanh(const T* x, T* y, dim_t size) {
   auto dml_device = dml::get_dml_device();
 
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
   std::vector<UINT> input_tanh_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle input_tanh_bundle(
-      dml::get_dml_data_type<T>(), input_tanh_dims, nullptr);
+  auto& input_tanh_bundle =
+      op_bundle.AddInput(dml::get_dml_data_type<T>(), input_tanh_dims, nullptr);
 
   std::vector<UINT> output_tanh_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle output_tanh_bundle(
-      dml::get_dml_data_type<T>(), output_tanh_dims, nullptr);
+  auto& output_tanh_bundle = op_bundle.AddOutput(dml::get_dml_data_type<T>(),
+                                                 output_tanh_dims, nullptr);
 
-  DML_ACTIVATION_TANH_OPERATOR_DESC tanh_desc = {};
+  auto& tanh_desc =
+      op_bundle.GetOperatorDesc<DML_ACTIVATION_TANH_OPERATOR_DESC>();
   tanh_desc.InputTensor = &input_tanh_bundle.get_tensor_desc();
   tanh_desc.OutputTensor = &output_tanh_bundle.get_tensor_desc();
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_ACTIVATION_TANH;
-  op_desc.Desc = &tanh_desc;
-
-  dml::Operator* compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
   auto dxdevice = dml::get_device();
 
@@ -819,9 +780,10 @@ void primitives<Device::DirectML>::gemm<int8_t, int32_t>(
     a_strides = {(UINT)(lda * a_mem_rows), (UINT)(lda * a_mem_rows), (UINT)lda,
                  1};
   }
-  dml::utils::DmlTensorDescBundle a_bundle(DML_TENSOR_DATA_TYPE_INT8, a_dims,
-                                           &a_strides,
-                                           a_mem_rows * lda * sizeof(int8_t));
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle matmul_op_bundle;
+  auto& a_bundle =
+      matmul_op_bundle.AddInput(DML_TENSOR_DATA_TYPE_INT8, a_dims, &a_strides,
+                                a_mem_rows * lda * sizeof(int8_t));
 
   dim_t b_op_rows = k;
   dim_t b_op_cols = n;
@@ -835,24 +797,23 @@ void primitives<Device::DirectML>::gemm<int8_t, int32_t>(
     b_strides = {(UINT)(ldb * b_mem_rows), (UINT)(ldb * b_mem_rows), (UINT)ldb,
                  1};
   }
-  dml::utils::DmlTensorDescBundle b_bundle(DML_TENSOR_DATA_TYPE_INT8, b_dims,
-                                           &b_strides,
-                                           b_mem_rows * ldb * sizeof(int8_t));
+  auto& b_bundle =
+      matmul_op_bundle.AddInput(DML_TENSOR_DATA_TYPE_INT8, b_dims, &b_strides,
+                                b_mem_rows * ldb * sizeof(int8_t));
 
   StorageView matmul_output({(dim_t)m, (dim_t)n}, DataType::INT32,
                             Device::DirectML);
-  dml::utils::DmlTensorDescBundle c_bundle(matmul_output);
+  auto& c_bundle = matmul_op_bundle.AddOutput(matmul_output);
 
-  DML_MATRIX_MULTIPLY_INTEGER_OPERATOR_DESC matmul_desc = {};
+  auto& matmul_desc =
+      matmul_op_bundle
+          .GetOperatorDesc<DML_MATRIX_MULTIPLY_INTEGER_OPERATOR_DESC>();
   matmul_desc.ATensor = &a_bundle.get_tensor_desc();
   matmul_desc.BTensor = &b_bundle.get_tensor_desc();
   matmul_desc.OutputTensor = &c_bundle.get_tensor_desc();
 
-  DML_OPERATOR_DESC op_desc = {DML_OPERATOR_MATRIX_MULTIPLY_INTEGER,
-                               &matmul_desc};
-
-  dml::Operator* matmul_op =
-      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  dml::Operator* matmul_op = dml::GetOrCreateCompiledOperatorApi(
+      std::move(matmul_op_bundle), DML_EXECUTION_FLAG_NONE);
 
   matmul_op->Execute({dml::utils::ResourceFromRawBuffer(a), nullptr,
                       dml::utils::ResourceFromRawBuffer(b), nullptr},
@@ -876,21 +837,19 @@ void primitives<Device::DirectML>::gemm<int8_t, int32_t>(
     }
   } else {
     // C is not contiguous (ldc > n).
-    UINT c_dims[] = {1, 1, static_cast<UINT>(m), static_cast<UINT>(n)};
-    UINT c_strides[] = {static_cast<UINT>(ldc * m), static_cast<UINT>(ldc * m),
-                        static_cast<UINT>(ldc), 1};
+    std::vector<UINT> c_dims = {1, 1, static_cast<UINT>(m),
+                                static_cast<UINT>(n)};
+    std::vector<UINT> c_strides = {static_cast<UINT>(ldc * m),
+                                   static_cast<UINT>(ldc * m),
+                                   static_cast<UINT>(ldc), 1};
     const auto c_total_bytes = static_cast<UINT64>(m) * ldc * sizeof(int32_t);
 
-    DML_BUFFER_TENSOR_DESC c_buffer_desc = {};
-    c_buffer_desc.DataType = DML_TENSOR_DATA_TYPE_INT32;
-    c_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-    c_buffer_desc.DimensionCount = 4;
-    c_buffer_desc.Sizes = c_dims;
-    c_buffer_desc.Strides = c_strides;
-    c_buffer_desc.TotalTensorSizeInBytes = c_total_bytes;
-    DML_TENSOR_DESC c_desc = {DML_TENSOR_TYPE_BUFFER, &c_buffer_desc};
-
-    dml::utils::DmlTensorDescBundle matmul_bundle(matmul_output);
+    ::ctranslate2::dml::utils::DmlOperatorDescBundle bundle_inner;
+    auto& matmul_bundle = bundle_inner.AddInput(matmul_output);
+    auto& c_desc_bundle_input = bundle_inner.AddInput(
+        DML_TENSOR_DATA_TYPE_INT32, c_dims, &c_strides, c_total_bytes);
+    auto& c_desc_bundle_output = bundle_inner.AddOutput(
+        DML_TENSOR_DATA_TYPE_INT32, c_dims, &c_strides, c_total_bytes);
 
     if (beta != 0.0f) {
       if (beta != 1.0f) {
@@ -898,48 +857,48 @@ void primitives<Device::DirectML>::gemm<int8_t, int32_t>(
             "DirectML INT8 GEMM implementation only supports beta 0.0 or 1.0");
       }
       // In-place add: c = matmul_output + c
-      DML_ELEMENT_WISE_ADD_OPERATOR_DESC add_desc = {};
-      add_desc.ATensor = &matmul_bundle.get_tensor_desc();
-      add_desc.BTensor = &c_desc;
-      add_desc.OutputTensor = &c_desc;
-      DML_OPERATOR_DESC op_desc = {DML_OPERATOR_ELEMENT_WISE_ADD, &add_desc};
+      auto& add_desc_inner =
+          bundle_inner.GetOperatorDesc<DML_ELEMENT_WISE_ADD_OPERATOR_DESC>();
+      add_desc_inner.ATensor = &matmul_bundle.get_tensor_desc();
+      add_desc_inner.BTensor = &c_desc_bundle_input.get_tensor_desc();
+      add_desc_inner.OutputTensor = &c_desc_bundle_output.get_tensor_desc();
       dml::Operator* add_op = dml::GetOrCreateCompiledOperatorApi(
-          &op_desc, DML_EXECUTION_FLAG_NONE);
+          std::move(bundle_inner), DML_EXECUTION_FLAG_NONE);
       add_op->Execute({dml::utils::ResourceFromStorageView(matmul_output),
                        dml::utils::ResourceFromRawBuffer(c)},
                       {dml::utils::ResourceFromRawBuffer(c)});
     } else {
       // c = matmul_output (contiguous to strided copy)
-      DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC identity_desc = {};
+      auto& identity_desc =
+          bundle_inner
+              .GetOperatorDesc<DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC>();
       identity_desc.InputTensor = &matmul_bundle.get_tensor_desc();
-      identity_desc.OutputTensor = &c_desc;
-      DML_OPERATOR_DESC op_desc = {DML_OPERATOR_ELEMENT_WISE_IDENTITY,
-                                   &identity_desc};
+      identity_desc.OutputTensor = &c_desc_bundle_output.get_tensor_desc();
       dml::Operator* copy_op = dml::GetOrCreateCompiledOperatorApi(
-          &op_desc, DML_EXECUTION_FLAG_NONE);
+          std::move(bundle_inner), DML_EXECUTION_FLAG_NONE);
       copy_op->Execute({dml::utils::ResourceFromStorageView(matmul_output)},
                        {dml::utils::ResourceFromRawBuffer(c)});
     }
 
     if (a_shift_compensation) {
+      ::ctranslate2::dml::utils::DmlOperatorDescBundle shift_op_bundle;
       // Broadcast add of compensation vector to each row of c.
-      UINT shift_dims[] = {1, 1, 1, static_cast<UINT>(n)};
-      DML_BUFFER_TENSOR_DESC shift_buffer_desc = {};
-      shift_buffer_desc.DataType = DML_TENSOR_DATA_TYPE_INT32;
-      shift_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-      shift_buffer_desc.DimensionCount = 4;
-      shift_buffer_desc.Sizes = shift_dims;
-      shift_buffer_desc.TotalTensorSizeInBytes =
-          static_cast<UINT64>(n) * sizeof(int32_t);
-      DML_TENSOR_DESC shift_desc = {DML_TENSOR_TYPE_BUFFER, &shift_buffer_desc};
+      std::vector<UINT> shift_dims = {1, 1, 1, static_cast<UINT>(n)};
+      auto& c_bundle_shift_input = shift_op_bundle.AddInput(
+          DML_TENSOR_DATA_TYPE_INT32, c_dims, &c_strides, c_total_bytes);
+      auto& shift_desc_bundle = shift_op_bundle.AddInput(
+          DML_TENSOR_DATA_TYPE_INT32, shift_dims, nullptr,
+          static_cast<UINT64>(n) * sizeof(int32_t));
+      auto& c_bundle_shift_output = shift_op_bundle.AddOutput(
+          DML_TENSOR_DATA_TYPE_INT32, c_dims, &c_strides, c_total_bytes);
 
-      DML_ELEMENT_WISE_ADD_OPERATOR_DESC add_desc = {};
-      add_desc.ATensor = &c_desc;
-      add_desc.BTensor = &shift_desc;  // Broadcast
-      add_desc.OutputTensor = &c_desc;
-      DML_OPERATOR_DESC op_desc = {DML_OPERATOR_ELEMENT_WISE_ADD, &add_desc};
+      auto& add_desc =
+          shift_op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_ADD_OPERATOR_DESC>();
+      add_desc.ATensor = &c_bundle_shift_input.get_tensor_desc();
+      add_desc.BTensor = &shift_desc_bundle.get_tensor_desc();  // Broadcast
+      add_desc.OutputTensor = &c_bundle_shift_output.get_tensor_desc();
       dml::Operator* add_op = dml::GetOrCreateCompiledOperatorApi(
-          &op_desc, DML_EXECUTION_FLAG_NONE);
+          std::move(shift_op_bundle), DML_EXECUTION_FLAG_NONE);
       add_op->Execute({dml::utils::ResourceFromRawBuffer(c),
                        dml::utils::ResourceFromRawBuffer(a_shift_compensation)},
                       {dml::utils::ResourceFromRawBuffer(c)});
@@ -981,74 +940,50 @@ void primitives<Device::DirectML>::gemm(bool a_is_packed,
 
   // Create tensor descriptors with proper strides based on leading dimensions
   // For row-major storage: stride[i] = lda for moving between rows
-  UINT a_dims[] = {1, 1, static_cast<UINT>(a_rows), static_cast<UINT>(a_cols)};
-  UINT a_strides[] = {
+  std::vector<UINT> a_dims = {1, 1, static_cast<UINT>(a_rows),
+                              static_cast<UINT>(a_cols)};
+  std::vector<UINT> a_strides = {
       static_cast<UINT>(lda * a_rows),  // Batch stride (not used)
       static_cast<UINT>(lda * a_rows),  // Batch stride (not used)
       static_cast<UINT>(lda),           // Row stride
       1                                 // Column stride
   };
 
-  UINT b_dims[] = {1, 1, static_cast<UINT>(b_rows), static_cast<UINT>(b_cols)};
-  UINT b_strides[] = {static_cast<UINT>(ldb * b_rows),
-                      static_cast<UINT>(ldb * b_rows), static_cast<UINT>(ldb),
-                      1};
+  std::vector<UINT> b_dims = {1, 1, static_cast<UINT>(b_rows),
+                              static_cast<UINT>(b_cols)};
+  std::vector<UINT> b_strides = {static_cast<UINT>(ldb * b_rows),
+                                 static_cast<UINT>(ldb * b_rows),
+                                 static_cast<UINT>(ldb), 1};
 
-  UINT c_dims[] = {1, 1, static_cast<UINT>(m), static_cast<UINT>(n)};
-  UINT c_strides[] = {static_cast<UINT>(ldc * m), static_cast<UINT>(ldc * m),
-                      static_cast<UINT>(ldc), 1};
+  std::vector<UINT> c_dims = {1, 1, static_cast<UINT>(m), static_cast<UINT>(n)};
+  std::vector<UINT> c_strides = {static_cast<UINT>(ldc * m),
+                                 static_cast<UINT>(ldc * m),
+                                 static_cast<UINT>(ldc), 1};
 
-  DML_BUFFER_TENSOR_DESC a_buffer_desc = {};
-  a_buffer_desc.DataType = dml::get_dml_data_type<In>();
-  a_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-  a_buffer_desc.DimensionCount = 4;
-  a_buffer_desc.Sizes = a_dims;
-  a_buffer_desc.Strides = a_strides;
-  // Total size must account for the leading dimension
-  a_buffer_desc.TotalTensorSizeInBytes = lda * a_rows * sizeof(In);
-  a_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
+  auto& a_desc = op_bundle.AddInput(dml::get_dml_data_type<In>(), a_dims,
+                                    &a_strides, lda * a_rows * sizeof(In));
 
-  DML_TENSOR_DESC a_desc = {};
-  a_desc.Type = DML_TENSOR_TYPE_BUFFER;
-  a_desc.Desc = &a_buffer_desc;
+  auto& b_desc = op_bundle.AddInput(dml::get_dml_data_type<In>(), b_dims,
+                                    &b_strides, ldb * b_rows * sizeof(In));
 
-  DML_BUFFER_TENSOR_DESC b_buffer_desc = {};
-  b_buffer_desc.DataType = dml::get_dml_data_type<In>();
-  b_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-  b_buffer_desc.DimensionCount = 4;
-  b_buffer_desc.Sizes = b_dims;
-  b_buffer_desc.Strides = b_strides;
-  b_buffer_desc.TotalTensorSizeInBytes = ldb * b_rows * sizeof(In);
-  b_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
-
-  DML_TENSOR_DESC b_desc = {};
-  b_desc.Type = DML_TENSOR_TYPE_BUFFER;
-  b_desc.Desc = &b_buffer_desc;
-
-  DML_BUFFER_TENSOR_DESC c_buffer_desc = {};
-  c_buffer_desc.DataType = dml::get_dml_data_type<Out>();
-  c_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-  c_buffer_desc.DimensionCount = 4;
-  c_buffer_desc.Sizes = c_dims;
-  c_buffer_desc.Strides = c_strides;
-  c_buffer_desc.TotalTensorSizeInBytes = ldc * m * sizeof(Out);
-  c_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
-
-  DML_TENSOR_DESC c_desc = {};
-  c_desc.Type = DML_TENSOR_TYPE_BUFFER;
-  c_desc.Desc = &c_buffer_desc;
-
+  auto& c_desc_bundle_output = op_bundle.AddOutput(
+      dml::get_dml_data_type<Out>(), c_dims, &c_strides, ldc * m * sizeof(Out));
+  // For CTensor in GEMM when beta != 0.0f
+  auto& c_desc_bundle_input = op_bundle.AddInput(
+      dml::get_dml_data_type<Out>(), c_dims, &c_strides, ldc * m * sizeof(Out));
   // Handle a_shift_compensation for quantized GEMM
   if (a_shift_compensation != nullptr) {
     // For quantized GEMM (int8 inputs), we need to add the shift compensation
     // This would require a separate addition operation after GEMM
 
     // First perform the GEMM
-    DML_GEMM_OPERATOR_DESC gemm_desc = {};
-    gemm_desc.ATensor = &a_desc;
-    gemm_desc.BTensor = &b_desc;
-    gemm_desc.CTensor = (beta != 0.0f) ? &c_desc : nullptr;
-    gemm_desc.OutputTensor = &c_desc;
+    auto& gemm_desc = op_bundle.GetOperatorDesc<DML_GEMM_OPERATOR_DESC>();
+    gemm_desc.ATensor = &a_desc.get_tensor_desc();
+    gemm_desc.BTensor = &b_desc.get_tensor_desc();
+    gemm_desc.CTensor =
+        (beta != 0.0f) ? &c_desc_bundle_input.get_tensor_desc() : nullptr;
+    gemm_desc.OutputTensor = &c_desc_bundle_output.get_tensor_desc();
     gemm_desc.TransA = transpose_a ? DML_MATRIX_TRANSFORM_TRANSPOSE
                                    : DML_MATRIX_TRANSFORM_NONE;
     gemm_desc.TransB = transpose_b ? DML_MATRIX_TRANSFORM_TRANSPOSE
@@ -1056,12 +991,8 @@ void primitives<Device::DirectML>::gemm(bool a_is_packed,
     gemm_desc.Alpha = alpha;
     gemm_desc.Beta = beta;
 
-    DML_OPERATOR_DESC op_desc = {};
-    op_desc.Type = DML_OPERATOR_GEMM;
-    op_desc.Desc = &gemm_desc;
-
-    dml::Operator* compiled_op =
-        dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+    dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+        std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
     auto dxdevice = dml::get_device();
 
@@ -1078,33 +1009,29 @@ void primitives<Device::DirectML>::gemm(bool a_is_packed,
     compiled_op->Execute(inputs, outputs);
 
     // Then add the shift compensation
+    ::ctranslate2::dml::utils::DmlOperatorDescBundle shift_op_bundle;
     // Create tensor descriptor for shift compensation (1D tensor of size n)
-    DML_BUFFER_TENSOR_DESC shift_buffer_desc = {};
-    shift_buffer_desc.DataType = dml::get_dml_data_type<Out>();
-    shift_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-    shift_buffer_desc.DimensionCount = 4;
+    auto& c_input_bundle =
+        shift_op_bundle.AddInput(dml::get_dml_data_type<Out>(), c_dims,
+                                 &c_strides, ldc * m * sizeof(Out));
     UINT shift_dims[] = {1, 1, 1, static_cast<UINT>(n)};
-    shift_buffer_desc.Sizes = shift_dims;
-    shift_buffer_desc.Strides = nullptr;
-    shift_buffer_desc.TotalTensorSizeInBytes = n * sizeof(Out);
-    shift_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
-
-    DML_TENSOR_DESC shift_desc = {};
-    shift_desc.Type = DML_TENSOR_TYPE_BUFFER;
-    shift_desc.Desc = &shift_buffer_desc;
+    auto& shift_bundle =
+        shift_op_bundle.AddInput(dml::get_dml_data_type<Out>(),
+                                 std::vector<UINT>(shift_dims, shift_dims + 4),
+                                 nullptr, n * sizeof(Out));
+    auto& c_output_bundle =
+        shift_op_bundle.AddOutput(dml::get_dml_data_type<Out>(), c_dims,
+                                  &c_strides, ldc * m * sizeof(Out));
 
     // Add shift compensation to each row of C
-    DML_ELEMENT_WISE_ADD_OPERATOR_DESC add_desc = {};
-    add_desc.ATensor = &c_desc;
-    add_desc.BTensor = &shift_desc;  // Will be broadcasted
-    add_desc.OutputTensor = &c_desc;
-
-    DML_OPERATOR_DESC add_op_desc = {};
-    add_op_desc.Type = DML_OPERATOR_ELEMENT_WISE_ADD;
-    add_op_desc.Desc = &add_desc;
+    auto& add_desc =
+        shift_op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_ADD_OPERATOR_DESC>();
+    add_desc.ATensor = &c_input_bundle.get_tensor_desc();
+    add_desc.BTensor = &shift_bundle.get_tensor_desc();  // Will be broadcasted
+    add_desc.OutputTensor = &c_output_bundle.get_tensor_desc();
 
     dml::Operator* compiled_add_op = dml::GetOrCreateCompiledOperatorApi(
-        &add_op_desc, DML_EXECUTION_FLAG_NONE);
+        std::move(shift_op_bundle), DML_EXECUTION_FLAG_NONE);
 
     std::vector<ID3D12Resource*> add_inputs = {
         dml::utils::ResourceFromRawBuffer(c),
@@ -1115,11 +1042,24 @@ void primitives<Device::DirectML>::gemm(bool a_is_packed,
 
   } else {
     // Standard GEMM without shift compensation
-    DML_GEMM_OPERATOR_DESC gemm_desc = {};
-    gemm_desc.ATensor = &a_desc;
-    gemm_desc.BTensor = &b_desc;
-    gemm_desc.CTensor = (beta != 0.0f) ? &c_desc : nullptr;
-    gemm_desc.OutputTensor = &c_desc;
+    ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle_std;
+    // Passing a_desc, b_desc by const ref as they are "reused" within the new
+    // bundle (no copy overhead due to const ref to already allocated objects)
+    auto& a_desc_standard = op_bundle_std.AddInput(a_desc);
+    auto& b_desc_standard = op_bundle_std.AddInput(b_desc);
+    auto& c_desc_standard_input = op_bundle_std.AddInput(
+        dml::get_dml_data_type<Out>(), c_dims, &c_strides,
+        ldc * m * sizeof(Out));  // As input for CTensor
+    auto& c_desc_standard_output = op_bundle_std.AddOutput(
+        dml::get_dml_data_type<Out>(), c_dims, &c_strides,
+        ldc * m * sizeof(Out));  // As output
+
+    auto& gemm_desc = op_bundle_std.GetOperatorDesc<DML_GEMM_OPERATOR_DESC>();
+    gemm_desc.ATensor = &a_desc_standard.get_tensor_desc();
+    gemm_desc.BTensor = &b_desc_standard.get_tensor_desc();
+    gemm_desc.CTensor =
+        (beta != 0.0f) ? &c_desc_standard_input.get_tensor_desc() : nullptr;
+    gemm_desc.OutputTensor = &c_desc_standard_output.get_tensor_desc();
     gemm_desc.TransA = transpose_a ? DML_MATRIX_TRANSFORM_TRANSPOSE
                                    : DML_MATRIX_TRANSFORM_NONE;
     gemm_desc.TransB = transpose_b ? DML_MATRIX_TRANSFORM_TRANSPOSE
@@ -1127,12 +1067,8 @@ void primitives<Device::DirectML>::gemm(bool a_is_packed,
     gemm_desc.Alpha = alpha;
     gemm_desc.Beta = beta;
 
-    DML_OPERATOR_DESC op_desc = {};
-    op_desc.Type = DML_OPERATOR_GEMM;
-    op_desc.Desc = &gemm_desc;
-
     dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
-        &op_desc, DML_EXECUTION_FLAG_NONE, L"gemm");
+        std::move(op_bundle_std), DML_EXECUTION_FLAG_NONE, L"gemm");
 
     auto dxdevice = dml::get_device();
 
@@ -1177,22 +1113,22 @@ void primitives<Device::DirectML>::add_batch_broadcast(const T* a,
   const std::vector<UINT> b_dims = {1, 1, static_cast<UINT>(batch_size),
                                     static_cast<UINT>(a_size)};
 
-  dml::utils::DmlTensorDescBundle a_bundle(dml::get_dml_data_type<T>(), a_dims,
-                                           nullptr);
-  dml::utils::DmlTensorDescBundle b_bundle(dml::get_dml_data_type<T>(), b_dims,
-                                           nullptr);
-  dml::utils::DmlTensorDescBundle c_bundle(dml::get_dml_data_type<T>(), b_dims,
-                                           nullptr);
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
+  auto& a_bundle =
+      op_bundle.AddInput(dml::get_dml_data_type<T>(), a_dims, nullptr);
+  auto& b_bundle =
+      op_bundle.AddInput(dml::get_dml_data_type<T>(), b_dims, nullptr);
+  auto& c_bundle =
+      op_bundle.AddOutput(dml::get_dml_data_type<T>(), b_dims, nullptr);
 
-  DML_ELEMENT_WISE_ADD_OPERATOR_DESC add_desc = {};
+  auto& add_desc =
+      op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_ADD_OPERATOR_DESC>();
   add_desc.ATensor = &a_bundle.get_tensor_desc();
   add_desc.BTensor = &b_bundle.get_tensor_desc();
   add_desc.OutputTensor = &c_bundle.get_tensor_desc();
 
-  DML_OPERATOR_DESC op_desc = {DML_OPERATOR_ELEMENT_WISE_ADD, &add_desc};
-
-  dml::Operator* compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
   const auto element_size =
       dml::utils::get_dml_element_size_in_bytes(a_bundle.get_data_type());
@@ -1246,27 +1182,26 @@ void primitives<Device::DirectML>::max(T a, const T* x, T* y, dim_t size) {
   const auto target_dims = dml::utils::to_dml_dims(input.shape(), input.size());
   const auto physical_dims = dml::utils::to_dml_dims(a_scalar_storage.shape(),
                                                      a_scalar_storage.size());
-  dml::utils::DmlTensorDescBundle a_scalar_bundle(
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
+  auto& a_scalar_bundle = op_bundle.AddInput(
       dml::utils::get_dml_data_type(a_scalar_storage.dtype()), target_dims,
       physical_dims, (int32_t)target_dims.size(), 0, 0,
       (uint32_t)target_dims.size(), 0);
 
   // Perform element-wise max.
-  dml::utils::DmlTensorDescBundle b_bundle(input);
-  dml::utils::DmlTensorDescBundle output_bundle(
-      dml::get_dml_data_type<T>(), {1, 1, 1, static_cast<UINT>(size)}, nullptr);
+  auto& b_bundle = op_bundle.AddInput(input);
+  auto& output_bundle = op_bundle.AddOutput(
+      dml::get_dml_data_type<T>(),
+      std::vector<UINT>{1, 1, 1, static_cast<UINT>(size)}, nullptr);
 
-  DML_ELEMENT_WISE_MAX_OPERATOR_DESC max_desc = {};
+  auto& max_desc =
+      op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_MAX_OPERATOR_DESC>();
   max_desc.ATensor = &a_scalar_bundle.get_tensor_desc();
   max_desc.BTensor = &b_bundle.get_tensor_desc();
   max_desc.OutputTensor = &output_bundle.get_tensor_desc();
 
-  DML_OPERATOR_DESC max_op_desc = {};
-  max_op_desc.Type = DML_OPERATOR_ELEMENT_WISE_MAX;
-  max_op_desc.Desc = &max_desc;
-
   dml::Operator* max_op = dml::GetOrCreateCompiledOperatorApi(
-      &max_op_desc, DML_EXECUTION_FLAG_NONE);
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
   max_op->Execute({dml::utils::ResourceFromStorageView(a_scalar_storage),
                    dml::utils::ResourceFromRawBuffer(x)},
                   {dml::utils::ResourceFromRawBuffer(y)});
@@ -1280,29 +1215,27 @@ void primitives<Device::DirectML>::max(const T* a,
                                        dim_t size) {
   auto dml_device = dml::get_dml_device();
 
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
   std::vector<UINT> a_max_arr_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle a_max_arr_bundle(
-      dml::get_dml_data_type<T>(), a_max_arr_dims, nullptr);
+  auto& a_max_arr_bundle =
+      op_bundle.AddInput(dml::get_dml_data_type<T>(), a_max_arr_dims, nullptr);
 
   std::vector<UINT> b_max_arr_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle b_max_arr_bundle(
-      dml::get_dml_data_type<T>(), b_max_arr_dims, nullptr);
+  auto& b_max_arr_bundle =
+      op_bundle.AddInput(dml::get_dml_data_type<T>(), b_max_arr_dims, nullptr);
 
   std::vector<UINT> output_max_arr_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle output_max_arr_bundle(
+  auto& output_max_arr_bundle = op_bundle.AddOutput(
       dml::get_dml_data_type<T>(), output_max_arr_dims, nullptr);
 
-  DML_ELEMENT_WISE_MAX_OPERATOR_DESC max_desc = {};
+  auto& max_desc =
+      op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_MAX_OPERATOR_DESC>();
   max_desc.ATensor = &a_max_arr_bundle.get_tensor_desc();
   max_desc.BTensor = &b_max_arr_bundle.get_tensor_desc();
   max_desc.OutputTensor = &output_max_arr_bundle.get_tensor_desc();
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_ELEMENT_WISE_MAX;
-  op_desc.Desc = &max_desc;
-
-  dml::Operator* compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
   auto dxdevice = dml::get_device();
 
@@ -1324,27 +1257,26 @@ void primitives<Device::DirectML>::min(T a, const T* x, T* y, dim_t size) {
   const auto target_dims = dml::utils::to_dml_dims(input.shape(), input.size());
   const auto physical_dims = dml::utils::to_dml_dims(a_scalar_storage.shape(),
                                                      a_scalar_storage.size());
-  dml::utils::DmlTensorDescBundle a_scalar_bundle(
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
+  auto& a_scalar_bundle = op_bundle.AddInput(
       dml::utils::get_dml_data_type(a_scalar_storage.dtype()), target_dims,
       physical_dims, (int32_t)target_dims.size(), 0, 0,
       (uint32_t)target_dims.size(), 0);
 
   // Perform element-wise min.
-  dml::utils::DmlTensorDescBundle b_bundle(input);
-  dml::utils::DmlTensorDescBundle output_bundle(
-      dml::get_dml_data_type<T>(), {1, 1, 1, static_cast<UINT>(size)}, nullptr);
+  auto& b_bundle = op_bundle.AddInput(input);
+  auto& output_bundle = op_bundle.AddOutput(
+      dml::get_dml_data_type<T>(),
+      std::vector<UINT>{1, 1, 1, static_cast<UINT>(size)}, nullptr);
 
-  DML_ELEMENT_WISE_MIN_OPERATOR_DESC min_desc = {};
+  auto& min_desc =
+      op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_MIN_OPERATOR_DESC>();
   min_desc.ATensor = &a_scalar_bundle.get_tensor_desc();
   min_desc.BTensor = &b_bundle.get_tensor_desc();
   min_desc.OutputTensor = &output_bundle.get_tensor_desc();
 
-  DML_OPERATOR_DESC min_op_desc = {};
-  min_op_desc.Type = DML_OPERATOR_ELEMENT_WISE_MIN;
-  min_op_desc.Desc = &min_desc;
-
   dml::Operator* min_op = dml::GetOrCreateCompiledOperatorApi(
-      &min_op_desc, DML_EXECUTION_FLAG_NONE);
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
   min_op->Execute({dml::utils::ResourceFromStorageView(a_scalar_storage),
                    dml::utils::ResourceFromRawBuffer(x)},
                   {dml::utils::ResourceFromRawBuffer(y)});
@@ -1358,29 +1290,27 @@ void primitives<Device::DirectML>::min(const T* a,
                                        dim_t size) {
   auto dml_device = dml::get_dml_device();
 
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
   std::vector<UINT> a_min_arr_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle a_min_arr_bundle(
-      dml::get_dml_data_type<T>(), a_min_arr_dims, nullptr);
+  auto& a_min_arr_bundle =
+      op_bundle.AddInput(dml::get_dml_data_type<T>(), a_min_arr_dims, nullptr);
 
   std::vector<UINT> b_min_arr_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle b_min_arr_bundle(
-      dml::get_dml_data_type<T>(), b_min_arr_dims, nullptr);
+  auto& b_min_arr_bundle =
+      op_bundle.AddInput(dml::get_dml_data_type<T>(), b_min_arr_dims, nullptr);
 
   std::vector<UINT> output_min_arr_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle output_min_arr_bundle(
+  auto& output_min_arr_bundle = op_bundle.AddOutput(
       dml::get_dml_data_type<T>(), output_min_arr_dims, nullptr);
 
-  DML_ELEMENT_WISE_MIN_OPERATOR_DESC min_desc = {};
+  auto& min_desc =
+      op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_MIN_OPERATOR_DESC>();
   min_desc.ATensor = &a_min_arr_bundle.get_tensor_desc();
   min_desc.BTensor = &b_min_arr_bundle.get_tensor_desc();
   min_desc.OutputTensor = &output_min_arr_bundle.get_tensor_desc();
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_ELEMENT_WISE_MIN;
-  op_desc.Desc = &min_desc;
-
-  dml::Operator* compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
   auto dxdevice = dml::get_device();
 
@@ -1396,20 +1326,20 @@ template <typename T>
 void primitives<Device::DirectML>::gelu(const T* x, T* y, dim_t size) {
   auto dml_device = dml::get_dml_device();
 
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
   std::vector<UINT> dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle tensor_bundle(
-      dml::get_dml_data_type<T>(), dims, nullptr);
+  auto& tensor_bundle =
+      op_bundle.AddInput(dml::get_dml_data_type<T>(), dims, nullptr);
+  auto& output_tensor_bundle =
+      op_bundle.AddOutput(dml::get_dml_data_type<T>(), dims, nullptr);
 
-  DML_ACTIVATION_GELU_OPERATOR_DESC gelu_desc = {};
+  auto& gelu_desc =
+      op_bundle.GetOperatorDesc<DML_ACTIVATION_GELU_OPERATOR_DESC>();
   gelu_desc.InputTensor = &tensor_bundle.get_tensor_desc();
-  gelu_desc.OutputTensor = &tensor_bundle.get_tensor_desc();
+  gelu_desc.OutputTensor = &output_tensor_bundle.get_tensor_desc();
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_ACTIVATION_GELU;
-  op_desc.Desc = &gelu_desc;
-
-  dml::Operator* compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
   std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
   std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
@@ -1431,21 +1361,21 @@ void primitives<Device::DirectML>::gelu_sigmoid(const T* x, T* y, dim_t size) {
   // GELU approximation.
   auto dml_device = dml::get_dml_device();
 
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
   std::vector<UINT> dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle tensor_bundle(
-      dml::get_dml_data_type<T>(), dims, nullptr);
+  auto& tensor_bundle =
+      op_bundle.AddInput(dml::get_dml_data_type<T>(), dims, nullptr);
+  auto& output_tensor_bundle =
+      op_bundle.AddOutput(dml::get_dml_data_type<T>(), dims, nullptr);
 
-  DML_ACTIVATION_SWISH_OPERATOR_DESC swish_desc = {};
+  auto& swish_desc =
+      op_bundle.GetOperatorDesc<DML_ACTIVATION_SWISH_OPERATOR_DESC>();
   swish_desc.InputTensor = &tensor_bundle.get_tensor_desc();
-  swish_desc.OutputTensor = &tensor_bundle.get_tensor_desc();
+  swish_desc.OutputTensor = &output_tensor_bundle.get_tensor_desc();
   swish_desc.SigmoidInputScale = 1.702f;
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_ACTIVATION_SWISH;
-  op_desc.Desc = &swish_desc;
-
-  dml::Operator* compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
   std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
   std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
@@ -1458,21 +1388,21 @@ void primitives<Device::DirectML>::swish(const T* x, T* y, dim_t size) {
   // swish(x) = x * sigmoid(x)
   auto dml_device = dml::get_dml_device();
 
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
   std::vector<UINT> dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle tensor_bundle(
-      dml::get_dml_data_type<T>(), dims, nullptr);
+  auto& tensor_bundle =
+      op_bundle.AddInput(dml::get_dml_data_type<T>(), dims, nullptr);
+  auto& output_tensor_bundle =
+      op_bundle.AddOutput(dml::get_dml_data_type<T>(), dims, nullptr);
 
-  DML_ACTIVATION_SWISH_OPERATOR_DESC swish_desc = {};
+  auto& swish_desc =
+      op_bundle.GetOperatorDesc<DML_ACTIVATION_SWISH_OPERATOR_DESC>();
   swish_desc.InputTensor = &tensor_bundle.get_tensor_desc();
-  swish_desc.OutputTensor = &tensor_bundle.get_tensor_desc();
+  swish_desc.OutputTensor = &output_tensor_bundle.get_tensor_desc();
   swish_desc.SigmoidInputScale = 1.0f;
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_ACTIVATION_SWISH;
-  op_desc.Desc = &swish_desc;
-
-  dml::Operator* compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
   std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
   std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
@@ -1484,24 +1414,22 @@ template <typename T>
 void primitives<Device::DirectML>::exp(const T* x, T* y, dim_t size) {
   auto dml_device = dml::get_dml_device();
 
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
   std::vector<UINT> input_exp_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle input_exp_bundle(
-      dml::get_dml_data_type<T>(), input_exp_dims, nullptr);
+  auto& input_exp_bundle =
+      op_bundle.AddInput(dml::get_dml_data_type<T>(), input_exp_dims, nullptr);
 
   std::vector<UINT> output_exp_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle output_exp_bundle(
-      dml::get_dml_data_type<T>(), output_exp_dims, nullptr);
+  auto& output_exp_bundle = op_bundle.AddOutput(dml::get_dml_data_type<T>(),
+                                                output_exp_dims, nullptr);
 
-  DML_ELEMENT_WISE_EXP_OPERATOR_DESC exp_desc = {};
+  auto& exp_desc =
+      op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_EXP_OPERATOR_DESC>();
   exp_desc.InputTensor = &input_exp_bundle.get_tensor_desc();
   exp_desc.OutputTensor = &output_exp_bundle.get_tensor_desc();
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_ELEMENT_WISE_EXP;
-  op_desc.Desc = &exp_desc;
-
-  dml::Operator* compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
   auto dxdevice = dml::get_device();
 
@@ -1515,24 +1443,22 @@ template <typename T>
 void primitives<Device::DirectML>::log(const T* x, T* y, dim_t size) {
   auto dml_device = dml::get_dml_device();
 
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
   std::vector<UINT> input_log_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle input_log_bundle(
-      dml::get_dml_data_type<T>(), input_log_dims, nullptr);
+  auto& input_log_bundle =
+      op_bundle.AddInput(dml::get_dml_data_type<T>(), input_log_dims, nullptr);
 
   std::vector<UINT> output_log_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle output_log_bundle(
-      dml::get_dml_data_type<T>(), output_log_dims, nullptr);
+  auto& output_log_bundle = op_bundle.AddOutput(dml::get_dml_data_type<T>(),
+                                                output_log_dims, nullptr);
 
-  DML_ELEMENT_WISE_LOG_OPERATOR_DESC log_desc = {};
+  auto& log_desc =
+      op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_LOG_OPERATOR_DESC>();
   log_desc.InputTensor = &input_log_bundle.get_tensor_desc();
   log_desc.OutputTensor = &output_log_bundle.get_tensor_desc();
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_ELEMENT_WISE_LOG;
-  op_desc.Desc = &log_desc;
-
-  dml::Operator* compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
   auto dxdevice = dml::get_device();
 
@@ -1546,24 +1472,22 @@ template <typename T>
 void primitives<Device::DirectML>::sin(const T* x, T* y, dim_t size) {
   auto dml_device = dml::get_dml_device();
 
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
   std::vector<UINT> input_sin_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle input_sin_bundle(
-      dml::get_dml_data_type<T>(), input_sin_dims, nullptr);
+  auto& input_sin_bundle =
+      op_bundle.AddInput(dml::get_dml_data_type<T>(), input_sin_dims, nullptr);
 
   std::vector<UINT> output_sin_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle output_sin_bundle(
-      dml::get_dml_data_type<T>(), output_sin_dims, nullptr);
+  auto& output_sin_bundle = op_bundle.AddOutput(dml::get_dml_data_type<T>(),
+                                                output_sin_dims, nullptr);
 
-  DML_ELEMENT_WISE_SIN_OPERATOR_DESC sin_desc = {};
+  auto& sin_desc =
+      op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_SIN_OPERATOR_DESC>();
   sin_desc.InputTensor = &input_sin_bundle.get_tensor_desc();
   sin_desc.OutputTensor = &output_sin_bundle.get_tensor_desc();
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_ELEMENT_WISE_SIN;
-  op_desc.Desc = &sin_desc;
-
-  dml::Operator* compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
   auto dxdevice = dml::get_device();
 
@@ -1577,24 +1501,22 @@ template <typename T>
 void primitives<Device::DirectML>::cos(const T* x, T* y, dim_t size) {
   auto dml_device = dml::get_dml_device();
 
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
   std::vector<UINT> input_cos_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle input_cos_bundle(
-      dml::get_dml_data_type<T>(), input_cos_dims, nullptr);
+  auto& input_cos_bundle =
+      op_bundle.AddInput(dml::get_dml_data_type<T>(), input_cos_dims, nullptr);
 
   std::vector<UINT> output_cos_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle output_cos_bundle(
-      dml::get_dml_data_type<T>(), output_cos_dims, nullptr);
+  auto& output_cos_bundle = op_bundle.AddOutput(dml::get_dml_data_type<T>(),
+                                                output_cos_dims, nullptr);
 
-  DML_ELEMENT_WISE_COS_OPERATOR_DESC cos_desc = {};
+  auto& cos_desc =
+      op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_COS_OPERATOR_DESC>();
   cos_desc.InputTensor = &input_cos_bundle.get_tensor_desc();
   cos_desc.OutputTensor = &output_cos_bundle.get_tensor_desc();
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_ELEMENT_WISE_COS;
-  op_desc.Desc = &cos_desc;
-
-  dml::Operator* compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
   auto dxdevice = dml::get_device();
 
@@ -1624,15 +1546,16 @@ float primitives<Device::DirectML>::logsumexp(const T* x,
 
   auto dml_device = dml::get_dml_device();
 
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
   std::vector<UINT> input_dims = {1, 1, 1, static_cast<UINT>(size)};
-  ::ctranslate2::dml::utils::DmlTensorDescBundle input_bundle(
-      dml::get_dml_data_type<T>(), input_dims, nullptr);
+  auto& input_bundle =
+      op_bundle.AddInput(dml::get_dml_data_type<T>(), input_dims, nullptr);
 
   StorageView output_storage({1, 1, 1, 1}, DataType::FLOAT32, Device::DirectML);
-  ::ctranslate2::dml::utils::DmlTensorDescBundle output_bundle(output_storage);
+  auto& output_bundle = op_bundle.AddOutput(output_storage);
 
   // Use DML reduce log_sum_exp operation
-  DML_REDUCE_OPERATOR_DESC reduce_desc = {};
+  auto& reduce_desc = op_bundle.GetOperatorDesc<DML_REDUCE_OPERATOR_DESC>();
   reduce_desc.Function = DML_REDUCE_FUNCTION_LOG_SUM_EXP;
   reduce_desc.InputTensor = &input_bundle.get_tensor_desc();
   reduce_desc.OutputTensor = &output_bundle.get_tensor_desc();
@@ -1641,12 +1564,8 @@ float primitives<Device::DirectML>::logsumexp(const T* x,
   reduce_desc.AxisCount = 1;
   reduce_desc.Axes = axes;
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_REDUCE;
-  op_desc.Desc = &reduce_desc;
-
-  dml::Operator* compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
   const auto element_size =
       dml::utils::get_dml_element_size_in_bytes(input_bundle.get_data_type());
@@ -1738,17 +1657,18 @@ void primitives<Device::DirectML>::prepare_length_mask(const int32_t* lengths,
                                                        int32_t* mask) {
   if (!mask_future) {
     // Replicate each length num_heads * num_queries times using TILE.
+    ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle_tile;
     std::vector<UINT> lengths_dims = {static_cast<UINT>(batch_size), 1, 1, 1};
-    dml::utils::DmlTensorDescBundle lengths_bundle(DML_TENSOR_DATA_TYPE_INT32,
+    auto& lengths_bundle = op_bundle_tile.AddInput(DML_TENSOR_DATA_TYPE_INT32,
                                                    lengths_dims, nullptr);
 
     std::vector<UINT> mask_dims = {static_cast<UINT>(batch_size),
                                    static_cast<UINT>(num_heads),
                                    static_cast<UINT>(num_queries), 1};
-    dml::utils::DmlTensorDescBundle mask_bundle(DML_TENSOR_DATA_TYPE_INT32,
-                                                mask_dims, nullptr);
+    auto& mask_bundle = op_bundle_tile.AddOutput(DML_TENSOR_DATA_TYPE_INT32,
+                                                 mask_dims, nullptr);
 
-    DML_TILE_OPERATOR_DESC tile_desc = {};
+    auto& tile_desc = op_bundle_tile.GetOperatorDesc<DML_TILE_OPERATOR_DESC>();
     tile_desc.InputTensor = &lengths_bundle.get_tensor_desc();
     tile_desc.OutputTensor = &mask_bundle.get_tensor_desc();
     const UINT repeats[] = {1, static_cast<UINT>(num_heads),
@@ -1756,9 +1676,8 @@ void primitives<Device::DirectML>::prepare_length_mask(const int32_t* lengths,
     tile_desc.RepeatsCount = ARRAYSIZE(repeats);
     tile_desc.Repeats = repeats;
 
-    DML_OPERATOR_DESC op_desc = {DML_OPERATOR_TILE, &tile_desc};
-    dml::Operator* tile_op =
-        dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+    dml::Operator* tile_op = dml::GetOrCreateCompiledOperatorApi(
+        std::move(op_bundle_tile), DML_EXECUTION_FLAG_NONE);
 
     tile_op->Execute({dml::utils::ResourceFromRawBuffer(lengths)},
                      {dml::utils::ResourceFromRawBuffer(mask)});
@@ -1778,16 +1697,19 @@ void primitives<Device::DirectML>::prepare_length_mask(const int32_t* lengths,
                                Device::DirectML);
 
     // 3. Prepare tensor descriptors for tiling the lengths tensor.
+    ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle_tile_bcast;
     std::vector<UINT> lengths_dims = {static_cast<UINT>(batch_size), 1, 1, 1};
-    dml::utils::DmlTensorDescBundle lengths_bundle(DML_TENSOR_DATA_TYPE_INT32,
-                                                   lengths_dims, nullptr);
+    auto& lengths_bundle = op_bundle_tile_bcast.AddInput(
+        DML_TENSOR_DATA_TYPE_INT32, lengths_dims, nullptr);
 
     // 3.5. Tile the lengths tensor to match the mask dimensions.
     StorageView lengths_tiled_storage({batch_size, num_heads, num_queries, 1},
                                       DataType::INT32, Device::DirectML);
-    dml::utils::DmlTensorDescBundle lengths_tiled_bundle(lengths_tiled_storage);
+    auto& lengths_tiled_bundle =
+        op_bundle_tile_bcast.AddOutput(lengths_tiled_storage);
 
-    DML_TILE_OPERATOR_DESC tile_desc = {};
+    auto& tile_desc =
+        op_bundle_tile_bcast.GetOperatorDesc<DML_TILE_OPERATOR_DESC>();
     tile_desc.InputTensor = &lengths_bundle.get_tensor_desc();
     tile_desc.OutputTensor = &lengths_tiled_bundle.get_tensor_desc();
     const UINT repeats[] = {1, static_cast<UINT>(num_heads),
@@ -1795,31 +1717,33 @@ void primitives<Device::DirectML>::prepare_length_mask(const int32_t* lengths,
     tile_desc.RepeatsCount = ARRAYSIZE(repeats);
     tile_desc.Repeats = repeats;
 
-    DML_OPERATOR_DESC tile_op_desc = {DML_OPERATOR_TILE, &tile_desc};
     dml::Operator* tile_op = dml::GetOrCreateCompiledOperatorApi(
-        &tile_op_desc, DML_EXECUTION_FLAG_NONE);
+        std::move(op_bundle_tile_bcast), DML_EXECUTION_FLAG_NONE);
 
     tile_op->Execute(
         {dml::utils::ResourceFromRawBuffer(lengths)},
         {dml::utils::ResourceFromStorageView(lengths_tiled_storage)});
 
     // 4. Prepare tensors for the MIN operation.
-    dml::utils::DmlTensorDescBundle causal_bundle(causal_storage);
+    ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle_min;
+    auto& causal_bundle = op_bundle_min.AddInput(causal_storage);
     std::vector<UINT> mask_dims = {static_cast<UINT>(batch_size),
                                    static_cast<UINT>(num_heads),
                                    static_cast<UINT>(num_queries), 1};
-    dml::utils::DmlTensorDescBundle mask_bundle(DML_TENSOR_DATA_TYPE_INT32,
-                                                mask_dims, nullptr);
+    auto& mask_bundle =
+        op_bundle_min.AddOutput(DML_TENSOR_DATA_TYPE_INT32, mask_dims, nullptr);
+    auto& lengths_tiled_bundle_input = op_bundle_min.AddInput(
+        lengths_tiled_storage);  // input for min operator.
 
     // 5. Create and execute the MIN operator.
-    DML_ELEMENT_WISE_MIN_OPERATOR_DESC min_desc = {};
-    min_desc.ATensor = &lengths_tiled_bundle.get_tensor_desc();
+    auto& min_desc =
+        op_bundle_min.GetOperatorDesc<DML_ELEMENT_WISE_MIN_OPERATOR_DESC>();
+    min_desc.ATensor = &lengths_tiled_bundle_input.get_tensor_desc();
     min_desc.BTensor = &causal_bundle.get_tensor_desc();
     min_desc.OutputTensor = &mask_bundle.get_tensor_desc();
 
-    DML_OPERATOR_DESC min_op_desc = {DML_OPERATOR_ELEMENT_WISE_MIN, &min_desc};
     dml::Operator* min_op = dml::GetOrCreateCompiledOperatorApi(
-        &min_op_desc, DML_EXECUTION_FLAG_NONE);
+        std::move(op_bundle_min), DML_EXECUTION_FLAG_NONE);
 
     min_op->Execute({dml::utils::ResourceFromStorageView(lengths_tiled_storage),
                      dml::utils::ResourceFromStorageView(causal_storage)},
@@ -1841,65 +1765,46 @@ void primitives<Device::DirectML>::transpose_2d(const T* a,
 
   // Create tensor descriptors
   // Input: rows x cols matrix
-  UINT src_dims[] = {1, 1, static_cast<UINT>(rows), static_cast<UINT>(cols)};
-  UINT src_strides[] = {
+  std::vector<UINT> src_dims = {1, 1, static_cast<UINT>(rows),
+                                static_cast<UINT>(cols)};
+  std::vector<UINT> src_strides = {
       static_cast<UINT>(total_elements), static_cast<UINT>(total_elements),
       static_cast<UINT>(cols),  // Row stride
       1                         // Column stride
   };
 
   // Output: cols x rows matrix (transposed)
-  UINT dst_dims[] = {1, 1, static_cast<UINT>(cols), static_cast<UINT>(rows)};
-  UINT dst_strides[] = {
+  std::vector<UINT> dst_dims = {1, 1, static_cast<UINT>(cols),
+                                static_cast<UINT>(rows)};
+  std::vector<UINT> dst_strides = {
       static_cast<UINT>(total_elements), static_cast<UINT>(total_elements),
       static_cast<UINT>(rows),  // Row stride in output
       1                         // Column stride
   };
 
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
   // To transpose, we read the input with swapped strides
-  DML_BUFFER_TENSOR_DESC src_buffer_desc = {};
-  src_buffer_desc.DataType = dml::get_dml_data_type<T>();
-  src_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-  src_buffer_desc.DimensionCount = 4;
-  src_buffer_desc.Sizes = dst_dims;  // Use output dimensions
-  // Custom strides to read in transposed order
-  UINT transposed_strides[] = {
+  std::vector<UINT> transposed_strides_arr_t2d = {
       static_cast<UINT>(total_elements), static_cast<UINT>(total_elements),
       1,                       // Read columns as rows (stride 1)
       static_cast<UINT>(cols)  // Read rows as columns (stride = original cols)
   };
-  src_buffer_desc.Strides = transposed_strides;
-  src_buffer_desc.TotalTensorSizeInBytes = total_elements * sizeof(T);
-  src_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
+  auto& src_desc = op_bundle.AddInput(dml::get_dml_data_type<T>(), dst_dims,
+                                      &transposed_strides_arr_t2d,
+                                      total_elements * sizeof(T));
 
-  DML_TENSOR_DESC src_desc = {};
-  src_desc.Type = DML_TENSOR_TYPE_BUFFER;
-  src_desc.Desc = &src_buffer_desc;
-
-  DML_BUFFER_TENSOR_DESC dst_buffer_desc = {};
-  dst_buffer_desc.DataType = dml::get_dml_data_type<T>();
-  dst_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-  dst_buffer_desc.DimensionCount = 4;
-  dst_buffer_desc.Sizes = dst_dims;
-  dst_buffer_desc.Strides = dst_strides;
-  dst_buffer_desc.TotalTensorSizeInBytes = total_elements * sizeof(T);
-  dst_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
-
-  DML_TENSOR_DESC dst_desc = {};
-  dst_desc.Type = DML_TENSOR_TYPE_BUFFER;
-  dst_desc.Desc = &dst_buffer_desc;
+  auto& dst_desc =
+      op_bundle.AddOutput(dml::get_dml_data_type<T>(), dst_dims, &dst_strides,
+                          total_elements * sizeof(T));
 
   // Use identity operator to copy with transposed reading
-  DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC identity_desc = {};
-  identity_desc.InputTensor = &src_desc;
-  identity_desc.OutputTensor = &dst_desc;
+  auto& identity_desc =
+      op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC>();
+  identity_desc.InputTensor = &src_desc.get_tensor_desc();
+  identity_desc.OutputTensor = &dst_desc.get_tensor_desc();
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_ELEMENT_WISE_IDENTITY;
-  op_desc.Desc = &identity_desc;
-
-  dml::Operator* compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
   auto dxdevice = dml::get_device();
 
@@ -1925,67 +1830,48 @@ void primitives<Device::DirectML>::transpose_3d(const T* a,
   dim_t out_dims[3] = {dims[perm[0]], dims[perm[1]], dims[perm[2]]};
 
   // Create 4D tensors (DML uses 4D tensors)
-  UINT src_dims[] = {1, static_cast<UINT>(dims[0]), static_cast<UINT>(dims[1]),
-                     static_cast<UINT>(dims[2])};
-  UINT dst_dims[] = {1, static_cast<UINT>(out_dims[0]),
-                     static_cast<UINT>(out_dims[1]),
-                     static_cast<UINT>(out_dims[2])};
+  std::vector<UINT> src_dims = {1, static_cast<UINT>(dims[0]),
+                                static_cast<UINT>(dims[1]),
+                                static_cast<UINT>(dims[2])};
+  std::vector<UINT> dst_dims = {1, static_cast<UINT>(out_dims[0]),
+                                static_cast<UINT>(out_dims[1]),
+                                static_cast<UINT>(out_dims[2])};
 
   // Calculate strides for source tensor
-  UINT src_strides[] = {static_cast<UINT>(total_elements),
-                        static_cast<UINT>(dims[1] * dims[2]),
-                        static_cast<UINT>(dims[2]), 1};
+  std::vector<UINT> src_strides = {static_cast<UINT>(total_elements),
+                                   static_cast<UINT>(dims[1] * dims[2]),
+                                   static_cast<UINT>(dims[2]), 1};
 
   // Calculate permuted strides for reading
   // Map each output dimension to its corresponding input stride
-  UINT perm_strides[4] = {
+  std::vector<UINT> perm_strides = {
       static_cast<UINT>(total_elements),  // Batch dimension unchanged
       src_strides[perm[0] +
                   1],  // +1 because we have batch dimension at index 0
       src_strides[perm[1] + 1], src_strides[perm[2] + 1]};
 
-  DML_BUFFER_TENSOR_DESC src_buffer_desc = {};
-  src_buffer_desc.DataType = dml::get_dml_data_type<T>();
-  src_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-  src_buffer_desc.DimensionCount = 4;
-  src_buffer_desc.Sizes = dst_dims;        // Use output dimensions
-  src_buffer_desc.Strides = perm_strides;  // Use permuted strides
-  src_buffer_desc.TotalTensorSizeInBytes = total_elements * sizeof(T);
-  src_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
-
-  DML_TENSOR_DESC src_desc = {};
-  src_desc.Type = DML_TENSOR_TYPE_BUFFER;
-  src_desc.Desc = &src_buffer_desc;
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
+  auto& src_desc =
+      op_bundle.AddInput(dml::get_dml_data_type<T>(), dst_dims, &perm_strides,
+                         total_elements * sizeof(T));
 
   // Output tensor with standard layout
-  UINT dst_strides[] = {static_cast<UINT>(total_elements),
-                        static_cast<UINT>(out_dims[1] * out_dims[2]),
-                        static_cast<UINT>(out_dims[2]), 1};
+  std::vector<UINT> dst_strides = {static_cast<UINT>(total_elements),
+                                   static_cast<UINT>(out_dims[1] * out_dims[2]),
+                                   static_cast<UINT>(out_dims[2]), 1};
 
-  DML_BUFFER_TENSOR_DESC dst_buffer_desc = {};
-  dst_buffer_desc.DataType = dml::get_dml_data_type<T>();
-  dst_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-  dst_buffer_desc.DimensionCount = 4;
-  dst_buffer_desc.Sizes = dst_dims;
-  dst_buffer_desc.Strides = dst_strides;
-  dst_buffer_desc.TotalTensorSizeInBytes = total_elements * sizeof(T);
-  dst_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
-
-  DML_TENSOR_DESC dst_desc = {};
-  dst_desc.Type = DML_TENSOR_TYPE_BUFFER;
-  dst_desc.Desc = &dst_buffer_desc;
+  auto& dst_desc =
+      op_bundle.AddOutput(dml::get_dml_data_type<T>(), dst_dims, &dst_strides,
+                          total_elements * sizeof(T));
 
   // Use identity operator to copy with transposed reading
-  DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC identity_desc = {};
-  identity_desc.InputTensor = &src_desc;
-  identity_desc.OutputTensor = &dst_desc;
+  auto& identity_desc =
+      op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC>();
+  identity_desc.InputTensor = &src_desc.get_tensor_desc();
+  identity_desc.OutputTensor = &dst_desc.get_tensor_desc();
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_ELEMENT_WISE_IDENTITY;
-  op_desc.Desc = &identity_desc;
-
-  dml::Operator* compiled_op =
-      dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+  dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
   auto dxdevice = dml::get_device();
 
@@ -2008,67 +1894,48 @@ void primitives<Device::DirectML>::transpose_4d(const T* a,
   dim_t total_elements = dims[0] * dims[1] * dims[2] * dims[3];
 
   // Calculate output dimensions based on permutation
-  UINT out_dims[4] = {
+  std::vector<UINT> out_dims = {
       static_cast<UINT>(dims[perm[0]]), static_cast<UINT>(dims[perm[1]]),
       static_cast<UINT>(dims[perm[2]]), static_cast<UINT>(dims[perm[3]])};
 
   // Create tensor descriptors
-  UINT src_dims[] = {static_cast<UINT>(dims[0]), static_cast<UINT>(dims[1]),
-                     static_cast<UINT>(dims[2]), static_cast<UINT>(dims[3])};
+  std::vector<UINT> src_dims = {
+      static_cast<UINT>(dims[0]), static_cast<UINT>(dims[1]),
+      static_cast<UINT>(dims[2]), static_cast<UINT>(dims[3])};
 
   // Calculate strides for source tensor (row-major layout)
-  UINT src_strides[] = {static_cast<UINT>(dims[1] * dims[2] * dims[3]),
-                        static_cast<UINT>(dims[2] * dims[3]),
-                        static_cast<UINT>(dims[3]), 1};
+  std::vector<UINT> src_strides = {
+      static_cast<UINT>(dims[1] * dims[2] * dims[3]),
+      static_cast<UINT>(dims[2] * dims[3]), static_cast<UINT>(dims[3]), 1};
 
   // Calculate permuted strides for reading
   // Map each output dimension to its corresponding input stride
-  UINT perm_strides[4] = {src_strides[perm[0]], src_strides[perm[1]],
-                          src_strides[perm[2]], src_strides[perm[3]]};
+  std::vector<UINT> perm_strides = {src_strides[perm[0]], src_strides[perm[1]],
+                                    src_strides[perm[2]], src_strides[perm[3]]};
 
-  DML_BUFFER_TENSOR_DESC src_buffer_desc = {};
-  src_buffer_desc.DataType = dml::get_dml_data_type<T>();
-  src_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-  src_buffer_desc.DimensionCount = 4;
-  src_buffer_desc.Sizes = out_dims;        // Use output dimensions
-  src_buffer_desc.Strides = perm_strides;  // Use permuted strides
-  src_buffer_desc.TotalTensorSizeInBytes = total_elements * sizeof(T);
-  src_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
-
-  DML_TENSOR_DESC src_desc = {};
-  src_desc.Type = DML_TENSOR_TYPE_BUFFER;
-  src_desc.Desc = &src_buffer_desc;
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
+  auto& src_desc =
+      op_bundle.AddInput(dml::get_dml_data_type<T>(), out_dims, &perm_strides,
+                         total_elements * sizeof(T));
 
   // Output tensor with standard layout
-  UINT dst_strides[] = {
+  std::vector<UINT> dst_strides_vec = {
       static_cast<UINT>(out_dims[1] * out_dims[2] * out_dims[3]),
       static_cast<UINT>(out_dims[2] * out_dims[3]),
       static_cast<UINT>(out_dims[3]), 1};
 
-  DML_BUFFER_TENSOR_DESC dst_buffer_desc = {};
-  dst_buffer_desc.DataType = dml::get_dml_data_type<T>();
-  dst_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-  dst_buffer_desc.DimensionCount = 4;
-  dst_buffer_desc.Sizes = out_dims;
-  dst_buffer_desc.Strides = dst_strides;
-  dst_buffer_desc.TotalTensorSizeInBytes = total_elements * sizeof(T);
-  dst_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
-
-  DML_TENSOR_DESC dst_desc = {};
-  dst_desc.Type = DML_TENSOR_TYPE_BUFFER;
-  dst_desc.Desc = &dst_buffer_desc;
+  auto& dst_desc =
+      op_bundle.AddOutput(dml::get_dml_data_type<T>(), out_dims,
+                          &dst_strides_vec, total_elements * sizeof(T));
 
   // Use identity operator to copy with transposed reading
-  DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC identity_desc = {};
-  identity_desc.InputTensor = &src_desc;
-  identity_desc.OutputTensor = &dst_desc;
-
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_ELEMENT_WISE_IDENTITY;
-  op_desc.Desc = &identity_desc;
+  auto& identity_desc =
+      op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC>();
+  identity_desc.InputTensor = &src_desc.get_tensor_desc();
+  identity_desc.OutputTensor = &dst_desc.get_tensor_desc();
 
   dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
-      &op_desc, DML_EXECUTION_FLAG_NONE, L"transpose_4d");
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE, L"transpose_4d");
 
   auto dxdevice = dml::get_device();
 
@@ -2128,9 +1995,9 @@ dim_t primitives<Device::DirectML>::gemm_pack_b(const T* b,
   if (transpose_b) {
     // Create tensor descriptors for transpose
     // Source: k x n matrix
-    UINT src_dims[] = {1, 1, static_cast<UINT>(src_rows),
-                       static_cast<UINT>(src_cols)};
-    UINT src_strides[] = {
+    std::vector<UINT> src_dims = {1, 1, static_cast<UINT>(src_rows),
+                                  static_cast<UINT>(src_cols)};
+    std::vector<UINT> src_strides = {
         static_cast<UINT>(src_rows * src_cols),
         static_cast<UINT>(src_rows * src_cols),
         static_cast<UINT>(src_cols),  // Row stride
@@ -2139,71 +2006,51 @@ dim_t primitives<Device::DirectML>::gemm_pack_b(const T* b,
 
     // Destination: n x k matrix (transposed)
     // To transpose, we swap dimensions and adjust strides
-    UINT dst_dims[] = {1, 1, static_cast<UINT>(dst_rows),
-                       static_cast<UINT>(dst_cols)};
-    UINT dst_strides[] = {static_cast<UINT>(dst_rows * dst_cols),
-                          static_cast<UINT>(dst_rows * dst_cols),
-                          static_cast<UINT>(dst_cols), 1};
+    std::vector<UINT> dst_dims = {1, 1, static_cast<UINT>(dst_rows),
+                                  static_cast<UINT>(dst_cols)};
+    std::vector<UINT> dst_strides = {static_cast<UINT>(dst_rows * dst_cols),
+                                     static_cast<UINT>(dst_rows * dst_cols),
+                                     static_cast<UINT>(dst_cols), 1};
 
-    DML_BUFFER_TENSOR_DESC src_buffer_desc = {};
-    src_buffer_desc.DataType = dml::get_dml_data_type<T>();
-    src_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-    src_buffer_desc.DimensionCount = 4;
-    src_buffer_desc.Sizes = src_dims;
-    src_buffer_desc.Strides = src_strides;
-    src_buffer_desc.TotalTensorSizeInBytes = src_rows * src_cols * sizeof(T);
-    src_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
+    ::ctranslate2::dml::utils::DmlOperatorDescBundle transpose_op_bundle;
+    // For transpose, the input (b) should be defined by the input tensor
+    // dimensions/strides and the output (dest) will be read into with
+    // transposed strides. DML's IDENTITY operator requires a tensor description
+    // for the *input* and *output*. The trick for in-place transposition is
+    // that the input tensor describes how to interpret the source data in its
+    // transposed form, while the output tensor describes the contiguous memory
+    // where the transposed data will be written.
 
-    DML_TENSOR_DESC src_desc = {};
-    src_desc.Type = DML_TENSOR_TYPE_BUFFER;
-    src_desc.Desc = &src_buffer_desc;
-
-    // For transpose, we read the source with transposed strides
-    DML_BUFFER_TENSOR_DESC src_transposed_buffer_desc = {};
-    src_transposed_buffer_desc.DataType = dml::get_dml_data_type<T>();
-    src_transposed_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-    src_transposed_buffer_desc.DimensionCount = 4;
-    src_transposed_buffer_desc.Sizes = dst_dims;  // Use destination dimensions
-    // Custom strides to read in transposed order
-    UINT transposed_strides[] = {
+    // Input tensor description: reads from `b` (the original data) but with
+    // dimensions/strides set up to access elements as if they were already
+    // transposed to the target shape. Dimensions are `dst_dims` (n x k for a k
+    // x n original), strides are `transposed_strides_arr`.
+    std::vector<UINT> transposed_strides_arr = {
         static_cast<UINT>(src_rows * src_cols),
         static_cast<UINT>(src_rows * src_cols),
         1,                           // Column becomes row (stride 1)
         static_cast<UINT>(src_cols)  // Row becomes column (stride n)
     };
-    src_transposed_buffer_desc.Strides = transposed_strides;
-    src_transposed_buffer_desc.TotalTensorSizeInBytes =
-        src_rows * src_cols * sizeof(T);
-    src_transposed_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
+    auto& src_transposed_bundle = transpose_op_bundle.AddInput(
+        dml::get_dml_data_type<T>(), dst_dims, &transposed_strides_arr,
+        src_rows * src_cols * sizeof(T));
 
-    DML_TENSOR_DESC src_transposed_desc = {};
-    src_transposed_desc.Type = DML_TENSOR_TYPE_BUFFER;
-    src_transposed_desc.Desc = &src_transposed_buffer_desc;
-
-    DML_BUFFER_TENSOR_DESC dst_buffer_desc = {};
-    dst_buffer_desc.DataType = dml::get_dml_data_type<T>();
-    dst_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-    dst_buffer_desc.DimensionCount = 4;
-    dst_buffer_desc.Sizes = dst_dims;
-    dst_buffer_desc.Strides = dst_strides;
-    dst_buffer_desc.TotalTensorSizeInBytes = dst_rows * dst_cols * sizeof(T);
-    dst_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
-
-    DML_TENSOR_DESC dst_desc = {};
-    dst_desc.Type = DML_TENSOR_TYPE_BUFFER;
-    dst_desc.Desc = &dst_buffer_desc;
+    // Output tensor description: writes to `dest` with actual transposed
+    // dimensions/strides. Dimensions are `dst_dims` (n x k), strides are
+    // `dst_strides`.
+    auto& dst_bundle = transpose_op_bundle.AddOutput(
+        dml::get_dml_data_type<T>(), dst_dims, &dst_strides,
+        dst_rows * dst_cols * sizeof(T));
 
     // Use identity operator with transposed read strides
-    DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC transpose_desc = {};
-    transpose_desc.InputTensor = &src_transposed_desc;
-    transpose_desc.OutputTensor = &dst_desc;
-
-    DML_OPERATOR_DESC transpose_op_desc = {};
-    transpose_op_desc.Type = DML_OPERATOR_ELEMENT_WISE_IDENTITY;
-    transpose_op_desc.Desc = &transpose_desc;
+    auto& transpose_desc =
+        transpose_op_bundle
+            .GetOperatorDesc<DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC>();
+    transpose_desc.InputTensor = &src_transposed_bundle.get_tensor_desc();
+    transpose_desc.OutputTensor = &dst_bundle.get_tensor_desc();
 
     dml::Operator* compiled_transpose_op = dml::GetOrCreateCompiledOperatorApi(
-        &transpose_op_desc, DML_EXECUTION_FLAG_NONE);
+        std::move(transpose_op_bundle), DML_EXECUTION_FLAG_NONE);
 
     auto dxdevice = dml::get_device();
 
@@ -2271,45 +2118,40 @@ dim_t primitives<Device::DirectML>::gemm_pack_b(const T* b,
     dxdevice->ExecuteCommandList();
 
     // Now perform the scaling operation
-    std::vector<UINT> input_gpb_scale_dims = {
-        1, 1, 1, static_cast<UINT>(total_elements)};
-    ::ctranslate2::dml::utils::DmlTensorDescBundle input_gpb_scale_bundle(
-        dml::get_dml_data_type<T>(), input_gpb_scale_dims, nullptr);
+    ::ctranslate2::dml::utils::DmlOperatorDescBundle scale_op_bundle;
 
-    std::vector<UINT> output_gpb_scale_dims = {
+    // Input tensor from 'dest' (which holds the transposed/copied data).
+    // The dimensions of this tensor are already total_elements.
+    std::vector<UINT> input_gpb_scale_dims_vec = {
         1, 1, 1, static_cast<UINT>(total_elements)};
-    ::ctranslate2::dml::utils::DmlTensorDescBundle output_gpb_scale_bundle(
-        dml::get_dml_data_type<T>(), output_gpb_scale_dims, nullptr);
+    auto& input_gpb_scale_bundle = scale_op_bundle.AddInput(
+        dml::get_dml_data_type<T>(), input_gpb_scale_dims_vec, nullptr);
+
+    // Output tensor to 'dest' (where the scaled data will be written back).
+    std::vector<UINT> output_gpb_scale_dims_vec = {
+        1, 1, 1, static_cast<UINT>(total_elements)};
+    auto& output_gpb_scale_bundle = scale_op_bundle.AddOutput(
+        dml::get_dml_data_type<T>(), output_gpb_scale_dims_vec, nullptr);
 
     // Create scalar tensor descriptor that will broadcast
-    UINT scalar_dims[] = {1, 1, 1, 1};
-    UINT scalar_strides[] = {0, 0, 0, 0};  // All zeros for broadcasting
+    std::vector<UINT> scalar_dims_arr_gpb = {1, 1, 1, 1};
+    std::vector<UINT> scalar_strides_arr_gpb = {
+        0, 0, 0, 0};  // All zeros for broadcasting
 
-    DML_BUFFER_TENSOR_DESC scalar_buffer_desc = {};
-    scalar_buffer_desc.DataType = dml::get_dml_data_type<T>();
-    scalar_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-    scalar_buffer_desc.DimensionCount = 4;
-    scalar_buffer_desc.Sizes = scalar_dims;
-    scalar_buffer_desc.Strides = scalar_strides;
-    scalar_buffer_desc.TotalTensorSizeInBytes = sizeof(T);
-    scalar_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
-
-    DML_TENSOR_DESC scalar_desc = {};
-    scalar_desc.Type = DML_TENSOR_TYPE_BUFFER;
-    scalar_desc.Desc = &scalar_buffer_desc;
+    auto& scalar_desc_bundle = scale_op_bundle.AddInput(
+        dml::get_dml_data_type<T>(), scalar_dims_arr_gpb,
+        &scalar_strides_arr_gpb, sizeof(T));
 
     // Create multiply operator
-    DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC mul_desc = {};
+    auto& mul_desc =
+        scale_op_bundle
+            .GetOperatorDesc<DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC>();
     mul_desc.ATensor = &input_gpb_scale_bundle.get_tensor_desc();
-    mul_desc.BTensor = &scalar_desc;
+    mul_desc.BTensor = &scalar_desc_bundle.get_tensor_desc();
     mul_desc.OutputTensor = &output_gpb_scale_bundle.get_tensor_desc();
 
-    DML_OPERATOR_DESC op_desc = {};
-    op_desc.Type = DML_OPERATOR_ELEMENT_WISE_MULTIPLY;
-    op_desc.Desc = &mul_desc;
-
-    dml::Operator* compiled_op =
-        dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+    dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+        std::move(scale_op_bundle), DML_EXECUTION_FLAG_NONE);
 
     auto dxdevice = dml::get_device();
 
@@ -2357,101 +2199,73 @@ void primitives<Device::DirectML>::gemm_batch_strided(bool transpose_a,
 
   // Create tensor descriptors for batched matrices
   // DirectML uses 4D tensors where the first dimension is the batch size
-  UINT a_dims[] = {static_cast<UINT>(batch_size), 1, static_cast<UINT>(a_rows),
-                   static_cast<UINT>(a_cols)};
-  UINT b_dims[] = {static_cast<UINT>(batch_size), 1, static_cast<UINT>(b_rows),
-                   static_cast<UINT>(b_cols)};
-  UINT c_dims[] = {static_cast<UINT>(batch_size), 1, static_cast<UINT>(m),
-                   static_cast<UINT>(n)};
+  std::vector<UINT> a_dims = {static_cast<UINT>(batch_size), 1,
+                              static_cast<UINT>(a_rows),
+                              static_cast<UINT>(a_cols)};
+  std::vector<UINT> b_dims = {static_cast<UINT>(batch_size), 1,
+                              static_cast<UINT>(b_rows),
+                              static_cast<UINT>(b_cols)};
+  std::vector<UINT> c_dims = {static_cast<UINT>(batch_size), 1,
+                              static_cast<UINT>(m), static_cast<UINT>(n)};
 
   // Calculate strides for batched operation
   // The batch stride should be in elements, not bytes
-  UINT a_strides[] = {
+  std::vector<UINT> a_strides = {
       static_cast<UINT>(stridea),  // Batch stride in elements
       static_cast<UINT>(stridea),  // Not used (single channel)
       static_cast<UINT>(lda),      // Row stride
       1                            // Column stride
   };
 
-  UINT b_strides[] = {
+  std::vector<UINT> b_strides = {
       static_cast<UINT>(strideb),  // Batch stride in elements
       static_cast<UINT>(strideb),  // Not used (single channel)
       static_cast<UINT>(ldb),      // Row stride
       1                            // Column stride
   };
 
-  UINT c_strides[] = {
+  std::vector<UINT> c_strides = {
       static_cast<UINT>(stridec),  // Batch stride in elements
       static_cast<UINT>(stridec),  // Not used (single channel)
       static_cast<UINT>(ldc),      // Row stride
       1                            // Column stride
   };
 
-  // Create buffer descriptors
-  DML_BUFFER_TENSOR_DESC a_buffer_desc = {};
-  a_buffer_desc.DataType = dml::get_dml_data_type<In>();
-  a_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-  a_buffer_desc.DimensionCount = 4;
-  a_buffer_desc.Sizes = a_dims;
-  a_buffer_desc.Strides = a_strides;
-  // Total size must account for all batches and the stride
-  a_buffer_desc.TotalTensorSizeInBytes =
-      ((batch_size - 1) * stridea + lda * a_rows) * sizeof(In);
-  a_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle_gemm_batch;
+  auto& a_desc_batch = op_bundle_gemm_batch.AddInput(
+      dml::get_dml_data_type<In>(), a_dims, &a_strides,
+      ((batch_size - 1) * stridea + lda * a_rows) * sizeof(In));
 
-  DML_TENSOR_DESC a_desc = {};
-  a_desc.Type = DML_TENSOR_TYPE_BUFFER;
-  a_desc.Desc = &a_buffer_desc;
+  auto& b_desc_batch = op_bundle_gemm_batch.AddInput(
+      dml::get_dml_data_type<In>(), b_dims, &b_strides,
+      ((batch_size - 1) * strideb + ldb * b_rows) * sizeof(In));
 
-  DML_BUFFER_TENSOR_DESC b_buffer_desc = {};
-  b_buffer_desc.DataType = dml::get_dml_data_type<In>();
-  b_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-  b_buffer_desc.DimensionCount = 4;
-  b_buffer_desc.Sizes = b_dims;
-  b_buffer_desc.Strides = b_strides;
-  b_buffer_desc.TotalTensorSizeInBytes =
-      ((batch_size - 1) * strideb + ldb * b_rows) * sizeof(In);
-  b_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
-
-  DML_TENSOR_DESC b_desc = {};
-  b_desc.Type = DML_TENSOR_TYPE_BUFFER;
-  b_desc.Desc = &b_buffer_desc;
-
-  DML_BUFFER_TENSOR_DESC c_buffer_desc = {};
-  c_buffer_desc.DataType = dml::get_dml_data_type<Out>();
-  c_buffer_desc.Flags = DML_TENSOR_FLAG_NONE;
-  c_buffer_desc.DimensionCount = 4;
-  c_buffer_desc.Sizes = c_dims;
-  c_buffer_desc.Strides = c_strides;
-  c_buffer_desc.TotalTensorSizeInBytes =
-      ((batch_size - 1) * stridec + ldc * m) * sizeof(Out);
-  c_buffer_desc.GuaranteedBaseOffsetAlignment = 0;
-
-  DML_TENSOR_DESC c_desc = {};
-  c_desc.Type = DML_TENSOR_TYPE_BUFFER;
-  c_desc.Desc = &c_buffer_desc;
+  auto& c_desc_input_bundle_batch = op_bundle_gemm_batch.AddInput(
+      dml::get_dml_data_type<Out>(), c_dims, &c_strides,
+      ((batch_size - 1) * stridec + ldc * m) * sizeof(Out));
+  auto& c_desc_output_bundle_batch = op_bundle_gemm_batch.AddOutput(
+      dml::get_dml_data_type<Out>(), c_dims, &c_strides,
+      ((batch_size - 1) * stridec + ldc * m) * sizeof(Out));
 
   // DirectML's GEMM operator supports batched operations natively
-  DML_GEMM_OPERATOR_DESC gemm_desc = {};
-  gemm_desc.ATensor = &a_desc;
-  gemm_desc.BTensor = &b_desc;
-  gemm_desc.CTensor = (beta != 0.0f) ? &c_desc : nullptr;
-  gemm_desc.OutputTensor = &c_desc;
-  gemm_desc.TransA =
+  auto& gemm_desc_batch =
+      op_bundle_gemm_batch.GetOperatorDesc<DML_GEMM_OPERATOR_DESC>();
+  gemm_desc_batch.ATensor = &a_desc_batch.get_tensor_desc();
+  gemm_desc_batch.BTensor = &b_desc_batch.get_tensor_desc();
+  gemm_desc_batch.CTensor =
+      (beta != 0.0f) ? &c_desc_input_bundle_batch.get_tensor_desc() : nullptr;
+  gemm_desc_batch.OutputTensor = &c_desc_output_bundle_batch.get_tensor_desc();
+  gemm_desc_batch.TransA =
       transpose_a ? DML_MATRIX_TRANSFORM_TRANSPOSE : DML_MATRIX_TRANSFORM_NONE;
-  gemm_desc.TransB =
+  gemm_desc_batch.TransB =
       transpose_b ? DML_MATRIX_TRANSFORM_TRANSPOSE : DML_MATRIX_TRANSFORM_NONE;
-  gemm_desc.Alpha = alpha;
-  gemm_desc.Beta = beta;
-
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_GEMM;
-  op_desc.Desc = &gemm_desc;
+  gemm_desc_batch.Alpha = alpha;
+  gemm_desc_batch.Beta = beta;
 
   dml::Operator* compiled_op;
   try {
-    compiled_op =
-        dml::GetOrCreateCompiledOperatorApi(&op_desc, DML_EXECUTION_FLAG_NONE);
+    compiled_op = dml::GetOrCreateCompiledOperatorApi(
+        std::move(op_bundle_gemm_batch), DML_EXECUTION_FLAG_NONE);
   } catch (const std::runtime_error& e) {
     // If DirectML doesn't support batched GEMM with custom strides,
     // or if operator creation/compilation failed for other reasons,

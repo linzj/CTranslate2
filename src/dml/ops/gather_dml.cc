@@ -94,41 +94,46 @@ void Gather::compute(const StorageView& data,
         new dml::utils::ScopedReshape(output_for_dml, new_output_shape));
   }
 
-  // Create tensor descriptors using the (potentially reshaped) views
-  dml::utils::DmlTensorDescBundle data_desc_bundle(data_for_dml);
-  dml::utils::DmlTensorDescBundle indices_desc_bundle(indices_for_dml);
-  dml::utils::DmlTensorDescBundle output_desc_bundle(
-      output_for_dml);  // Output is now at target_dml_rank
+  // Create tensor and operator descriptors
+  dml::utils::DmlOperatorDescBundle op_desc_bundle;
+  auto& data_desc_bundle = op_desc_bundle.AddInput(data_for_dml);
+  auto& indices_desc_bundle = op_desc_bundle.AddInput(indices_for_dml);
+  auto& output_desc_bundle = op_desc_bundle.AddOutput(output_for_dml);
 
   // Create gather operator descriptor
-  DML_GATHER_OPERATOR_DESC gather_desc = {};
+  auto& gather_desc =
+      op_desc_bundle.GetOperatorDesc<DML_GATHER_OPERATOR_DESC>();
   gather_desc.InputTensor = &data_desc_bundle.get_tensor_desc();
   gather_desc.IndicesTensor = &indices_desc_bundle.get_tensor_desc();
   gather_desc.OutputTensor = &output_desc_bundle.get_tensor_desc();
   gather_desc.Axis = static_cast<UINT>(dml_axis);  // Use the adjusted axis
   gather_desc.IndexDimensions = static_cast<UINT>(original_indices_rank);
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_GATHER;
-  op_desc.Desc = &gather_desc;
+  // Extract necessary information for bindings *before* moving the
+  // op_desc_bundle
+  const UINT64 data_tensor_size =
+      data_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes;
+  const UINT64 indices_tensor_size =
+      indices_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes;
+  const UINT64 output_tensor_size =
+      output_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes;
 
   // Get or create compiled operator from cache
-  auto compiled_operator = dml::GetOrCreateCompiledOperatorApi(&op_desc);
+  auto* compiled_operator =
+      dml::GetOrCreateCompiledOperatorApi(std::move(op_desc_bundle));
 
   // Create and bind resources using dml::utils
   dml::utils::DmlBufferBindingBundle data_buffer_binding_storage(
-      dml::utils::ResourceFromStorageView(data_for_dml), 0,
-      data_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+      dml::utils::ResourceFromStorageView(data_for_dml), 0, data_tensor_size);
   dml::utils::DmlBufferBindingBundle indices_buffer_binding_storage(
       dml::utils::ResourceFromStorageView(indices_for_dml), 0,
-      indices_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+      indices_tensor_size);
 
   dml::utils::DmlBindingArrayBundle input_bindings_for_op(
       {data_buffer_binding_storage, indices_buffer_binding_storage});
 
   dml::utils::DmlBufferBindingBundle output_buffer_binding_storage(
-      dml::utils::ResourceFromStorageView(output), 0,
-      output_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+      dml::utils::ResourceFromStorageView(output), 0, output_tensor_size);
   dml::utils::DmlBindingArrayBundle output_bindings_for_op(
       {output_buffer_binding_storage});
 

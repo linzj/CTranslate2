@@ -65,35 +65,32 @@ std::vector<UINT> to_dml_dims(const Shape& shape,
                               size_t storage_size,
                               bool ensure_at_least_1d_for_dml = true);
 
-// Special case for 4D shapes often required by DML ops (e.g., NCHW for Conv).
-// Maps (Batch, Channels, Width) to (Batch, Channels, 1, Width) for
-// input/output. Weight: (OutChannels, InChannels/Groups, KernelW) ->
-// (OutChannels, InChannels/Groups, 1, KernelW). Bias: (OutChannels) -> (1,
-// OutChannels, 1, 1) for broadcasting.
-std::vector<UINT> get_dml_tensor_shape_4d(const StorageView& tensor,
-                                          bool is_filter_or_bias = false);
-
-// --- DML Tensor Descriptor Utilities ---
-
-// Helper to create a DML_BUFFER_TENSOR_DESC and corresponding DML_TENSOR_DESC.
-// `dml_dims_buffer` and `dml_strides_buffer` (if not null) are populated and
-// used by `buffer_desc`. These buffers must outlive `buffer_desc` and
-// `tensor_desc`.
-DML_TENSOR_DESC make_tensor_desc_from_storage(
-    const StorageView& storage,
-    std::vector<UINT>&
-        dml_dims_buffer,  // Output: populated with DML dimensions
-    DML_BUFFER_TENSOR_DESC&
-        buffer_desc,  // Output: populated DML buffer tensor desc
-    std::vector<UINT>* dml_strides_buffer =
-        nullptr  // Optional Output: populated with DML strides
-);
-
 // Manages DML_BUFFER_TENSOR_DESC and DML_TENSOR_DESC, including internal
 // storage for sizes/strides vectors. This is useful for situations where tensor
 // metadata needs to be managed throughout DML operations.
 class DmlTensorDescBundle {
  public:
+  const DML_BUFFER_TENSOR_DESC& get_buffer_desc() const {
+    return buffer_desc_internal;
+  }
+  const DML_TENSOR_DESC& get_tensor_desc() const {
+    return tensor_desc_internal;
+  }
+
+  const std::vector<UINT>& get_sizes_vec() const { return internal_sizes_vec; }
+  const std::vector<UINT>& get_strides_vec() const {
+    return internal_strides_vec;
+  }
+
+  DML_TENSOR_DATA_TYPE get_data_type() const {
+    return buffer_desc_internal.DataType;
+  }
+
+  void set_data_type(DML_TENSOR_DATA_TYPE dml_dtype) {
+    buffer_desc_internal.DataType = dml_dtype;
+  }
+
+ private:
   DmlTensorDescBundle() = default;
 
   // Constructor from StorageView. Calculates contiguous strides by default.
@@ -145,31 +142,37 @@ class DmlTensorDescBundle {
                       uint32_t minDimensionCount,
                       uint32_t guaranteedBaseOffsetAlignment);
 
+  DmlTensorDescBundle(const DmlTensorDescBundle& other) {
+    internal_sizes_vec = other.internal_sizes_vec;
+    internal_strides_vec = other.internal_strides_vec;
+    buffer_desc_internal = other.buffer_desc_internal;
+    tensor_desc_internal = other.tensor_desc_internal;
+
+    buffer_desc_internal.Sizes = internal_sizes_vec.data();
+    buffer_desc_internal.Strides =
+        internal_strides_vec.empty() ? nullptr : internal_strides_vec.data();
+    tensor_desc_internal.Desc = &buffer_desc_internal;
+  }
+
+  DmlTensorDescBundle& operator=(const DmlTensorDescBundle& other) {
+    if (this != &other) {
+      internal_sizes_vec = other.internal_sizes_vec;
+      internal_strides_vec = other.internal_strides_vec;
+      buffer_desc_internal = other.buffer_desc_internal;
+      tensor_desc_internal = other.tensor_desc_internal;
+
+      buffer_desc_internal.Sizes = internal_sizes_vec.data();
+      buffer_desc_internal.Strides =
+          internal_strides_vec.empty() ? nullptr : internal_strides_vec.data();
+      tensor_desc_internal.Desc = &buffer_desc_internal;
+    }
+    return *this;
+  }
+
   static DmlTensorDescBundle broadcastFromSeach(
       const StorageView& storage,
       const std::vector<UINT>& target_dims);
 
-  const DML_BUFFER_TENSOR_DESC& get_buffer_desc() const {
-    return buffer_desc_internal;
-  }
-  const DML_TENSOR_DESC& get_tensor_desc() const {
-    return tensor_desc_internal;
-  }
-
-  const std::vector<UINT>& get_sizes_vec() const { return internal_sizes_vec; }
-  const std::vector<UINT>& get_strides_vec() const {
-    return internal_strides_vec;
-  }
-
-  DML_TENSOR_DATA_TYPE get_data_type() const {
-    return buffer_desc_internal.DataType;
-  }
-
-  void set_data_type(DML_TENSOR_DATA_TYPE dml_dtype) {
-    buffer_desc_internal.DataType = dml_dtype;
-  }
-
- private:
   std::vector<UINT> internal_sizes_vec;
   std::vector<UINT> internal_strides_vec;  // May be empty if Strides = nullptr
   DML_BUFFER_TENSOR_DESC buffer_desc_internal{};
@@ -181,6 +184,319 @@ class DmlTensorDescBundle {
                          const std::vector<UINT>& sizes_in,
                          const std::vector<UINT>* strides_in,
                          UINT64 total_tensor_size_bytes_in);
+  friend class DmlOperatorDescBundle;
+};
+
+// A helper class to construct a `DML_OPERATOR_DESC` by managing the lifetimes
+// of its constituent parts.
+//
+// DML operator descriptions often point to other structures (like tensor
+// descriptions), and this class ensures those structures remain valid while the
+// operator description is being assembled and used. It is move-only to prevent
+// accidental copies which could invalidate internal pointers.
+class DmlOperatorDescBundle {
+ public:
+  DmlOperatorDescBundle() = default;
+  ~DmlOperatorDescBundle() = default;
+
+  DmlOperatorDescBundle(const DmlOperatorDescBundle&) = delete;
+  DmlOperatorDescBundle& operator=(const DmlOperatorDescBundle&) = delete;
+
+  DmlOperatorDescBundle(DmlOperatorDescBundle&&) = default;
+  DmlOperatorDescBundle& operator=(DmlOperatorDescBundle&&) = default;
+
+  // @brief Adds an input tensor description to the operator.
+  // @details Arguments are forwarded to the `DmlTensorDescBundle` constructor.
+  // @return A reference to the newly created `DmlTensorDescBundle`.
+  template <typename... Args>
+  DmlTensorDescBundle& AddInput(Args&&... args) {
+    std::unique_ptr<DmlTensorDescBundle> input_desc(
+        new DmlTensorDescBundle(std::forward<Args>(args)...));
+    input_descs_.emplace_back(std::move(input_desc));
+    return *input_descs_.back();
+  }
+
+  /**
+   * @brief Adds an input tensor descriptor with broadcasting from search
+   * dimensions.
+   *
+   * This method creates a new DML tensor descriptor by broadcasting the given
+   * storage view to match the specified target dimensions, then adds it to the
+   * input descriptors collection. The broadcasting is performed using a
+   * search-based algorithm to determine the optimal dimension mapping.
+   *
+   * @param storage The source storage view containing the tensor data to be
+   * broadcasted
+   * @param target_dims Vector of target dimensions (UINT) that the tensor
+   * should be broadcasted to
+   * @return Reference to the newly added DmlTensorDescBundle for method
+   * chaining
+   *
+   * @note The method adds the descriptor to the internal input_descs_
+   * collection
+   * @note Returns a reference to the last added descriptor bundle
+   */
+  DmlTensorDescBundle& AddInputBroadcastFromSeach(
+      const StorageView& storage,
+      const std::vector<UINT>& target_dims) {
+    std::unique_ptr<DmlTensorDescBundle> input_desc(new DmlTensorDescBundle(
+        (DmlTensorDescBundle::broadcastFromSeach(storage, target_dims))));
+    input_descs_.emplace_back(std::move(input_desc));
+    return *input_descs_.back();
+  }
+
+  // @brief Adds an output tensor description to the operator.
+  // @details Arguments are forwarded to the `DmlTensorDescBundle` constructor.
+  // @return A reference to the newly created `DmlTensorDescBundle`.
+  template <typename... Args>
+  DmlTensorDescBundle& AddOutput(Args&&... args) {
+    std::unique_ptr<DmlTensorDescBundle> output_desc(
+        new DmlTensorDescBundle(std::forward<Args>(args)...));
+    output_descs_.emplace_back(std::move(output_desc));
+    return *output_descs_.back();
+  }
+
+  // @brief Gets and configures the underlying DML operator-specific description
+  // struct.
+  // @details This function also sets the `DML_OPERATOR_DESC`'s type field based
+  // on the template parameter `T`.
+  // @tparam T The DML operator-specific description type (e.g.,
+  // `DML_GEMM_OPERATOR_DESC`).
+  // @return A reference to the resized and prepared description struct.
+  template <typename T>
+  T& GetOperatorDesc() {
+    size_t size = sizeof(T);
+    operator_desc_storage_.resize(size);
+    T& desc = *reinterpret_cast<T*>(operator_desc_storage_.data());
+    DML_OPERATOR_TYPE type = GetOperatorType<T>();
+    operator_desc_ = {type, &desc};
+    return desc;
+  }
+
+  /**
+   * @brief Creates and returns a reference to a fused operator descriptor of
+   * the specified type.
+   *
+   * This template function allocates storage for a DirectML operator descriptor
+   * of type T, constructs it in-place, and sets up the fused operator
+   * descriptor structure with the appropriate operator type and pointer to the
+   * descriptor data.
+   *
+   * @tparam T The type of the DirectML operator descriptor to create
+   * @return T& Reference to the constructed operator descriptor
+   *
+   * @note The returned reference is valid as long as this object exists and no
+   * subsequent calls to GetFusedOperatorDesc() are made, as they would
+   * invalidate the storage.
+   * @note The storage is managed internally and will be resized to accommodate
+   * the descriptor.
+   */
+  template <typename T>
+  T& GetFusedOperatorDesc() {
+    size_t size = sizeof(T);
+    fused_operator_desc_storage_.resize(size);
+    T& desc = *reinterpret_cast<T*>(fused_operator_desc_storage_.data());
+    DML_OPERATOR_TYPE type = GetOperatorType<T>();
+    fused_operator_desc_ = {type, &desc};
+    return desc;
+  }
+
+  const DML_OPERATOR_DESC& get_desc() const { return operator_desc_; }
+
+  const DML_OPERATOR_DESC& get_fused_desc() const {
+    return fused_operator_desc_;
+  }
+
+ private:
+  template <typename T>
+  DML_OPERATOR_TYPE GetOperatorType() {
+    DML_OPERATOR_TYPE type;
+    if constexpr (std::is_same_v<T, DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ELEMENT_WISE_IDENTITY;
+    } else if constexpr (std::is_same_v<T, DML_GEMM_OPERATOR_DESC>) {
+      type = DML_OPERATOR_GEMM;
+    } else if constexpr (std::is_same_v<T, DML_REDUCE_OPERATOR_DESC>) {
+      type = DML_OPERATOR_REDUCE;
+    } else if constexpr (std::is_same_v<T,
+                                        DML_ELEMENT_WISE_ADD_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ELEMENT_WISE_ADD;
+    } else if constexpr (std::is_same_v<
+                             T, DML_FILL_VALUE_CONSTANT_OPERATOR_DESC>) {
+      type = DML_OPERATOR_FILL_VALUE_CONSTANT;
+    } else if constexpr (std::is_same_v<T, DML_CAST_OPERATOR_DESC>) {
+      type = DML_OPERATOR_CAST;
+    } else if constexpr (std::is_same_v<T, DML_ACTIVATION_RELU_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ACTIVATION_RELU;
+    } else if constexpr (std::is_same_v<T,
+                                        DML_ACTIVATION_SIGMOID_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ACTIVATION_SIGMOID;
+    } else if constexpr (std::is_same_v<T, DML_ACTIVATION_TANH_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ACTIVATION_TANH;
+    } else if constexpr (std::is_same_v<
+                             T, DML_ELEMENT_WISE_SUBTRACT_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ELEMENT_WISE_SUBTRACT;
+    } else if constexpr (std::is_same_v<
+                             T, DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ELEMENT_WISE_MULTIPLY;
+    } else if constexpr (std::is_same_v<T,
+                                        DML_ELEMENT_WISE_MAX_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ELEMENT_WISE_MAX;
+    } else if constexpr (std::is_same_v<T,
+                                        DML_ELEMENT_WISE_MIN_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ELEMENT_WISE_MIN;
+    } else if constexpr (std::is_same_v<T,
+                                        DML_ELEMENT_WISE_EXP_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ELEMENT_WISE_EXP;
+    } else if constexpr (std::is_same_v<T,
+                                        DML_ELEMENT_WISE_LOG_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ELEMENT_WISE_LOG;
+    } else if constexpr (std::is_same_v<T,
+                                        DML_ELEMENT_WISE_SIN_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ELEMENT_WISE_SIN;
+    } else if constexpr (std::is_same_v<T,
+                                        DML_ELEMENT_WISE_COS_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ELEMENT_WISE_COS;
+    } else if constexpr (std::is_same_v<T, DML_ARGMAX_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ARGMAX;
+    } else if constexpr (std::is_same_v<T,
+                                        DML_ELEMENT_WISE_ADD1_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ELEMENT_WISE_ADD1;
+    } else if constexpr (std::is_same_v<
+                             T, DML_ELEMENT_WISE_DIVIDE_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ELEMENT_WISE_DIVIDE;
+    } else if constexpr (std::is_same_v<
+                             T, DML_ELEMENT_WISE_NEGATE_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ELEMENT_WISE_NEGATE;
+    } else if constexpr (std::is_same_v<T,
+                                        DML_ELEMENT_WISE_ABS_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ELEMENT_WISE_ABS;
+    } else if constexpr (std::is_same_v<T,
+                                        DML_ELEMENT_WISE_ROUND_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ELEMENT_WISE_ROUND;
+    } else if constexpr (std::is_same_v<T, DML_CONVOLUTION_OPERATOR_DESC>) {
+      type = DML_OPERATOR_CONVOLUTION;
+    } else if constexpr (std::is_same_v<
+                             T,
+                             DML_QUANTIZED_LINEAR_CONVOLUTION_OPERATOR_DESC>) {
+      type = DML_OPERATOR_QUANTIZED_LINEAR_CONVOLUTION;
+    } else if constexpr (std::is_same_v<
+                             T, DML_CONVOLUTION_INTEGER_OPERATOR_DESC>) {
+      type = DML_OPERATOR_CONVOLUTION_INTEGER;
+    } else if constexpr (std::is_same_v<
+                             T, DML_MATRIX_MULTIPLY_INTEGER_OPERATOR_DESC>) {
+      type = DML_OPERATOR_MATRIX_MULTIPLY_INTEGER;
+    } else if constexpr (std::is_same_v<
+                             T,
+                             DML_MEAN_VARIANCE_NORMALIZATION2_OPERATOR_DESC>) {
+      type = DML_OPERATOR_MEAN_VARIANCE_NORMALIZATION2;
+    } else if constexpr (std::is_same_v<T, DML_JOIN_OPERATOR_DESC>) {
+      type = DML_OPERATOR_JOIN;
+    } else if constexpr (std::is_same_v<T, DML_SPLIT_OPERATOR_DESC>) {
+      type = DML_OPERATOR_SPLIT;
+    } else if constexpr (std::is_same_v<T, DML_SLICE_OPERATOR_DESC>) {
+      type = DML_OPERATOR_SLICE;
+    } else if constexpr (std::is_same_v<T, DML_SLICE1_OPERATOR_DESC>) {
+      type = DML_OPERATOR_SLICE1;
+    } else if constexpr (std::is_same_v<T, DML_TILE_OPERATOR_DESC>) {
+      type = DML_OPERATOR_TILE;
+    } else if constexpr (std::is_same_v<T, DML_GATHER_OPERATOR_DESC>) {
+      type = DML_OPERATOR_GATHER;
+    } else if constexpr (std::is_same_v<T, DML_GATHER_ELEMENTS_OPERATOR_DESC>) {
+      type = DML_OPERATOR_GATHER_ELEMENTS;
+    } else if constexpr (std::is_same_v<T,
+                                        DML_SCATTER_ELEMENTS_OPERATOR_DESC>) {
+      type = DML_OPERATOR_SCATTER_ELEMENTS;
+    } else if constexpr (std::is_same_v<T, DML_TOP_K1_OPERATOR_DESC>) {
+      type = DML_OPERATOR_TOP_K1;
+    } else if constexpr (std::is_same_v<T, DML_ACTIVATION_GELU_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ACTIVATION_GELU;
+    } else if constexpr (std::is_same_v<T,
+                                        DML_ACTIVATION_SWISH_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ACTIVATION_SWISH;
+    } else if constexpr (std::is_same_v<T,
+                                        DML_ACTIVATION_LINEAR_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ACTIVATION_LINEAR;
+    } else if constexpr (std::is_same_v<
+                             T, DML_ACTIVATION_IDENTITY_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ACTIVATION_IDENTITY;
+    } else if constexpr (std::is_same_v<T,
+                                        DML_ACTIVATION_SOFTMAX_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ACTIVATION_SOFTMAX;
+    } else if constexpr (std::is_same_v<
+                             T, DML_ACTIVATION_LOG_SOFTMAX_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ACTIVATION_LOG_SOFTMAX;
+    } else if constexpr (std::is_same_v<
+                             T, DML_ACTIVATION_SOFTMAX1_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ACTIVATION_SOFTMAX1;
+    } else if constexpr (std::is_same_v<
+                             T, DML_ACTIVATION_LOG_SOFTMAX1_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ACTIVATION_LOG_SOFTMAX1;
+    } else if constexpr (std::is_same_v<T,
+                                        DML_RANDOM_GENERATOR_OPERATOR_DESC>) {
+      type = DML_OPERATOR_RANDOM_GENERATOR;
+    } else if constexpr (std::is_same_v<
+                             T, DML_FILL_VALUE_SEQUENCE_OPERATOR_DESC>) {
+      type = DML_OPERATOR_FILL_VALUE_SEQUENCE;
+    } else if constexpr (
+        std::is_same_v<
+            T, DML_ELEMENT_WISE_LOGICAL_GREATER_THAN_OR_EQUAL_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ELEMENT_WISE_LOGICAL_GREATER_THAN_OR_EQUAL;
+    } else if constexpr (
+        std::is_same_v<T, DML_ELEMENT_WISE_LOGICAL_LESS_THAN_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ELEMENT_WISE_LOGICAL_LESS_THAN;
+    } else if constexpr (std::is_same_v<
+                             T,
+                             DML_ELEMENT_WISE_LOGICAL_EQUALS_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ELEMENT_WISE_LOGICAL_EQUALS;
+    } else if constexpr (std::is_same_v<T, DML_ELEMENT_WISE_IF_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ELEMENT_WISE_IF;
+    } else if constexpr (std::is_same_v<
+                             T, DML_CUMULATIVE_SUMMATION_OPERATOR_DESC>) {
+      type = DML_OPERATOR_CUMULATIVE_SUMMATION;
+    } else if constexpr (std::is_same_v<
+                             T,
+                             DML_ELEMENT_WISE_QUANTIZE_LINEAR_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ELEMENT_WISE_QUANTIZE_LINEAR;
+    } else if constexpr (
+        std::is_same_v<T, DML_ELEMENT_WISE_DEQUANTIZE_LINEAR_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ELEMENT_WISE_DEQUANTIZE_LINEAR;
+    } else if constexpr (std::is_same_v<
+                             T, DML_DYNAMIC_QUANTIZE_LINEAR_OPERATOR_DESC>) {
+      type = DML_OPERATOR_DYNAMIC_QUANTIZE_LINEAR;
+    } else if constexpr (std::is_same_v<T,
+                                        DML_ELEMENT_WISE_RECIP_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ELEMENT_WISE_RECIP;
+    } else if constexpr (std::is_same_v<T,
+                                        DML_ELEMENT_WISE_SQRT_OPERATOR_DESC>) {
+      type = DML_OPERATOR_ELEMENT_WISE_SQRT;
+    } else {
+      static_assert(false,
+                    "Unsupported operator type for DmlOperatorDescBundle");
+    }
+    return type;
+  }
+
+  // Type-erased storage for the operator-specific description struct (e.g.,
+  // DML_GEMM_OPERATOR_DESC).
+  std::vector<std::byte> operator_desc_storage_;
+  std::vector<std::byte> fused_operator_desc_storage_;
+  // Owns the input tensor descriptions.
+  std::vector<std::unique_ptr<DmlTensorDescBundle>> input_descs_;
+  // Owns the output tensor descriptions.
+  std::vector<std::unique_ptr<DmlTensorDescBundle>> output_descs_;
+  // The top-level DML operator description. `Desc` will point to data in
+  // `operator_desc_storage_`.
+  DML_OPERATOR_DESC operator_desc_{};
+  /**
+   * @brief Descriptor for a fused DML (DirectML) operator.
+   *
+   * This member holds the configuration and parameters for a DirectML operator
+   * that combines multiple operations into a single fused operation for
+   * improved performance. The descriptor defines the operator's input/output
+   * tensors, attributes, and execution behavior within the DirectML compute
+   * graph.
+   */
+  DML_OPERATOR_DESC fused_operator_desc_{};
 };
 
 // Manages a DML_BUFFER_BINDING and provides a DML_BINDING_DESC for it.
@@ -337,15 +653,6 @@ class ScopedReshape {
 };
 
 // --- DML Operator & Resource Creation Utilities ---
-
-// Helper to create a constant tensor on the GPU using
-// DML_OPERATOR_FILL_VALUE_CONSTANT. Manages the lifetime of the
-// DML_BUFFER_TENSOR_DESC and DML_TENSOR_DESC. Returns the GPU resource and
-// fills out_bundle with the descriptor bundle.
-Microsoft::WRL::ComPtr<IResourceWrapper> CreateDmlConstantTensor(
-    dml::Device* ct2_dml_device,    // ctranslate2 dml::Device wrapper
-    DML_SCALAR_UNION scalar_value,  // Scalar value to fill
-    const DmlTensorDescBundle& out_bundle);
 
 inline ID3D12Resource* ResourceFromStorageView(
     const StorageView& storage_view) {

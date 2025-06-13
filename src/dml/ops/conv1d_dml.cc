@@ -9,6 +9,30 @@
 namespace ctranslate2 {
 namespace ops {
 
+namespace {
+// DML convolution expects 4D tensors. This helper reshapes CT2's 1D conv
+// tensors (3D) to 4D. Input [N, C, W] -> [N, C, 1, W] Weight [Co, Ci, K] ->
+// [Co, Ci, 1, K] Bias [Co] -> [1, Co, 1, 1] for broadcasting
+std::vector<UINT> get_dml_tensor_shape_4d(const StorageView& view) {
+  const auto& shape = view.shape();
+  if (shape.size() == 1) {  // Bias
+    return {1, static_cast<UINT>(shape[0]), 1, 1};
+  }
+  if (shape.size() == 3) {
+    return {static_cast<UINT>(shape[0]), static_cast<UINT>(shape[1]), 1,
+            static_cast<UINT>(shape[2])};
+  }
+  if (shape.size() == 4) {  // Already 4D
+    std::vector<UINT> dims(4);
+    for (size_t i = 0; i < 4; ++i)
+      dims[i] = shape[i];
+    return dims;
+  }
+  // Fallback for other cases.
+  return dml::utils::to_dml_dims(view.shape(), view.size());
+}
+}  // anonymous namespace
+
 template <Device D, typename T>
 void Conv1D::compute(const StorageView& input,
                      const StorageView& weight,
@@ -27,63 +51,65 @@ void Conv1D::compute(const StorageView& input,
     StorageView input_q8({input.shape()}, int8_t(0), input.device());
     StorageView input_scale({1}, 0.0f, input.device());
     StorageView input_zero_point({1}, int8_t(0), input.device());
-    {
-      dml::utils::DmlTensorDescBundle input_desc(input);
-      dml::utils::DmlTensorDescBundle input_q8_desc(input_q8);
+    {  // DYNAMIC_QUANTIZE_LINEAR
+      dml::utils::DmlOperatorDescBundle op_bundle;
+
+      auto& input_desc = op_bundle.AddInput(input);
+      auto& input_q8_desc = op_bundle.AddOutput(input_q8);
       std::vector<UINT> scalar_dims(input.rank(), 1);
-      dml::utils::DmlTensorDescBundle input_scale_desc(
-          input_scale.dtype(), scalar_dims, nullptr,
-          input_scale.reserved_memory());
-      dml::utils::DmlTensorDescBundle input_zero_point_desc(
+      auto& input_scale_desc =
+          op_bundle.AddOutput(input_scale.dtype(), scalar_dims, nullptr,
+                              input_scale.reserved_memory());
+      auto& input_zero_point_desc = op_bundle.AddOutput(
           input_zero_point.dtype(), scalar_dims, nullptr, 0);
 
-      DML_DYNAMIC_QUANTIZE_LINEAR_OPERATOR_DESC op_desc{};
+      auto& op_desc =
+          op_bundle
+              .GetOperatorDesc<DML_DYNAMIC_QUANTIZE_LINEAR_OPERATOR_DESC>();
       op_desc.InputTensor = &input_desc.get_tensor_desc();
       op_desc.OutputTensor = &input_q8_desc.get_tensor_desc();
       op_desc.OutputScaleTensor = &input_scale_desc.get_tensor_desc();
       op_desc.OutputZeroPointTensor = &input_zero_point_desc.get_tensor_desc();
-      DML_OPERATOR_DESC dml_op_desc_wrapper{
-          DML_OPERATOR_DYNAMIC_QUANTIZE_LINEAR, &op_desc};
 
-      dml::Operator* dml_op = dml::GetOrCreateCompiledOperatorApi(
-          &dml_op_desc_wrapper, DML_EXECUTION_FLAG_NONE);
+      dml::Operator* dml_op =
+          dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
+
       dml::utils::DmlBindingArrayBundle inputs(
           {dml::utils::DmlBufferBindingBundle(
               dml::utils::ResourceFromStorageView(input))});
-      dml::utils::DmlBindingArrayBundle outputs({
-          dml::utils::DmlBufferBindingBundle(
-              dml::utils::ResourceFromStorageView(input_q8)),
-          dml::utils::DmlBufferBindingBundle(
-              dml::utils::ResourceFromStorageView(input_scale)),
-          dml::utils::DmlBufferBindingBundle(
-              dml::utils::ResourceFromStorageView(input_zero_point)),
-      });
+      dml::utils::DmlBindingArrayBundle outputs(
+          {dml::utils::DmlBufferBindingBundle(
+               dml::utils::ResourceFromStorageView(input_q8)),
+           dml::utils::DmlBufferBindingBundle(
+               dml::utils::ResourceFromStorageView(input_scale)),
+           dml::utils::DmlBufferBindingBundle(
+               dml::utils::ResourceFromStorageView(input_zero_point))});
       dml_op->Execute(inputs.get_descs(), outputs.get_descs());
     }
 
     // 2. Integer Convolution
     StorageView output_q32(output.shape(), int32_t(0), output.device());
     StorageView weight_zero_point({1}, int8_t(0), weight.device());
-    {
-      std::vector<UINT> input_dims =
-          dml::utils::get_dml_tensor_shape_4d(input_q8);
-      dml::utils::DmlTensorDescBundle input_q8_desc(
+    {  // CONVOLUTION_INTEGER
+      dml::utils::DmlOperatorDescBundle op_bundle;
+
+      std::vector<UINT> input_dims = get_dml_tensor_shape_4d(input_q8);
+      auto& input_q8_desc = op_bundle.AddInput(
           input_q8.dtype(), input_dims, nullptr, input_q8.reserved_memory());
-      dml::utils::DmlTensorDescBundle input_zp_desc(input_zero_point);
+      auto& input_zp_desc = op_bundle.AddInput(input_zero_point);
 
-      std::vector<UINT> weight_dims =
-          dml::utils::get_dml_tensor_shape_4d(weight, true);
-      dml::utils::DmlTensorDescBundle weight_desc(
-          weight.dtype(), weight_dims, nullptr, weight.reserved_memory());
-      dml::utils::DmlTensorDescBundle weight_zp_desc(weight_zero_point);
+      std::vector<UINT> weight_dims = get_dml_tensor_shape_4d(weight);
+      auto& weight_desc = op_bundle.AddInput(weight.dtype(), weight_dims,
+                                             nullptr, weight.reserved_memory());
+      auto& weight_zp_desc = op_bundle.AddInput(weight_zero_point);
 
-      std::vector<UINT> output_dims =
-          dml::utils::get_dml_tensor_shape_4d(output_q32);
-      dml::utils::DmlTensorDescBundle output_q32_desc(
-          output_q32.dtype(), output_dims, nullptr,
-          output_q32.reserved_memory());
+      std::vector<UINT> output_dims = get_dml_tensor_shape_4d(output_q32);
+      auto& output_q32_desc =
+          op_bundle.AddOutput(output_q32.dtype(), output_dims, nullptr,
+                              output_q32.reserved_memory());
 
-      DML_CONVOLUTION_INTEGER_OPERATOR_DESC op_desc{};
+      auto& op_desc =
+          op_bundle.GetOperatorDesc<DML_CONVOLUTION_INTEGER_OPERATOR_DESC>();
       op_desc.InputTensor = &input_q8_desc.get_tensor_desc();
       op_desc.InputZeroPointTensor = &input_zp_desc.get_tensor_desc();
       op_desc.FilterTensor = &weight_desc.get_tensor_desc();
@@ -99,11 +125,9 @@ void Conv1D::compute(const StorageView& input,
       UINT dml_end_padding[] = {0, static_cast<UINT>(_padding)};
       op_desc.EndPadding = dml_end_padding;
       op_desc.GroupCount = static_cast<UINT>(_groups);
-      DML_OPERATOR_DESC dml_op_desc_wrapper{DML_OPERATOR_CONVOLUTION_INTEGER,
-                                            &op_desc};
 
-      dml::Operator* dml_op = dml::GetOrCreateCompiledOperatorApi(
-          &dml_op_desc_wrapper, DML_EXECUTION_FLAG_NONE);
+      dml::Operator* dml_op =
+          dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
       dml::utils::DmlBindingArrayBundle inputs({
           dml::utils::DmlBufferBindingBundle(
               dml::utils::ResourceFromStorageView(input_q8)),
@@ -114,7 +138,7 @@ void Conv1D::compute(const StorageView& input,
           dml::utils::DmlBufferBindingBundle(
               dml::utils::ResourceFromStorageView(weight_zero_point)),
       });
-      dml::utils::DmlBindingArrayBundle outputs(
+      dml::utils::DmlBindingArrayBundle outputs(  //
           {dml::utils::DmlBufferBindingBundle(
               dml::utils::ResourceFromStorageView(output_q32))});
       dml_op->Execute(inputs.get_descs(), outputs.get_descs());
@@ -132,13 +156,17 @@ void Conv1D::compute(const StorageView& input,
 
     // 3a. Cast to float
     {
-      dml::utils::DmlTensorDescBundle in_desc(output_q32);
-      dml::utils::DmlTensorDescBundle out_desc(tmp_float);
-      DML_CAST_OPERATOR_DESC op_desc{&in_desc.get_tensor_desc(),
-                                     &out_desc.get_tensor_desc()};
-      DML_OPERATOR_DESC dml_op_desc_wrapper{DML_OPERATOR_CAST, &op_desc};
-      dml::Operator* dml_op = dml::GetOrCreateCompiledOperatorApi(
-          &dml_op_desc_wrapper, DML_EXECUTION_FLAG_NONE);
+      dml::utils::DmlOperatorDescBundle op_bundle;
+      auto& in_desc = op_bundle.AddInput(output_q32);
+      auto& out_desc = op_bundle.AddOutput(tmp_float);
+
+      auto& op_desc = op_bundle.GetOperatorDesc<DML_CAST_OPERATOR_DESC>();
+      op_desc.InputTensor = &in_desc.get_tensor_desc();
+      op_desc.OutputTensor = &out_desc.get_tensor_desc();
+
+      dml::Operator* dml_op =
+          dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
+
       dml::utils::DmlBindingArrayBundle inputs(
           {dml::utils::DmlBufferBindingBundle(
               dml::utils::ResourceFromStorageView(output_q32))});
@@ -151,26 +179,24 @@ void Conv1D::compute(const StorageView& input,
     // 3b. Multiply by input_scale
     StorageView tmp_float2(output.shape(), output.dtype(), output.device());
     {
-      dml::utils::DmlTensorDescBundle a_desc(tmp_float);
+      dml::utils::DmlOperatorDescBundle op_bundle;
 
+      auto& a_desc = op_bundle.AddInput(tmp_float);
       const auto target_dims =
           dml::utils::to_dml_dims(tmp_float.shape(), tmp_float.size());
-      const auto physical_dims =
-          dml::utils::to_dml_dims(input_scale.shape(), input_scale.size());
-      dml::utils::DmlTensorDescBundle b_desc(
-          dml::utils::get_dml_data_type(input_scale.dtype()), target_dims,
-          physical_dims, (int32_t)target_dims.size(), 0, 0,
-          (uint32_t)target_dims.size(), 0);
+      auto& b_desc =
+          op_bundle.AddInputBroadcastFromSeach(input_scale, target_dims);
+      auto& out_desc = op_bundle.AddOutput(tmp_float2);
 
-      dml::utils::DmlTensorDescBundle out_desc(tmp_float2);
-      DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC op_desc{
-          &a_desc.get_tensor_desc(), &b_desc.get_tensor_desc(),
-          &out_desc.get_tensor_desc()};
-      DML_OPERATOR_DESC dml_op_desc_wrapper{DML_OPERATOR_ELEMENT_WISE_MULTIPLY,
-                                            &op_desc};
+      auto& op_desc =
+          op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC>();
+      op_desc.ATensor = &a_desc.get_tensor_desc();
+      op_desc.BTensor = &b_desc.get_tensor_desc();
+      op_desc.OutputTensor = &out_desc.get_tensor_desc();
 
-      dml::Operator* dml_op = dml::GetOrCreateCompiledOperatorApi(
-          &dml_op_desc_wrapper, DML_EXECUTION_FLAG_NONE);
+      dml::Operator* dml_op =
+          dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
+
       dml::utils::DmlBindingArrayBundle inputs({
           dml::utils::DmlBufferBindingBundle(
               dml::utils::ResourceFromStorageView(tmp_float)),
@@ -183,26 +209,25 @@ void Conv1D::compute(const StorageView& input,
       dml_op->Execute(inputs.get_descs(), outputs.get_descs());
     }
 
-    // 3c. Multiply by weight_scale (*1/qscale)
+    // 3c. Multiply by weight_scale (*1/qscale) is DIVIDE
     {
-      dml::utils::DmlTensorDescBundle a_desc(tmp_float2);
+      dml::utils::DmlOperatorDescBundle op_bundle;
+
+      auto& a_desc = op_bundle.AddInput(tmp_float2);
       const auto target_dims =
           dml::utils::to_dml_dims(tmp_float2.shape(), tmp_float2.size());
-      const std::vector<UINT> physical_dims = {
-          static_cast<UINT>(qscale->size()), 1};
-      dml::utils::DmlTensorDescBundle b_desc(
-          dml::utils::get_dml_data_type(qscale->dtype()), target_dims,
-          physical_dims, (int32_t)target_dims.size(), 0, 0,
-          (uint32_t)target_dims.size(), 0);
-      dml::utils::DmlTensorDescBundle out_desc(final_float_output);
-      DML_ELEMENT_WISE_DIVIDE_OPERATOR_DESC op_desc{
-          &a_desc.get_tensor_desc(), &b_desc.get_tensor_desc(),
-          &out_desc.get_tensor_desc()};
-      DML_OPERATOR_DESC dml_op_desc_wrapper{DML_OPERATOR_ELEMENT_WISE_DIVIDE,
-                                            &op_desc};
+      auto& b_desc = op_bundle.AddInputBroadcastFromSeach(*qscale, target_dims);
+      auto& out_desc = op_bundle.AddOutput(final_float_output);
 
-      dml::Operator* dml_op = dml::GetOrCreateCompiledOperatorApi(
-          &dml_op_desc_wrapper, DML_EXECUTION_FLAG_NONE);
+      auto& op_desc =
+          op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_DIVIDE_OPERATOR_DESC>();
+      op_desc.ATensor = &a_desc.get_tensor_desc();
+      op_desc.BTensor = &b_desc.get_tensor_desc();
+      op_desc.OutputTensor = &out_desc.get_tensor_desc();
+
+      dml::Operator* dml_op =
+          dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
+
       dml::utils::DmlBindingArrayBundle inputs({
           dml::utils::DmlBufferBindingBundle(
               dml::utils::ResourceFromStorageView(tmp_float2)),
@@ -217,25 +242,23 @@ void Conv1D::compute(const StorageView& input,
 
     // 4. Add bias
     if (bias) {
-      dml::utils::DmlTensorDescBundle a_desc(final_float_output);
+      dml::utils::DmlOperatorDescBundle op_bundle;
+
+      auto& a_desc = op_bundle.AddInput(final_float_output);
       const auto target_dims = dml::utils::to_dml_dims(
           final_float_output.shape(), final_float_output.size());
-      const std::vector<UINT> physical_dims = {static_cast<UINT>(bias->size()),
-                                               1};
-      dml::utils::DmlTensorDescBundle b_desc(
-          dml::utils::get_dml_data_type(bias->dtype()), target_dims,
-          physical_dims, (int32_t)target_dims.size(), 0, 0,
-          (uint32_t)target_dims.size(), 0);
-      dml::utils::DmlTensorDescBundle out_desc(output);
+      auto& b_desc = op_bundle.AddInputBroadcastFromSeach(*bias, target_dims);
+      auto& out_desc = op_bundle.AddOutput(output);
 
-      DML_ELEMENT_WISE_ADD_OPERATOR_DESC op_desc{&a_desc.get_tensor_desc(),
-                                                 &b_desc.get_tensor_desc(),
-                                                 &out_desc.get_tensor_desc()};
-      DML_OPERATOR_DESC dml_op_desc_wrapper{DML_OPERATOR_ELEMENT_WISE_ADD,
-                                            &op_desc};
+      auto& op_desc =
+          op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_ADD_OPERATOR_DESC>();
+      op_desc.ATensor = &a_desc.get_tensor_desc();
+      op_desc.BTensor = &b_desc.get_tensor_desc();
+      op_desc.OutputTensor = &out_desc.get_tensor_desc();
 
-      dml::Operator* dml_op = dml::GetOrCreateCompiledOperatorApi(
-          &dml_op_desc_wrapper, DML_EXECUTION_FLAG_NONE);
+      dml::Operator* dml_op =
+          dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
+
       dml::utils::DmlBindingArrayBundle inputs({
           dml::utils::DmlBufferBindingBundle(
               dml::utils::ResourceFromStorageView(final_float_output)),
@@ -252,35 +275,33 @@ void Conv1D::compute(const StorageView& input,
         dml::utils::get_dml_data_type(input.dtype());
 
     // 1. Prepare Tensor Descriptors
-    std::vector<UINT> input_dml_dims_vec =
-        dml::utils::get_dml_tensor_shape_4d(input);
-    dml::utils::DmlTensorDescBundle input_desc_bundle(
+    dml::utils::DmlOperatorDescBundle op_bundle;
+    std::vector<UINT> input_dml_dims_vec = get_dml_tensor_shape_4d(input);
+    auto& input_desc_bundle = op_bundle.AddInput(
         input.dtype(), input_dml_dims_vec, nullptr, input.reserved_memory());
 
-    std::vector<UINT> weight_dml_dims_vec =
-        dml::utils::get_dml_tensor_shape_4d(weight, true);
-    dml::utils::DmlTensorDescBundle weight_desc_bundle(
+    std::vector<UINT> weight_dml_dims_vec = get_dml_tensor_shape_4d(weight);
+    auto& weight_desc_bundle = op_bundle.AddInput(
         weight.dtype(), weight_dml_dims_vec, nullptr, weight.reserved_memory());
 
-    std::vector<UINT> output_dml_dims_vec =
-        dml::utils::get_dml_tensor_shape_4d(output);
-    dml::utils::DmlTensorDescBundle output_desc_bundle(
-        output.dtype(), output_dml_dims_vec, nullptr, output.reserved_memory());
-
-    std::unique_ptr<dml::utils::DmlTensorDescBundle> bias_desc_bundle_ptr;
+    const DML_TENSOR_DESC* bias_tensor_desc = nullptr;
     if (bias) {
-      std::vector<UINT> bias_dml_dims_vec =
-          dml::utils::get_dml_tensor_shape_4d(*bias, true);
-      bias_desc_bundle_ptr = std::make_unique<dml::utils::DmlTensorDescBundle>(
+      std::vector<UINT> bias_dml_dims_vec = get_dml_tensor_shape_4d(*bias);
+      auto& bias_desc_bundle = op_bundle.AddInput(
           bias->dtype(), bias_dml_dims_vec, nullptr, bias->reserved_memory());
+      bias_tensor_desc = &bias_desc_bundle.get_tensor_desc();
     }
 
+    std::vector<UINT> output_dml_dims_vec = get_dml_tensor_shape_4d(output);
+    auto& output_desc_bundle = op_bundle.AddOutput(
+        output.dtype(), output_dml_dims_vec, nullptr, output.reserved_memory());
+
     // 2. Create Convolution Operator Descriptor
-    DML_CONVOLUTION_OPERATOR_DESC conv_op_desc{};
+    auto& conv_op_desc =
+        op_bundle.GetOperatorDesc<DML_CONVOLUTION_OPERATOR_DESC>();
     conv_op_desc.InputTensor = &input_desc_bundle.get_tensor_desc();
     conv_op_desc.FilterTensor = &weight_desc_bundle.get_tensor_desc();
-    conv_op_desc.BiasTensor =
-        bias ? &bias_desc_bundle_ptr->get_tensor_desc() : nullptr;
+    conv_op_desc.BiasTensor = bias_tensor_desc;
     conv_op_desc.OutputTensor = &output_desc_bundle.get_tensor_desc();
     conv_op_desc.Mode = DML_CONVOLUTION_MODE_CROSS_CORRELATION;
     conv_op_desc.Direction = DML_CONVOLUTION_DIRECTION_FORWARD;
@@ -297,10 +318,6 @@ void Conv1D::compute(const StorageView& input,
     conv_op_desc.OutputPadding = dml_output_padding;
     conv_op_desc.GroupCount = static_cast<UINT>(_groups);
 
-    DML_OPERATOR_DESC dml_op_desc_wrapper{};
-    dml_op_desc_wrapper.Type = DML_OPERATOR_CONVOLUTION;
-    dml_op_desc_wrapper.Desc = &conv_op_desc;
-
     // 3. Get or Create Compiled Operator from Cache
     DML_EXECUTION_FLAGS execution_flags = DML_EXECUTION_FLAG_NONE;
     if (dml_data_type == DML_TENSOR_DATA_TYPE_FLOAT16) {
@@ -308,7 +325,7 @@ void Conv1D::compute(const StorageView& input,
     }
 
     dml::Operator* dml_convolution_operator =
-        dml::GetOrCreateCompiledOperatorApi(&dml_op_desc_wrapper,
+        dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle),
                                             execution_flags);
 
     // 4. Prepare Bindings and Execute
@@ -317,9 +334,6 @@ void Conv1D::compute(const StorageView& input,
     input_bundles.emplace_back(dml::utils::ResourceFromStorageView(weight));
     if (bias) {
       input_bundles.emplace_back(dml::utils::ResourceFromStorageView(*bias));
-    } else {
-      input_bundles
-          .emplace_back();  // Add a "none" binding for the optional bias.
     }
 
     dml::utils::DmlBindingArrayBundle input_bindings(std::move(input_bundles));

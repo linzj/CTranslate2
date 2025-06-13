@@ -16,16 +16,16 @@ class RotaryDMLCompute {
   void multiply_tensors(const StorageView& a,
                         const StorageView& b,
                         StorageView& output) {
-    dml::utils::DmlTensorDescBundle a_desc(a);
-    dml::utils::DmlTensorDescBundle b_desc(b);
-    dml::utils::DmlTensorDescBundle output_desc(output);
-
-    DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC op_desc = {
-        &a_desc.get_tensor_desc(), &b_desc.get_tensor_desc(),
-        &output_desc.get_tensor_desc()};
-    DML_OPERATOR_DESC dml_op_desc = {DML_OPERATOR_ELEMENT_WISE_MULTIPLY,
-                                     &op_desc};
-    auto* op = dml::GetOrCreateCompiledOperatorApi(&dml_op_desc);
+    dml::utils::DmlOperatorDescBundle op_bundle;
+    auto& a_desc = op_bundle.AddInput(a);
+    auto& b_desc = op_bundle.AddInput(b);
+    auto& output_desc = op_bundle.AddOutput(output);
+    auto& op_desc =
+        op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC>();
+    op_desc.ATensor = &a_desc.get_tensor_desc();
+    op_desc.BTensor = &b_desc.get_tensor_desc();
+    op_desc.OutputTensor = &output_desc.get_tensor_desc();
+    auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
 
     dml::utils::DmlBindingArrayBundle inputs(
         {dml::utils::DmlBufferBindingBundle(
@@ -41,15 +41,18 @@ class RotaryDMLCompute {
   void add_tensors(const StorageView& a,
                    const StorageView& b,
                    StorageView& output) {
-    dml::utils::DmlTensorDescBundle a_desc(a);
-    dml::utils::DmlTensorDescBundle b_desc(b);
-    dml::utils::DmlTensorDescBundle output_desc(output);
+    dml::utils::DmlOperatorDescBundle op_bundle;
+    auto& a_desc = op_bundle.AddInput(a);
+    auto& b_desc = op_bundle.AddInput(b);
+    auto& output_desc = op_bundle.AddOutput(output);
 
-    DML_ELEMENT_WISE_ADD_OPERATOR_DESC op_desc = {
-        &a_desc.get_tensor_desc(), &b_desc.get_tensor_desc(),
-        &output_desc.get_tensor_desc()};
-    DML_OPERATOR_DESC dml_op_desc = {DML_OPERATOR_ELEMENT_WISE_ADD, &op_desc};
-    auto* op = dml::GetOrCreateCompiledOperatorApi(&dml_op_desc);
+    auto& op_desc =
+        op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_ADD_OPERATOR_DESC>();
+    op_desc.ATensor = &a_desc.get_tensor_desc();
+    op_desc.BTensor = &b_desc.get_tensor_desc();
+    op_desc.OutputTensor = &output_desc.get_tensor_desc();
+
+    auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
 
     dml::utils::DmlBindingArrayBundle inputs(
         {dml::utils::DmlBufferBindingBundle(
@@ -63,14 +66,16 @@ class RotaryDMLCompute {
   }
 
   void negate_tensor(const StorageView& input, StorageView& output) {
-    dml::utils::DmlTensorDescBundle input_desc(input);
-    dml::utils::DmlTensorDescBundle output_desc(output);
+    dml::utils::DmlOperatorDescBundle op_bundle;
+    auto& input_desc = op_bundle.AddInput(input);
+    auto& output_desc = op_bundle.AddOutput(output);
 
-    DML_ELEMENT_WISE_NEGATE_OPERATOR_DESC op_desc = {
-        &input_desc.get_tensor_desc(), &output_desc.get_tensor_desc()};
-    DML_OPERATOR_DESC dml_op_desc = {DML_OPERATOR_ELEMENT_WISE_NEGATE,
-                                     &op_desc};
-    auto* op = dml::GetOrCreateCompiledOperatorApi(&dml_op_desc);
+    auto& op_desc =
+        op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_NEGATE_OPERATOR_DESC>();
+    op_desc.InputTensor = &input_desc.get_tensor_desc();
+    op_desc.OutputTensor = &output_desc.get_tensor_desc();
+
+    auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
 
     dml::utils::DmlBindingArrayBundle inputs(
         {dml::utils::DmlBufferBindingBundle(
@@ -82,13 +87,16 @@ class RotaryDMLCompute {
   }
 
   void copy_tensor(const StorageView& input, StorageView& output) {
-    dml::utils::DmlTensorDescBundle input_desc(input);
-    dml::utils::DmlTensorDescBundle output_desc(output);
-    DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC op_desc = {
-        &input_desc.get_tensor_desc(), &output_desc.get_tensor_desc(), nullptr};
-    DML_OPERATOR_DESC dml_op_desc = {DML_OPERATOR_ELEMENT_WISE_IDENTITY,
-                                     &op_desc};
-    auto* op = dml::GetOrCreateCompiledOperatorApi(&dml_op_desc);
+    dml::utils::DmlOperatorDescBundle op_bundle;
+    auto& input_desc = op_bundle.AddInput(input);
+    auto& output_desc = op_bundle.AddOutput(output);
+    auto& op_desc =
+        op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC>();
+    op_desc.InputTensor = &input_desc.get_tensor_desc();
+    op_desc.OutputTensor = &output_desc.get_tensor_desc();
+    op_desc.ScaleBias = nullptr;
+
+    auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
     dml::utils::DmlBindingArrayBundle inputs(
         {dml::utils::DmlBufferBindingBundle(
             dml::utils::ResourceFromStorageView(input))});
@@ -102,15 +110,16 @@ class RotaryDMLCompute {
                              StorageView& output,
                              dim_t start_idx,
                              dim_t count) {
-    dml::utils::DmlTensorDescBundle input_desc(input);
-    dml::utils::DmlTensorDescBundle output_desc(output);
+    dml::utils::DmlOperatorDescBundle op_bundle;
+    auto& input_desc = op_bundle.AddInput(input);
+    auto& output_desc = op_bundle.AddOutput(output);
 
     std::vector<UINT> offsets(input.rank(), 0);
     std::vector<UINT> strides(input.rank(), 1);
 
     offsets.back() = start_idx;
 
-    DML_SLICE_OPERATOR_DESC op_desc = {};
+    auto& op_desc = op_bundle.GetOperatorDesc<DML_SLICE_OPERATOR_DESC>();
     op_desc.InputTensor = &input_desc.get_tensor_desc();
     op_desc.OutputTensor = &output_desc.get_tensor_desc();
     op_desc.DimensionCount = input.rank();
@@ -118,8 +127,7 @@ class RotaryDMLCompute {
     op_desc.Sizes = output_desc.get_sizes_vec().data();
     op_desc.Strides = strides.data();
 
-    DML_OPERATOR_DESC dml_op_desc = {DML_OPERATOR_SLICE, &op_desc};
-    auto* op = dml::GetOrCreateCompiledOperatorApi(&dml_op_desc);
+    auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
     dml::utils::DmlBindingArrayBundle inputs(
         {dml::utils::DmlBufferBindingBundle(
             dml::utils::ResourceFromStorageView(input))});

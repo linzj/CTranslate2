@@ -26,38 +26,27 @@ void Tile::compute(const StorageView& input,
         "DirectML does not support bfloat16 for Tile operation");
   }
 
-  std::vector<UINT> input_dims_vec = {static_cast<UINT>(outer_size),
-                                      static_cast<UINT>(inner_size)};
-  dml::utils::DmlTensorDescBundle input_desc_bundle(
-      input.dtype(), input_dims_vec,
-      nullptr,                    // Default strides
-      input.size() * sizeof(T));  // Corrected: removed 5th arg
-  const DML_TENSOR_DESC& dml_input_desc_ref =
-      input_desc_bundle.get_tensor_desc();
+  dml::utils::DmlOperatorDescBundle op_desc;
 
-  std::vector<UINT> output_dims_vec = {
-      static_cast<UINT>(outer_size),
-      static_cast<UINT>(inner_size * _num_tiles)};
-  dml::utils::DmlTensorDescBundle output_desc_bundle(
-      output.dtype(), output_dims_vec,
-      nullptr,                     // Default strides
-      output.size() * sizeof(T));  // Corrected: removed 5th arg
-  const DML_TENSOR_DESC& dml_output_desc_ref =
-      output_desc_bundle.get_tensor_desc();
+  std::vector<UINT> input_dims = {static_cast<UINT>(outer_size),
+                                  static_cast<UINT>(inner_size)};
+  const auto& input_desc = op_desc.AddInput(input.dtype(), input_dims, nullptr,
+                                            input.size() * sizeof(T));
+
+  std::vector<UINT> output_dims = {static_cast<UINT>(outer_size),
+                                   static_cast<UINT>(inner_size * _num_tiles)};
+  const auto& output_desc = op_desc.AddOutput(
+      output.dtype(), output_dims, nullptr, output.size() * sizeof(T));
 
   UINT repeats[2] = {1, static_cast<UINT>(_num_tiles)};
 
-  DML_TILE_OPERATOR_DESC tile_desc = {};
-  tile_desc.InputTensor = &dml_input_desc_ref;
-  tile_desc.OutputTensor = &dml_output_desc_ref;
+  auto& tile_desc = op_desc.GetOperatorDesc<DML_TILE_OPERATOR_DESC>();
+  tile_desc.InputTensor = &input_desc.get_tensor_desc();
+  tile_desc.OutputTensor = &output_desc.get_tensor_desc();
   tile_desc.RepeatsCount = 2;
   tile_desc.Repeats = repeats;
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_TILE;
-  op_desc.Desc = &tile_desc;
-
-  auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
+  auto compiled_op = dml::GetOrCreateCompiledOperatorApi(std::move(op_desc));
 
   // Bindings
   dml::utils::DmlBindingArrayBundle input_bindings(

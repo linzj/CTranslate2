@@ -38,11 +38,17 @@ void AlibiAdd::compute(const StorageView& input,
   // Resize output to match input
   output.resize_as(input);
 
-  // Create tensor descriptors
-  dml::utils::DmlTensorDescBundle input_desc(input);
-  dml::utils::DmlTensorDescBundle output_desc(output);
+  dml::utils::DmlOperatorDescBundle dml_op_desc_bundle;
 
-  // Create broadcasted alibi view
+  // Create tensor descriptors using the DmlOperatorDescBundle's
+  // AddInput/AddOutput methods
+  dml::utils::DmlTensorDescBundle& input_desc =
+      dml_op_desc_bundle.AddInput(input);
+  dml::utils::DmlTensorDescBundle& output_desc =
+      dml_op_desc_bundle.AddOutput(output);
+
+  // Create broadcasted alibi view (now via AddInput as direct
+  // DmlTensorDescBundle construction is private)
   std::vector<UINT> alibi_sizes = {1,  // Batch (broadcasted)
                                    static_cast<UINT>(num_heads),
                                    1,  // Query length (broadcasted)
@@ -55,20 +61,21 @@ void AlibiAdd::compute(const StorageView& input,
       1   // Stride within head
   };
 
-  dml::utils::DmlTensorDescBundle alibi_view_desc(
-      alibi.dtype(), alibi_sizes, &alibi_strides,  // Pass pointer to strides
-      alibi.size() * alibi.item_size());
+  dml::utils::DmlTensorDescBundle& alibi_view_desc =
+      dml_op_desc_bundle.AddInput(alibi.dtype(), alibi_sizes,
+                                  &alibi_strides,  // Pass pointer to strides
+                                  alibi.size() * alibi.item_size());
 
-  // Create element-wise add operator
-  DML_ELEMENT_WISE_ADD_OPERATOR_DESC add_desc = {};
+  // Create element-wise add operator using GetOperatorDesc
+  DML_ELEMENT_WISE_ADD_OPERATOR_DESC& add_desc =
+      dml_op_desc_bundle.GetOperatorDesc<DML_ELEMENT_WISE_ADD_OPERATOR_DESC>();
   add_desc.ATensor = &input_desc.get_tensor_desc();
   add_desc.BTensor = &alibi_view_desc.get_tensor_desc();
   add_desc.OutputTensor = &output_desc.get_tensor_desc();
 
-  DML_OPERATOR_DESC op_desc = {DML_OPERATOR_ELEMENT_WISE_ADD, &add_desc};
-
-  // Get or create compiled operator
-  dml::Operator* add_operator = dml::GetOrCreateCompiledOperatorApi(&op_desc);
+  // Get or create compiled operator, passing the bundle by rvalue reference
+  dml::Operator* add_operator =
+      dml::GetOrCreateCompiledOperatorApi(std::move(dml_op_desc_bundle));
 
   // Execute the operator
   // Execute the operator

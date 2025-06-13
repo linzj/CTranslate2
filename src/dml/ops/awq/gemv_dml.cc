@@ -23,31 +23,30 @@ void slice_tensor_k_dimension(const StorageView& input,
                               StorageView& output,
                               dim_t k_start,
                               dim_t k_end) {
-  dml::utils::DmlTensorDescBundle input_desc(input);
-  dml::utils::DmlTensorDescBundle output_desc(output);
+  dml::utils::DmlOperatorDescBundle op_bundle;
+  auto& input_desc = op_bundle.AddInput(input);
+  auto& output_desc = op_bundle.AddOutput(output);
 
   std::vector<UINT> offsets(input.rank(), 0);
-  std::vector<UINT> sizes(input.rank());
+  std::vector<UINT> sizes(input.shape().begin(), input.shape().end());
   std::vector<UINT> strides(input.rank(), 1);
 
   for (dim_t i = 0; i < input.rank(); ++i) {
     if (i == input.rank() - 1) {  // K dimension (last dimension)
       offsets[i] = static_cast<UINT>(k_start);
-      sizes.push_back(static_cast<UINT>(k_end - k_start));
-    } else {
-      sizes.push_back(static_cast<UINT>(input.dim(i)));
+      sizes[i] = static_cast<UINT>(k_end - k_start);
     }
   }
 
-  DML_SLICE_OPERATOR_DESC slice_desc = {&input_desc.get_tensor_desc(),
-                                        &output_desc.get_tensor_desc(),
-                                        static_cast<UINT>(input.rank()),
-                                        offsets.data(),
-                                        sizes.data(),
-                                        strides.data()};
-  DML_OPERATOR_DESC op_desc = {DML_OPERATOR_SLICE, &slice_desc};
+  auto& slice_desc = op_bundle.GetOperatorDesc<DML_SLICE_OPERATOR_DESC>();
+  slice_desc.InputTensor = &input_desc.get_tensor_desc();
+  slice_desc.OutputTensor = &output_desc.get_tensor_desc();
+  slice_desc.DimensionCount = static_cast<UINT>(input.rank());
+  slice_desc.Offsets = offsets.data();
+  slice_desc.Sizes = sizes.data();
+  slice_desc.Strides = strides.data();
 
-  auto* compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
+  auto* compiled_op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
   dml::utils::DmlBindingArrayBundle inputs({dml::utils::DmlBufferBindingBundle(
       dml::utils::ResourceFromStorageView(input))});
   dml::utils::DmlBindingArrayBundle outputs({dml::utils::DmlBufferBindingBundle(
@@ -63,19 +62,19 @@ void perform_partial_gemv(const StorageView& a_slice,
     reshaped_a.reshape({a_slice.dim(0) * a_slice.dim(1), a_slice.dim(2)});
   }
 
-  dml::utils::DmlTensorDescBundle a_desc(reshaped_a);
-  dml::utils::DmlTensorDescBundle b_desc(b_slice);
-  dml::utils::DmlTensorDescBundle c_desc(c_slice);
+  dml::utils::DmlOperatorDescBundle op_bundle;
+  auto& a_desc = op_bundle.AddInput(reshaped_a);
+  auto& b_desc = op_bundle.AddInput(b_slice);
+  auto& c_desc = op_bundle.AddOutput(c_slice);
 
-  DML_GEMM_OPERATOR_DESC gemm_desc = {};
+  auto& gemm_desc = op_bundle.GetOperatorDesc<DML_GEMM_OPERATOR_DESC>();
   gemm_desc.ATensor = &a_desc.get_tensor_desc();
   gemm_desc.BTensor = &b_desc.get_tensor_desc();
   gemm_desc.OutputTensor = &c_desc.get_tensor_desc();
   gemm_desc.TransB = DML_MATRIX_TRANSFORM_TRANSPOSE;
   gemm_desc.Alpha = 1.0f;
 
-  DML_OPERATOR_DESC op_desc = {DML_OPERATOR_GEMM, &gemm_desc};
-  auto* compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
+  auto* compiled_op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
 
   dml::utils::DmlBindingArrayBundle inputs(
       {dml::utils::DmlBufferBindingBundle(
@@ -96,18 +95,18 @@ void reduce_split_k_results(StorageView& c) {
     final_output.resize({c.dim(1), c.dim(2), c.dim(3)});
   }
 
-  dml::utils::DmlTensorDescBundle input_desc(c);
-  dml::utils::DmlTensorDescBundle output_desc(final_output);
+  dml::utils::DmlOperatorDescBundle op_bundle;
+  auto& input_desc = op_bundle.AddInput(c);
+  auto& output_desc = op_bundle.AddOutput(final_output);
 
   UINT reduce_axes[] = {0};
-  DML_REDUCE_OPERATOR_DESC reduce_desc = {};
+  auto& reduce_desc = op_bundle.GetOperatorDesc<DML_REDUCE_OPERATOR_DESC>();
   reduce_desc.InputTensor = &input_desc.get_tensor_desc();
   reduce_desc.OutputTensor = &output_desc.get_tensor_desc();
   reduce_desc.Function = DML_REDUCE_FUNCTION_SUM;
   reduce_desc.AxisCount = 1;
   reduce_desc.Axes = reduce_axes;
-  DML_OPERATOR_DESC op_desc = {DML_OPERATOR_REDUCE, &reduce_desc};
-  auto* compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
+  auto* compiled_op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
 
   dml::utils::DmlBindingArrayBundle inputs({dml::utils::DmlBufferBindingBundle(
       dml::utils::ResourceFromStorageView(c))});
@@ -119,16 +118,15 @@ void reduce_split_k_results(StorageView& c) {
 }
 
 void zero_tensor_dml(StorageView& tensor) {
-  dml::utils::DmlTensorDescBundle tensor_desc(tensor);
-  DML_TENSOR_DESC output_tensor_desc = {DML_TENSOR_TYPE_BUFFER,
-                                        &tensor_desc.get_buffer_desc()};
-  DML_FILL_VALUE_CONSTANT_OPERATOR_DESC fill_desc = {};
-  fill_desc.OutputTensor = &output_tensor_desc;
-  fill_desc.ValueDataType = DML_TENSOR_DATA_TYPE_FLOAT16;
-  fill_desc.Value.Float32 = 0.0f;
+  dml::utils::DmlOperatorDescBundle op_bundle;
+  auto& tensor_desc = op_bundle.AddOutput(tensor);
+  auto& fill_desc =
+      op_bundle.GetOperatorDesc<DML_FILL_VALUE_CONSTANT_OPERATOR_DESC>();
+  fill_desc.OutputTensor = &tensor_desc.get_tensor_desc();
+  fill_desc.ValueDataType = tensor_desc.get_data_type();
+  memset(&fill_desc.Value, 0, sizeof(fill_desc.Value));
 
-  DML_OPERATOR_DESC op_desc = {DML_OPERATOR_FILL_VALUE_CONSTANT, &fill_desc};
-  auto* compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
+  auto* compiled_op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
 
   dml::utils::DmlBindingArrayBundle outputs({dml::utils::DmlBufferBindingBundle(
       dml::utils::ResourceFromStorageView(tensor))});

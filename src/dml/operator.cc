@@ -194,9 +194,10 @@ void TraceExecute(DML_OPERATOR_TYPE op_type,
 using Microsoft::WRL::ComPtr;
 
 Operator::Operator(Device* device,
-                   DML_OPERATOR_TYPE type,
+                   utils::DmlOperatorDescBundle&& op_desc,
                    ComPtr<IDMLCompiledOperator>&& compiled_operator)
-    : m_compiledOperator(std::move(compiled_operator)), m_type(type) {
+    : m_compiledOperator(std::move(compiled_operator)),
+      m_op_desc(std::move(op_desc)) {
   UINT64 persistentResourceSize =
       m_compiledOperator->GetBindingProperties().PersistentResourceSize;
   if (persistentResourceSize > 0) {
@@ -224,7 +225,7 @@ Operator::~Operator() = default;
 
 void Operator::Execute(std::vector<DML_BINDING_DESC> inputBindings,
                        std::vector<DML_BINDING_DESC> outputBindings) {
-  TraceExecute(m_type, inputBindings, outputBindings);
+  TraceExecute(GetType(), inputBindings, outputBindings);
   auto device = dml::get_device();
   DML_BINDING_DESC persistentBindingDesc{};
   if (m_persistentResourceBinding) {
@@ -237,7 +238,7 @@ void Operator::Execute(std::vector<DML_BINDING_DESC> inputBindings,
 
 void Operator::Execute(const std::vector<ID3D12Resource*>& input_resources,
                        const std::vector<ID3D12Resource*>& output_resources) {
-  TraceExecute(m_type, input_resources, output_resources);
+  TraceExecute(GetType(), input_resources, output_resources);
   auto device = dml::get_device();
   device->ExecuteOperator(m_compiledOperator.Get(), input_resources,
                           output_resources, m_persistentResource.Get());

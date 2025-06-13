@@ -35,8 +35,9 @@ void perform_dml_reduce_operation(const StorageView& input_sv,
   DML_REDUCE_FUNCTION dml_reduce_function =
       redop_to_dml_reduce_function(reduce_op_enum);
 
-  dml::utils::DmlTensorDescBundle input_desc_bundle(input_sv);
-  dml::utils::DmlTensorDescBundle output_desc_bundle(output_sv);
+  dml::utils::DmlOperatorDescBundle op_desc;
+  auto& input_desc_bundle = op_desc.AddInput(input_sv);
+  auto& output_desc_bundle = op_desc.AddOutput(output_sv);
 
   std::vector<UINT> axes_to_reduce_vec;
   const auto& actual_input_dims = input_desc_bundle.get_sizes_vec();
@@ -50,7 +51,7 @@ void perform_dml_reduce_operation(const StorageView& input_sv,
     axes_to_reduce_vec.push_back(0);
   }
 
-  DML_REDUCE_OPERATOR_DESC reduce_op_payload = {};
+  auto& reduce_op_payload = op_desc.GetOperatorDesc<DML_REDUCE_OPERATOR_DESC>();
   reduce_op_payload.Function = dml_reduce_function;
   reduce_op_payload.InputTensor = &input_desc_bundle.get_tensor_desc();
   reduce_op_payload.OutputTensor = &output_desc_bundle.get_tensor_desc();
@@ -58,8 +59,7 @@ void perform_dml_reduce_operation(const StorageView& input_sv,
   reduce_op_payload.Axes =
       axes_to_reduce_vec.empty() ? nullptr : axes_to_reduce_vec.data();
 
-  DML_OPERATOR_DESC dml_op_wrapper = {DML_OPERATOR_REDUCE, &reduce_op_payload};
-  auto* compiled_op = dml::GetOrCreateCompiledOperatorApi(&dml_op_wrapper);
+  auto* compiled_op = dml::GetOrCreateCompiledOperatorApi(std::move(op_desc));
 
   dml::utils::DmlBindingArrayBundle inputs({dml::utils::DmlBufferBindingBundle(
       dml::utils::ResourceFromStorageView(input_sv))});
@@ -81,16 +81,16 @@ void ReduceAll::compute(const StorageView& input, StorageView& output) const {
 template <Device D, typename T>
 void GatherAll::compute(const StorageView& input, StorageView& output) const {
 #ifdef CT2_WITH_TENSOR_PARALLEL
-  dml::utils::DmlTensorDescBundle input_desc_bundle(input);
-  dml::utils::DmlTensorDescBundle output_desc_bundle(output);
+  dml::utils::DmlOperatorDescBundle op_desc;
+  auto& input_desc_bundle = op_desc.AddInput(input);
+  auto& output_desc_bundle = op_desc.AddOutput(output);
 
-  DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC identity_desc = {
-      &input_desc_bundle.get_tensor_desc(),
-      &output_desc_bundle.get_tensor_desc()};
+  auto& identity_desc =
+      op_desc.GetOperatorDesc<DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC>();
+  identity_desc.InputTensor = &input_desc_bundle.get_tensor_desc();
+  identity_desc.OutputTensor = &output_desc_bundle.get_tensor_desc();
 
-  DML_OPERATOR_DESC op_desc_wrapper = {DML_OPERATOR_ELEMENT_WISE_IDENTITY,
-                                       &identity_desc};
-  auto* compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc_wrapper);
+  auto* compiled_op = dml::GetOrCreateCompiledOperatorApi(std::move(op_desc));
 
   dml::utils::DmlBindingArrayBundle inputs({dml::utils::DmlBufferBindingBundle(
       dml::utils::ResourceFromStorageView(input))});

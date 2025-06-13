@@ -29,37 +29,25 @@ void Concat::compute(const std::vector<const StorageView*>& inputs,
 
   auto* device = dml::get_device();
 
-  // Create input tensor descriptors using DmlTensorDescBundle
-  std::vector<dml::utils::DmlTensorDescBundle> input_desc_bundles;
-  std::vector<DML_TENSOR_DESC>
-      input_tensor_descs_for_op;  // For DML_JOIN_OPERATOR_DESC
-  input_desc_bundles.reserve(inputs.size());
-  input_tensor_descs_for_op.reserve(inputs.size());
+  // Create JOIN operator descriptor using DmlOperatorDescBundle
+  dml::utils::DmlOperatorDescBundle op_bundle;
+  std::vector<DML_TENSOR_DESC> input_descs_for_op;
+  input_descs_for_op.reserve(inputs.size());
 
   for (const auto* input_sv : inputs) {
-    input_desc_bundles.emplace_back(*input_sv);
-    input_tensor_descs_for_op.push_back(
-        input_desc_bundles.back().get_tensor_desc());
+    input_descs_for_op.push_back(
+        op_bundle.AddInput(*input_sv).get_tensor_desc());
   }
 
-  // Create output tensor descriptor
-  dml::utils::DmlTensorDescBundle output_desc_bundle(output);
-  const DML_TENSOR_DESC& output_tensor_desc_ref =
-      output_desc_bundle.get_tensor_desc();
+  const auto& output_desc_bundle = op_bundle.AddOutput(output);
 
-  // Create JOIN operator descriptor
-  DML_JOIN_OPERATOR_DESC join_desc = {};
+  auto& join_desc = op_bundle.GetOperatorDesc<DML_JOIN_OPERATOR_DESC>();
   join_desc.InputCount = static_cast<UINT>(inputs.size());
-  join_desc.InputTensors = input_tensor_descs_for_op.data();
-  join_desc.OutputTensor = &output_tensor_desc_ref;
+  join_desc.InputTensors = input_descs_for_op.data();
+  join_desc.OutputTensor = &output_desc_bundle.get_tensor_desc();
   join_desc.Axis = static_cast<UINT>(axis);
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_JOIN;
-  op_desc.Desc = &join_desc;
-
-  // Get or create compiled operator
-  auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
+  auto compiled_op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
 
   // Create input bindings using DmlBindingArrayBundle
   std::vector<dml::utils::DmlBufferBindingBundle> input_binding_bundles;
@@ -90,36 +78,24 @@ void Split::compute(const StorageView& input,
 
   auto* device = dml::get_device();
 
-  // Create input tensor descriptor
-  dml::utils::DmlTensorDescBundle input_desc_bundle(input);
-  const DML_TENSOR_DESC& input_tensor_desc_ref =
-      input_desc_bundle.get_tensor_desc();
+  // Create SPLIT operator descriptor using DmlOperatorDescBundle
+  dml::utils::DmlOperatorDescBundle op_bundle;
+  const auto& input_desc_bundle = op_bundle.AddInput(input);
 
-  // Create output tensor descriptors
-  std::vector<dml::utils::DmlTensorDescBundle> output_desc_bundles;
-  std::vector<DML_TENSOR_DESC> output_tensor_descs_for_op;
-  output_desc_bundles.reserve(outputs.size());
-  output_tensor_descs_for_op.reserve(outputs.size());
-
+  std::vector<DML_TENSOR_DESC> output_descs_for_op;
+  output_descs_for_op.reserve(outputs.size());
   for (const auto* output_sv : outputs) {
-    output_desc_bundles.emplace_back(*output_sv);
-    output_tensor_descs_for_op.push_back(
-        output_desc_bundles.back().get_tensor_desc());
+    output_descs_for_op.push_back(
+        op_bundle.AddOutput(*output_sv).get_tensor_desc());
   }
 
-  // Create SPLIT operator descriptor
-  DML_SPLIT_OPERATOR_DESC split_desc = {};
-  split_desc.InputTensor = &input_tensor_desc_ref;
+  auto& split_desc = op_bundle.GetOperatorDesc<DML_SPLIT_OPERATOR_DESC>();
+  split_desc.InputTensor = &input_desc_bundle.get_tensor_desc();
   split_desc.OutputCount = static_cast<UINT>(outputs.size());
-  split_desc.OutputTensors = output_tensor_descs_for_op.data();
+  split_desc.OutputTensors = output_descs_for_op.data();
   split_desc.Axis = static_cast<UINT>(axis);
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_SPLIT;
-  op_desc.Desc = &split_desc;
-
-  // Get or create compiled operator
-  auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
+  auto compiled_op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
 
   // Create input binding using DmlBufferBindingBundle
   dml::utils::DmlBufferBindingBundle input_binding(
@@ -148,15 +124,10 @@ void Slide::compute(const StorageView& input,
 
   auto* device = dml::get_device();
 
-  // Create input tensor descriptor
-  dml::utils::DmlTensorDescBundle input_desc_bundle(input);
-  const DML_TENSOR_DESC& input_tensor_desc_ref =
-      input_desc_bundle.get_tensor_desc();
-
-  // Create output tensor descriptor
-  dml::utils::DmlTensorDescBundle output_desc_bundle(output);
-  const DML_TENSOR_DESC& output_tensor_desc_ref =
-      output_desc_bundle.get_tensor_desc();
+  // Create SLICE operator descriptor using DmlOperatorDescBundle
+  dml::utils::DmlOperatorDescBundle op_bundle;
+  const auto& input_desc_bundle = op_bundle.AddInput(input);
+  const auto& output_desc_bundle = op_bundle.AddOutput(output);
 
   // Calculate slice parameters
   std::vector<UINT> offsets(input.rank(), 0);
@@ -172,21 +143,15 @@ void Slide::compute(const StorageView& input,
     }
   }
 
-  // Create SLICE operator descriptor
-  DML_SLICE_OPERATOR_DESC slice_desc = {};
-  slice_desc.InputTensor = &input_tensor_desc_ref;
-  slice_desc.OutputTensor = &output_tensor_desc_ref;
+  auto& slice_desc = op_bundle.GetOperatorDesc<DML_SLICE_OPERATOR_DESC>();
+  slice_desc.InputTensor = &input_desc_bundle.get_tensor_desc();
+  slice_desc.OutputTensor = &output_desc_bundle.get_tensor_desc();
   slice_desc.DimensionCount = static_cast<UINT>(input.rank());
   slice_desc.Offsets = offsets.data();
   slice_desc.Sizes = sizes.data();
   slice_desc.Strides = strides.data();
 
-  DML_OPERATOR_DESC op_desc = {};
-  op_desc.Type = DML_OPERATOR_SLICE;
-  op_desc.Desc = &slice_desc;
-
-  // Get or create compiled operator
-  auto compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
+  auto compiled_op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
 
   // Create input and output bindings
   dml::utils::DmlBindingArrayBundle input_bindings(

@@ -46,38 +46,29 @@ void TopK::compute(const StorageView& x,
     return;
   }
 
-  dml::utils::DmlTensorDescBundle input_desc_bundle(x);
-  dml::utils::DmlTensorDescBundle values_desc_bundle(values);
-  dml::utils::DmlTensorDescBundle indices_desc_bundle(indices);
+  dml::utils::DmlOperatorDescBundle op_desc_bundle;
+  auto& input_desc_bundle = op_desc_bundle.AddInput(x);
+  auto& values_desc_bundle = op_desc_bundle.AddOutput(values);
+  auto& indices_desc_bundle = op_desc_bundle.AddOutput(indices);
 
   // Need to reset the dml data type for indices if x is sint32.
   if (indices.dtype() == ctranslate2::DataType::INT32) {
     indices_desc_bundle.set_data_type(DML_TENSOR_DATA_TYPE_UINT32);
   }
 
-  const DML_TENSOR_DESC& dml_input_tensor_desc =
-      input_desc_bundle.get_tensor_desc();
-  const DML_TENSOR_DESC& dml_values_tensor_desc =
-      values_desc_bundle.get_tensor_desc();
-  const DML_TENSOR_DESC& dml_indices_tensor_desc =
-      indices_desc_bundle.get_tensor_desc();
-
-  DML_TOP_K1_OPERATOR_DESC topk_op_desc_payload = {};
-  topk_op_desc_payload.InputTensor = &dml_input_tensor_desc;
-  topk_op_desc_payload.OutputValueTensor = &dml_values_tensor_desc;
-  topk_op_desc_payload.OutputIndexTensor = &dml_indices_tensor_desc;
-  topk_op_desc_payload.Axis = dml_axis;
-  topk_op_desc_payload.K = static_cast<UINT>(_k);
-  topk_op_desc_payload.AxisDirection = DML_AXIS_DIRECTION_DECREASING;
-
-  DML_OPERATOR_DESC dml_op_desc = {};
-  dml_op_desc.Type = DML_OPERATOR_TOP_K1;
-  dml_op_desc.Desc = &topk_op_desc_payload;
+  auto& topk_op_desc =
+      op_desc_bundle.GetOperatorDesc<DML_TOP_K1_OPERATOR_DESC>();
+  topk_op_desc.InputTensor = &input_desc_bundle.get_tensor_desc();
+  topk_op_desc.OutputValueTensor = &values_desc_bundle.get_tensor_desc();
+  topk_op_desc.OutputIndexTensor = &indices_desc_bundle.get_tensor_desc();
+  topk_op_desc.Axis = dml_axis;
+  topk_op_desc.K = static_cast<UINT>(_k);
+  topk_op_desc.AxisDirection = DML_AXIS_DIRECTION_DECREASING;
 
   // Ensure using GetOrCreateCompiledOperatorApi from dml namespace if that's
   // intended
   dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
-      &dml_op_desc, DML_EXECUTION_FLAG_NONE);
+      std::move(op_desc_bundle), DML_EXECUTION_FLAG_NONE);
 
   // Bindings
   dml::utils::DmlBindingArrayBundle input_bindings(

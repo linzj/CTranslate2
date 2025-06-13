@@ -22,7 +22,8 @@ void Mean::compute(const StorageView& input,
   std::vector<UINT> input_strides = {static_cast<UINT>(axis_size * inner_size),
                                      static_cast<UINT>(inner_size), 1};
 
-  dml::utils::DmlTensorDescBundle input_desc_bundle(
+  dml::utils::DmlOperatorDescBundle op_desc_bundle;
+  auto& input_desc_bundle = op_desc_bundle.AddInput(
       input.dtype(), input_sizes, &input_strides, input.reserved_memory());
 
   std::vector<UINT> output_sizes = {static_cast<UINT>(outer_size), 1,
@@ -30,11 +31,12 @@ void Mean::compute(const StorageView& input,
   std::vector<UINT> output_strides = {static_cast<UINT>(inner_size),
                                       static_cast<UINT>(inner_size), 1};
 
-  dml::utils::DmlTensorDescBundle output_desc_bundle(
+  auto& output_desc_bundle = op_desc_bundle.AddOutput(
       output.dtype(), output_sizes, &output_strides, output.reserved_memory());
 
   UINT axis_to_reduce = 1;
-  DML_REDUCE_OPERATOR_DESC reduce_desc = {};
+  auto& reduce_desc =
+      op_desc_bundle.GetOperatorDesc<DML_REDUCE_OPERATOR_DESC>();
   reduce_desc.Function =
       get_sum ? DML_REDUCE_FUNCTION_SUM : DML_REDUCE_FUNCTION_AVERAGE;
   reduce_desc.InputTensor = &input_desc_bundle.get_tensor_desc();
@@ -42,9 +44,8 @@ void Mean::compute(const StorageView& input,
   reduce_desc.AxisCount = 1;
   reduce_desc.Axes = &axis_to_reduce;
 
-  DML_OPERATOR_DESC op_desc = {DML_OPERATOR_REDUCE, &reduce_desc};
-
-  auto* compiled_op = dml::GetOrCreateCompiledOperatorApi(&op_desc);
+  auto* compiled_op =
+      dml::GetOrCreateCompiledOperatorApi(std::move(op_desc_bundle));
 
   dml::utils::DmlBindingArrayBundle input_bindings(
       {dml::utils::DmlBufferBindingBundle(
