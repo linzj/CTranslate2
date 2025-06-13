@@ -55,8 +55,9 @@ AllocationInfo::~AllocationInfo() {
 }
 }  // namespace
 
-BucketizedBufferAllocator::BucketizedBufferAllocator(Device* device)
-    : m_device(device) {}
+BucketizedBufferAllocator::BucketizedBufferAllocator(
+    AllocFunction&& allocFunction)
+    : m_allocFunction(std::move(allocFunction)) {}
 
 BucketizedBufferAllocator::~BucketizedBufferAllocator() = default;
 
@@ -91,8 +92,7 @@ Microsoft::WRL::ComPtr<IResourceWrapper> BucketizedBufferAllocator::Alloc(
     }
 
     Microsoft::WRL::ComPtr<ID3D12Resource> resource =
-        m_device->CreatePreferredDeviceMemoryBufferWithoutPooling(
-            bucketSize, resourceFlags);
+        m_allocFunction(bucketSize, resourceFlags);
 
     Microsoft::WRL::ComPtr<IResourceWrapper> resourceWrapper =
         Microsoft::WRL::Make<AllocationInfo>(this, bucketIndex,
@@ -101,8 +101,7 @@ Microsoft::WRL::ComPtr<IResourceWrapper> BucketizedBufferAllocator::Alloc(
     return resourceWrapper;
   } else {
     Microsoft::WRL::ComPtr<ID3D12Resource> d3d12_resource =
-        m_device->CreatePreferredDeviceMemoryBufferWithoutPooling(
-            size, resourceFlags);
+        m_allocFunction(size, resourceFlags);
     Microsoft::WRL::ComPtr<IResourceWrapper> resourceWrapper =
         Microsoft::WRL::Make<AllocationInfo>(this, bucketIndex,
                                              d3d12_resource.Detach(), size);

@@ -19,7 +19,7 @@
 using Microsoft::WRL::ComPtr;
 
 constexpr const int kDescriptorCount = 1024;
-constexpr const int kMaxRecordCommands = 128;
+constexpr const int kMaxRecordCommands = 64;
 
 static void __stdcall DebugMessageCallback(D3D12_MESSAGE_CATEGORY cat,
                                            D3D12_MESSAGE_SEVERITY sev,
@@ -174,7 +174,14 @@ Device::Device(IAdapter* adapter,
 
   m_descriptorPool =
       std::make_unique<DescriptorPool>(m_d3d.Get(), kDescriptorCount);
-  m_allocator = std::make_unique<BucketizedBufferAllocator>(this);
+  m_allocator = std::make_unique<BucketizedBufferAllocator>(
+      [this](uint64_t size, D3D12_RESOURCE_FLAGS resourceFlags) {
+        return CreatePreferredDeviceMemoryBufferWithoutPooling(size);
+      });
+  m_uploadAllocator = std::make_unique<BucketizedBufferAllocator>(
+      [this](uint64_t size, D3D12_RESOURCE_FLAGS resourceFlags) {
+        return CreateUploadBuffer(size);
+      });
   m_operatorCache = std::make_unique<DMLOperatorCache>(this);
   m_constantPool = std::make_unique<ConstantPool>();
 #if 0
@@ -405,7 +412,14 @@ Device::Device(ID3D12Device* d3ddevice,
   }
 
   m_descriptorPool = std::make_unique<DescriptorPool>(m_d3d.Get(), 1024 * 1024);
-  m_allocator = std::make_unique<BucketizedBufferAllocator>(this);
+  m_allocator = std::make_unique<BucketizedBufferAllocator>(
+      [this](uint64_t size, D3D12_RESOURCE_FLAGS resourceFlags) {
+        return CreatePreferredDeviceMemoryBufferWithoutPooling(size);
+      });
+  m_uploadAllocator = std::make_unique<BucketizedBufferAllocator>(
+      [this](uint64_t size, D3D12_RESOURCE_FLAGS resourceFlags) {
+        return CreateUploadBuffer(size);
+      });
   m_operatorCache = std::make_unique<DMLOperatorCache>(this);
   m_constantPool = std::make_unique<ConstantPool>();
 }
@@ -601,9 +615,14 @@ Microsoft::WRL::ComPtr<ID3D12Resource> Device::Upload(uint64_t totalSize,
   ComPtr<ID3D12Resource> uploadBuffer;
   ComPtr<ID3D12Resource> resourceToMap;
 
-  uploadBuffer = data.empty() ? nullptr : CreateUploadBuffer(totalSize);
-  uploadBuffer->SetName(L"Device::Upload");
-  resourceToMap = uploadBuffer;
+  if (!data.empty()) {
+    ComPtr<IResourceWrapper> uploadResourceWrapper =
+        m_uploadAllocator->Alloc(totalSize, D3D12_RESOURCE_FLAG_NONE);
+    uploadBuffer = uploadResourceWrapper->GetD3D12Resource();
+    KeepAliveUntilNextCommandListDispatch(uploadResourceWrapper);
+    uploadBuffer->SetName(L"Device::Upload");
+    resourceToMap = uploadBuffer;
+  }
 
   if (!name.empty()) {
     buffer->SetName(name.data());
@@ -628,7 +647,6 @@ Microsoft::WRL::ComPtr<ID3D12Resource> Device::Upload(uint64_t totalSize,
       m_commandList->ResourceBarrier(_countof(barriers), barriers);
 
       m_temporaryResources.emplace(std::move(uploadBuffer));
-      ExecuteCommandList();
     }
   }
 

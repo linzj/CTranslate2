@@ -129,12 +129,6 @@ class Device {
       uint64_t alignment = 0,
       D3D12_HEAP_FLAGS heapFlags = D3D12_HEAP_FLAG_NONE);
 
-  Microsoft::WRL::ComPtr<ID3D12Resource> CreateUploadBuffer(
-      uint64_t sizeInBytes,
-      D3D12_RESOURCE_FLAGS resourceFlags = D3D12_RESOURCE_FLAG_NONE,
-      uint64_t alignment = 0,
-      D3D12_HEAP_FLAGS heapFlags = D3D12_HEAP_FLAG_NONE);
-
   Microsoft::WRL::ComPtr<ID3D12Resource> CreateReadbackBuffer(
       uint64_t sizeInBytes,
       D3D12_RESOURCE_FLAGS resourceFlags = D3D12_RESOURCE_FLAG_NONE,
@@ -224,6 +218,11 @@ class Device {
   void EnsureDxcInterfaces();
   void SetDescriptorHeap(ID3D12DescriptorHeap* descriptorHeap);
   void ExecuteCommandListInternal();
+  Microsoft::WRL::ComPtr<ID3D12Resource> CreateUploadBuffer(
+      uint64_t sizeInBytes,
+      D3D12_RESOURCE_FLAGS resourceFlags = D3D12_RESOURCE_FLAG_NONE,
+      uint64_t alignment = 0,
+      D3D12_HEAP_FLAGS heapFlags = D3D12_HEAP_FLAG_NONE);
 
  private:
   std::shared_ptr<D3d12Module> m_d3dModule;
@@ -253,6 +252,7 @@ class Device {
   std::unique_ptr<CommandQueue> m_queue;
   std::unique_ptr<DescriptorPool> m_descriptorPool;
   std::unique_ptr<BucketizedBufferAllocator> m_allocator;
+  std::unique_ptr<BucketizedBufferAllocator> m_uploadAllocator;
   std::unique_ptr<DMLOperatorCache> m_operatorCache;
   std::unique_ptr<ConstantPool> m_constantPool;
 

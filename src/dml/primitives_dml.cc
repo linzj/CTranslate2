@@ -335,12 +335,6 @@ void primitives<Device::DirectML>::copy(const T* x, T* y, dim_t size) {
   barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
   command_list->ResourceBarrier(2, barriers);
-
-  // Execute the command list.
-  // The DXDevice::ExecuteCommandList method is expected to handle closing the
-  // command list, submitting it to the command queue, and waiting for GPU
-  // completion.
-  dxdevice->ExecuteCommandList();
 }
 
 template <>

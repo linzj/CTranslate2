@@ -2,6 +2,7 @@
 
 #include <d3d12.h>
 #include <wrl/client.h>
+#include <functional>
 #include <vector>
 
 typedef interface IResourceWrapper IResourceWrapper;
@@ -13,7 +14,10 @@ class Device;
 // Implements a memory pooling strategy for D3D12 resources.
 class BucketizedBufferAllocator {
  public:
-  BucketizedBufferAllocator(Device* device);
+  using AllocFunction = std::function<Microsoft::WRL::ComPtr<ID3D12Resource>(
+      uint64_t size,
+      D3D12_RESOURCE_FLAGS)>;
+  explicit BucketizedBufferAllocator(AllocFunction&&);
   ~BucketizedBufferAllocator();
 
   Microsoft::WRL::ComPtr<IResourceWrapper> Alloc(
@@ -31,7 +35,7 @@ class BucketizedBufferAllocator {
   uint32_t GetBucketIndexFromSize(uint64_t size) const;
   uint64_t GetBucketSizeFromIndex(uint32_t index) const;
 
-  Device* m_device;
+  AllocFunction m_allocFunction;
   std::vector<Bucket> m_pool;
 
   static constexpr uint32_t c_minResourceSizeExponent = 4;  // 2^4 = 16
