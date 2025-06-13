@@ -18,7 +18,7 @@ class ConstantPool {
   ConstantPool(ConstantPool&&) = delete;
   ConstantPool& operator=(ConstantPool&&) = delete;
   template <typename T>
-  static StorageView& get_constant(
+  static const StorageView& get_constant(
       Shape shape,
       const std::vector<T>& init,
       ctranslate2::Device device = ctranslate2::Device::DirectML);
@@ -26,12 +26,13 @@ class ConstantPool {
  private:
   // Get a constant value from the pool, creating it if necessary.
   template <typename T>
-  StorageView& _get_constant(
+  const StorageView& _get_constant(
       Shape shape,
       const std::vector<T>& init,
-      ctranslate2::Device device = ctranslate2::Device::DirectML);
+      ctranslate2::Device device = ctranslate2::Device::DirectML) const;
 
-  std::unordered_map<std::string, std::unique_ptr<StorageView>> _constants;
+  mutable std::unordered_map<std::string, std::unique_ptr<StorageView>>
+      _constants;
 };
 }  // namespace dml
 }  // namespace ctranslate2

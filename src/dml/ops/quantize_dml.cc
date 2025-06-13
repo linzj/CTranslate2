@@ -121,11 +121,11 @@ void Quantize::quantize(const StorageView& input,
   // The DmlTensorDescBundle will describe it as having the target shape but
   // with zero strides.
 
-  static StorageView& const_127_storage =
+  const StorageView& const_127_storage =
       dml::ConstantPool::get_constant<float>({1}, {127.0f}, Device::DirectML);
-  static StorageView const_0_storage =
+  const StorageView& const_0_storage =
       dml::ConstantPool::get_constant<float>({1}, {0.0f}, Device::DirectML);
-  static StorageView const_1_storage =
+  const StorageView& const_1_storage =
       dml::ConstantPool::get_constant<float>({1}, {1.0f}, Device::DirectML);
 
   // Prepare DML tensor descriptors for constants with broadcasting

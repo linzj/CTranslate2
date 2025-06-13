@@ -9,9 +9,10 @@ ConstantPool::ConstantPool() = default;
 ConstantPool::~ConstantPool() = default;
 
 template <typename T>
-StorageView& ConstantPool::_get_constant(Shape shape,
-                                         const std::vector<T>& init,
-                                         ctranslate2::Device device) {
+const StorageView& ConstantPool::_get_constant(
+    Shape shape,
+    const std::vector<T>& init,
+    ctranslate2::Device device) const {
   // Create a unique key for the constant based on its shape and initial values.
   std::string key;
   if constexpr (std::is_same_v<T, float>) {
@@ -27,16 +28,12 @@ StorageView& ConstantPool::_get_constant(Shape shape,
   // append each element of shape to the key bitwise.
   for (const auto& dim : shape) {
     const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&dim);
-    for (size_t i = 0; i < sizeof(dim); ++i) {
-      key.push_back(static_cast<char>(bytes[i]));
-    }
+    key.append(bytes, bytes + sizeof(dim));
   }
 
   for (const auto& value : init) {
     const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&value);
-    for (size_t i = 0; i < sizeof(value); ++i) {
-      key.push_back(static_cast<char>(bytes[i]));
-    }
+    key.append(bytes, bytes + sizeof(value));
   }
 
   if (device == ctranslate2::Device::DirectML) {
@@ -61,18 +58,18 @@ StorageView& ConstantPool::_get_constant(Shape shape,
 }
 
 template <typename T>
-StorageView& ConstantPool::get_constant(Shape shape,
-                                        const std::vector<T>& init,
-                                        ctranslate2::Device device) {
+const StorageView& ConstantPool::get_constant(Shape shape,
+                                              const std::vector<T>& init,
+                                              ctranslate2::Device device) {
   return get_device()->GetConstantPool()->_get_constant(shape, init, device);
 }
 
-template StorageView& ConstantPool::get_constant<float>(
+template const StorageView& ConstantPool::get_constant<float>(
     Shape shape,
     const std::vector<float>& init,
     ctranslate2::Device device);
 
-template StorageView& ConstantPool::get_constant<int8_t>(
+template const StorageView& ConstantPool::get_constant<int8_t>(
     Shape shape,
     const std::vector<int8_t>& init,
     ctranslate2::Device device);
