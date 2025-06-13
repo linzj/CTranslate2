@@ -1,6 +1,7 @@
 #ifdef CT2_WITH_DIRECTML
 #include "ctranslate2/ops/quantize.h"
 #include "dml/backend_dml.h"
+#include "dml/constant_pool.h"
 #include "dml/dml_utils.h"  // Added
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
@@ -120,9 +121,12 @@ void Quantize::quantize(const StorageView& input,
   // The DmlTensorDescBundle will describe it as having the target shape but
   // with zero strides.
 
-  StorageView const_127_storage({1}, 127.0f, Device::DirectML);
-  StorageView const_0_storage({1}, 0.0f, Device::DirectML);
-  StorageView const_1_storage({1}, 1.0f, Device::DirectML);
+  static StorageView& const_127_storage =
+      dml::ConstantPool::get_constant<float>({1}, {127.0f}, Device::DirectML);
+  static StorageView const_0_storage =
+      dml::ConstantPool::get_constant<float>({1}, {0.0f}, Device::DirectML);
+  static StorageView const_1_storage =
+      dml::ConstantPool::get_constant<float>({1}, {1.0f}, Device::DirectML);
 
   // Prepare DML tensor descriptors for constants with broadcasting
   DML_TENSOR_DATA_TYPE dml_scalar_dtype =

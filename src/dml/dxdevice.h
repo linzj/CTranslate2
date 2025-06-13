@@ -31,6 +31,7 @@ class CommandQueue;
 class DescriptorPool;
 class BucketizedBufferAllocator;
 class DMLOperatorCache;
+class ConstantPool;
 
 template <typename T>
 struct ComPtrHasher {
@@ -217,6 +218,7 @@ class Device {
   void DummyPresent();
 
   DMLOperatorCache* GetOperatorCache() { return m_operatorCache.get(); }
+  ConstantPool* GetConstantPool() { return m_constantPool.get(); }
 
  private:
   void EnsureDxcInterfaces();
@@ -252,6 +254,7 @@ class Device {
   std::unique_ptr<DescriptorPool> m_descriptorPool;
   std::unique_ptr<BucketizedBufferAllocator> m_allocator;
   std::unique_ptr<DMLOperatorCache> m_operatorCache;
+  std::unique_ptr<ConstantPool> m_constantPool;
 
   DWORD m_callbackCookie = 0;
   int m_recordCommands = 0;

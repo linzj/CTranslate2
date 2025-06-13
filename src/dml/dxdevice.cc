@@ -3,6 +3,7 @@
 #include "command_queue.h"
 #include "common.h"
 #include "descriptor_pool.h"
+#include "dml/constant_pool.h"
 #include "dml/dml_utils.h"
 #include "dml/operator_cache.h"
 
@@ -175,6 +176,7 @@ Device::Device(IAdapter* adapter,
       std::make_unique<DescriptorPool>(m_d3d.Get(), kDescriptorCount);
   m_allocator = std::make_unique<BucketizedBufferAllocator>(this);
   m_operatorCache = std::make_unique<DMLOperatorCache>(this);
+  m_constantPool = std::make_unique<ConstantPool>();
 #if 0
   // Custom heaps are optional for MCDM devices, so we also need to check for
   // support.
@@ -405,6 +407,7 @@ Device::Device(ID3D12Device* d3ddevice,
   m_descriptorPool = std::make_unique<DescriptorPool>(m_d3d.Get(), 1024 * 1024);
   m_allocator = std::make_unique<BucketizedBufferAllocator>(this);
   m_operatorCache = std::make_unique<DMLOperatorCache>(this);
+  m_constantPool = std::make_unique<ConstantPool>();
 }
 
 Device::~Device() {

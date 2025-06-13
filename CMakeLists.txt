@@ -238,6 +238,8 @@ if(WITH_DIRECTML)
     src/dml/bucketized_buffer_allocator.h
     src/dml/backend_dml.h
     src/dml/common.h
+    src/dml/constant_pool.h
+    src/dml/constant_pool.cc
     src/dml/dxdevice.cc
     src/dml/dxdevice.h
     src/dml/dxmodule.cc
