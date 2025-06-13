@@ -183,33 +183,6 @@ class DmlTensorDescBundle {
                          UINT64 total_tensor_size_bytes_in);
 };
 
-// Helper to wrap an existing DML_BUFFER_TENSOR_DESC into a DML_TENSOR_DESC
-// The DML_BUFFER_TENSOR_DESC pointed to by buffer_desc_ptr must remain valid.
-inline DML_TENSOR_DESC wrap_dml_buffer_tensor_desc(
-    const DML_BUFFER_TENSOR_DESC* buffer_desc_ptr) {
-  DML_TENSOR_DESC desc{};
-  desc.Type = DML_TENSOR_TYPE_BUFFER;
-  desc.Desc = buffer_desc_ptr;
-  return desc;
-}
-
-// --- DML Binding Utilities ---
-// Creates a DML_BUFFER_BINDING for a given D3D12 resource.
-inline DML_BUFFER_BINDING create_buffer_binding(
-    ID3D12Resource* resource,
-    UINT64 offset = 0,
-    UINT64 size_in_bytes = 0  // if 0, DML will deduce from tensor desc usually
-) {
-  return {resource, offset, size_in_bytes};
-}
-
-// Wraps a DML_BUFFER_BINDING in a DML_BINDING_DESC.
-// The DML_BUFFER_BINDING pointed to by buffer_binding_ptr must remain valid.
-inline DML_BINDING_DESC create_binding_desc(
-    const DML_BUFFER_BINDING* buffer_binding_ptr) {
-  return {DML_BINDING_TYPE_BUFFER, buffer_binding_ptr};
-}
-
 // Manages a DML_BUFFER_BINDING and provides a DML_BINDING_DESC for it.
 // This helps ensure the DML_BUFFER_BINDING outlives the DML_BINDING_DESC
 // that might be stored or used elsewhere temporarily.

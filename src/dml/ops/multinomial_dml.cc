@@ -146,10 +146,10 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
                                               &fill_zero_desc};
     dml::Operator* fill_op =
         dml::GetOrCreateCompiledOperatorApi(&op_desc_wrapper_fill);
-    DML_BUFFER_BINDING fill_out_b_storage = dml::utils::create_buffer_binding(
+    dml::utils::DmlBufferBindingBundle fill_out_b_storage(
         dml::utils::ResourceFromStorageView(state_in_sv));
-    fill_op->Execute({},
-                     {dml::utils::create_binding_desc(&fill_out_b_storage)});
+    // Fill state_in_sv
+    fill_op->Execute({}, {fill_out_b_storage.get_desc()});
   }
   StorageView state_out_sv(philox_state_dims_shape_ct2,
                            DataType::INT32,  // Corresponds to UINT32 for size

@@ -41,19 +41,16 @@ void Dequantize::dequantize<Device::DirectML, int8_t, float>(
                                      .Desc = &recip_desc};
   auto recip_compiled_op = dml::GetOrCreateCompiledOperatorApi(&recip_op_desc);
 
-  DML_BUFFER_BINDING scale_binding = dml::utils::create_buffer_binding(
+  dml::utils::DmlBufferBindingBundle scale_binding(
       dml::utils::ResourceFromStorageView(scale), 0,
       scale.size() * sizeof(float));
-  std::vector<DML_BINDING_DESC> recip_input_bindings = {
-      dml::utils::create_binding_desc(&scale_binding)};
 
-  DML_BUFFER_BINDING recip_output_binding = dml::utils::create_buffer_binding(
+  dml::utils::DmlBufferBindingBundle recip_output_binding(
       dml::utils::ResourceFromStorageView(reciprocal_scale), 0,
       reciprocal_scale.size() * sizeof(float));
-  std::vector<DML_BINDING_DESC> recip_output_bindings = {
-      dml::utils::create_binding_desc(&recip_output_binding)};
 
-  recip_compiled_op->Execute(recip_input_bindings, recip_output_bindings);
+  recip_compiled_op->Execute({scale_binding.get_desc()},
+                             {recip_output_binding.get_desc()});
 
   // Step 2: Dequantize using DML_ELEMENT_WISE_DEQUANTIZE_LINEAR.
   // This operation implicitly handles the int8 -> float32 cast and multiplies
@@ -189,7 +186,11 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
 
   if (bias) {
     auto bias_desc_bundle = create_broadcast_desc(*bias);
-    bias_add_output_buffer = StorageView(y.shape(), y.dtype(), y.device());
+    if (_activation_type) {
+      bias_add_output_buffer = StorageView(y.shape(), y.dtype(), y.device());
+    } else {
+      bias_add_output_buffer.view(y.buffer(), y.shape());
+    }
     bias_add_output_desc_bundle =
         dml::utils::DmlTensorDescBundle(bias_add_output_buffer);
     bias_add_output_desc_ptr = &bias_add_output_desc_bundle.get_tensor_desc();
@@ -311,23 +312,8 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
                            {y_binding.get_desc()});
   } else if (current_buffer_resource !=
              dml::utils::ResourceFromStorageView(y)) {
-    // Final copy if needed
-    D3D12_RESOURCE_BARRIER barriers[] = {
-        CD3DX12_RESOURCE_BARRIER::Transition(
-            dml::utils::ResourceFromStorageView(y),
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-            D3D12_RESOURCE_STATE_COPY_DEST),
-        CD3DX12_RESOURCE_BARRIER::Transition(
-            current_buffer_resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-            D3D12_RESOURCE_STATE_COPY_SOURCE)};
-    command_list->ResourceBarrier(_countof(barriers), barriers);
-    command_list->CopyResource(dml::utils::ResourceFromStorageView(y),
-                               current_buffer_resource);
-    std::swap(barriers[0].Transition.StateBefore,
-              barriers[0].Transition.StateAfter);
-    std::swap(barriers[1].Transition.StateBefore,
-              barriers[1].Transition.StateAfter);
-    command_list->ResourceBarrier(_countof(barriers), barriers);
+    throw std::invalid_argument(
+        "Dequantize GEMM output: current buffer resource does not match ");
   }
 }
 

@@ -116,27 +116,24 @@ void Gather::compute(const StorageView& data,
   auto compiled_operator = dml::GetOrCreateCompiledOperatorApi(&op_desc);
 
   // Create and bind resources using dml::utils
-  DML_BUFFER_BINDING data_buffer_binding_storage =
-      dml::utils::create_buffer_binding(
-          dml::utils::ResourceFromStorageView(data_for_dml), 0,
-          data_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-  DML_BUFFER_BINDING indices_buffer_binding_storage =
-      dml::utils::create_buffer_binding(
-          dml::utils::ResourceFromStorageView(indices_for_dml), 0,
-          indices_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+  dml::utils::DmlBufferBindingBundle data_buffer_binding_storage(
+      dml::utils::ResourceFromStorageView(data_for_dml), 0,
+      data_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+  dml::utils::DmlBufferBindingBundle indices_buffer_binding_storage(
+      dml::utils::ResourceFromStorageView(indices_for_dml), 0,
+      indices_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
 
-  std::vector<DML_BINDING_DESC> input_bindings_for_op = {
-      dml::utils::create_binding_desc(&data_buffer_binding_storage),
-      dml::utils::create_binding_desc(&indices_buffer_binding_storage)};
+  dml::utils::DmlBindingArrayBundle input_bindings_for_op(
+      {data_buffer_binding_storage, indices_buffer_binding_storage});
 
-  DML_BUFFER_BINDING output_buffer_binding_storage =
-      dml::utils::create_buffer_binding(
-          dml::utils::ResourceFromStorageView(output), 0,
-          output_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-  std::vector<DML_BINDING_DESC> output_bindings_for_op = {
-      dml::utils::create_binding_desc(&output_buffer_binding_storage)};
+  dml::utils::DmlBufferBindingBundle output_buffer_binding_storage(
+      dml::utils::ResourceFromStorageView(output), 0,
+      output_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
+  dml::utils::DmlBindingArrayBundle output_bindings_for_op(
+      {output_buffer_binding_storage});
 
-  compiled_operator->Execute(input_bindings_for_op, output_bindings_for_op);
+  compiled_operator->Execute(input_bindings_for_op.get_descs(),
+                             output_bindings_for_op.get_descs());
 }
 
 #define DECLARE_IMPL(T)                                                    \
