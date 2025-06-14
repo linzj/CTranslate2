@@ -18,16 +18,12 @@ void RMSNorm::compute(const StorageView& gamma,
   static_assert(D == Device::DirectML,
                 "This implementation is for DirectML only");
 
-  auto* device = dml::get_device();
-
   const dim_t depth = input.dim(-1);
   const dim_t batch_size = input.size() / depth;
 
   const DML_TENSOR_DATA_TYPE data_type =
       dml::utils::get_dml_data_type(input.dtype());
   const auto device_type = Device::DirectML;
-
-  device->ResetCommandList();
 
   // Step 1: Compute input_squared = input * input
   StorageView input_squared(input.shape(), input.dtype(), device_type);
@@ -159,8 +155,7 @@ void RMSNorm::compute(const StorageView& gamma,
     dml::utils::DmlBindingArrayBundle norm_mult_outputs(
         {dml::utils::DmlBufferBindingBundle(
             dml::utils::ResourceFromStorageView(normalized))});
-    op->Execute(norm_mult_inputs.get_descs(),
-                              norm_mult_outputs.get_descs());
+    op->Execute(norm_mult_inputs.get_descs(), norm_mult_outputs.get_descs());
   }
 
   // Step 6: Final scale: normalized * gamma or normalized * (1 + gamma)
@@ -174,7 +169,7 @@ void RMSNorm::compute(const StorageView& gamma,
     dml::utils::DmlOperatorDescBundle op_bundle;
     std::vector<UINT> gamma_dims = {1, (UINT)depth};
     auto& gamma_desc = op_bundle.AddInput(data_type, gamma_dims, nullptr,
-                                            gamma.reserved_memory());
+                                          gamma.reserved_memory());
     auto& ones_desc = op_bundle.AddInput(ones);
     auto& output_desc = op_bundle.AddOutput(gamma_plus_one);
     auto& op_desc =
@@ -191,16 +186,14 @@ void RMSNorm::compute(const StorageView& gamma,
     dml::utils::DmlBindingArrayBundle gamma_add_outputs(
         {dml::utils::DmlBufferBindingBundle(
             dml::utils::ResourceFromStorageView(gamma_plus_one))});
-    op->Execute(gamma_add_inputs.get_descs(),
-                          gamma_add_outputs.get_descs());
+    op->Execute(gamma_add_inputs.get_descs(), gamma_add_outputs.get_descs());
     gamma_final = &gamma_plus_one;
   }
   {
     dml::utils::DmlOperatorDescBundle op_bundle;
     auto& norm_desc = op_bundle.AddInput(normalized);
     std::vector<UINT> gamma_dims = {1, (UINT)depth};
-    auto& gamma_desc =
-        op_bundle.AddInput(data_type, gamma_dims, nullptr, 0);
+    auto& gamma_desc = op_bundle.AddInput(data_type, gamma_dims, nullptr, 0);
     auto& out_desc = op_bundle.AddOutput(output);
     auto& op_desc =
         op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC>();
@@ -216,11 +209,8 @@ void RMSNorm::compute(const StorageView& gamma,
     dml::utils::DmlBindingArrayBundle final_mult_outputs(
         {dml::utils::DmlBufferBindingBundle(
             dml::utils::ResourceFromStorageView(output))});
-    op->Execute(final_mult_inputs.get_descs(),
-                              final_mult_outputs.get_descs());
+    op->Execute(final_mult_inputs.get_descs(), final_mult_outputs.get_descs());
   }
-
-  device->ExecuteCommandList();
 }
 
 #define DECLARE_IMPL(T)                                \

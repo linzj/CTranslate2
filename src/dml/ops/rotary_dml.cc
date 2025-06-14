@@ -139,7 +139,7 @@ class RotaryDMLCompute {
   }
 
  public:
-  RotaryDMLCompute(dml::Device* device, DataType ct2_data_type) {}
+  RotaryDMLCompute() {}
 
   void compute(const StorageView& input,
                const StorageView& sin,
@@ -255,15 +255,10 @@ void Rotary::compute(const StorageView& input,
   static_assert(D == Device::DirectML,
                 "This implementation is for DirectML only");
 
-  auto* dml_device_wrapper = dml::get_device();
-  if (!dml_device_wrapper) {
-    throw std::runtime_error("DirectML device not available");
-  }
-
   const dim_t feature_depth = input.dim(-1);
   const dim_t rot_ndims_param = _ndims == 0 ? feature_depth : _ndims;
 
-  RotaryDMLCompute compute_kernel(dml_device_wrapper, input.dtype());
+  RotaryDMLCompute compute_kernel;
 
   compute_kernel.compute(input, sin, cos, output, rot_ndims_param, _interleave);
 }

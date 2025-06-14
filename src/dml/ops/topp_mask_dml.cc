@@ -23,9 +23,6 @@ void TopPMask::compute(const StorageView& input,
         " classes, but the input has " + std::to_string(depth) + " classes.");
   }
 
-  auto* ct2_dml_device = dml::get_device();
-  ct2_dml_device->ResetCommandList();
-
   const auto device = Device::DirectML;
   const auto float_type = DataType::FLOAT32;
   const auto uint_type = DataType::INT32;  // For UINT32 size compatibility
@@ -199,8 +196,6 @@ void TopPMask::compute(const StorageView& input,
             dml::utils::ResourceFromStorageView(output))});
     op->Execute(inputs.get_descs(), outputs.get_descs());
   }
-
-  ct2_dml_device->ExecuteCommandList();
 }
 
 template <>

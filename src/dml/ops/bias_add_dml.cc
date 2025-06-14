@@ -58,9 +58,6 @@ template <Device D, typename T>
 void BiasAdd::compute(const StorageView& value,
                       const StorageView& bias,
                       StorageView& output) const {
-  auto* dml_device_ptr = dml::get_dml_device();
-  auto* ct2_dml_device = dml::get_device();
-
   DataType ct2_data_type = value.dtype();
 
   const dim_t depth = bias.size();

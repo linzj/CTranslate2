@@ -28,7 +28,6 @@ void Quantize::quantize(const StorageView& input,
         "for DML.");
   }
 
-  dml::Device* dml_dev = dml::get_device();
   // --- 1. Prepare and Resize Output Scale Tensor ---
   // Scale will be computed per row along the first dimension (batch_size).
   // For an input of shape [dim0, dim1, ..., dimN-1], scale will be [dim0, 1,

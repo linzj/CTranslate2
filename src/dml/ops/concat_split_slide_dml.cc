@@ -3,7 +3,6 @@
 #include "ctranslate2/ops/slide.h"
 #include "ctranslate2/ops/split.h"
 
-#include "dml/backend_dml.h"
 #include "dml/dml_utils.h"  // Added for centralized DML utilities
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
@@ -26,8 +25,6 @@ void Concat::compute(const std::vector<const StorageView*>& inputs,
                         inputs[0]->size());
     return;
   }
-
-  auto* device = dml::get_device();
 
   // Create JOIN operator descriptor using DmlOperatorDescBundle
   dml::utils::DmlOperatorDescBundle op_bundle;
@@ -76,8 +73,6 @@ void Split::compute(const StorageView& input,
 
   const dim_t axis = _axis < 0 ? input.rank() + _axis : _axis;
 
-  auto* device = dml::get_device();
-
   // Create SPLIT operator descriptor using DmlOperatorDescBundle
   dml::utils::DmlOperatorDescBundle op_bundle;
   const auto& input_desc_bundle = op_bundle.AddInput(input);
@@ -121,8 +116,6 @@ void Slide::compute(const StorageView& input,
                     StorageView& output,
                     const dim_t& index) const {
   const dim_t axis = _axis < 0 ? input.rank() + _axis : _axis;
-
-  auto* device = dml::get_device();
 
   // Create SLICE operator descriptor using DmlOperatorDescBundle
   dml::utils::DmlOperatorDescBundle op_bundle;

@@ -35,7 +35,6 @@ void Gather::compute(const StorageView& data,
   const dim_t target_dml_rank =
       std::max({original_data_rank, original_indices_rank,
                 original_output_rank});  // All DML tensors need this rank
-  auto* dml_device_wrapper = dml::get_device();  // ctranslate2::dml::Device
 
   // Use copies for potential reshaping. StorageView copy is shallow.
   // ScopedReshape will modify these copies' metadata and restore on

@@ -17,9 +17,6 @@ void Dequantize::dequantize<Device::DirectML, int8_t, float>(
     const StorageView& input,
     const StorageView& scale,
     StorageView& output) const {
-  auto device = dml::get_device();
-  auto dml_device = dml::get_dml_device();
-
   const dim_t depth = input.dim(-1);
 
   // Step 1: Compute reciprocal of scale (1.0f / scale).
@@ -109,10 +106,6 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
     const bool transpose_b,
     const StorageView* bias,
     StorageView& y) const {
-  auto* device = dml::get_device();
-  auto* command_list = device->GetCommandList();
-  auto* dml_device = dml::get_dml_device();
-
   const std::vector<UINT> y_dml_sizes = [&y]() {
     dml::utils::DmlOperatorDescBundle temp_op_bundle;
     auto& y_desc_bundle_ref = temp_op_bundle.AddOutput(y);

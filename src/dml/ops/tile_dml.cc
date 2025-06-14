@@ -18,9 +18,6 @@ void Tile::compute(const StorageView& input,
   static_assert(D == Device::DirectML,
                 "This implementation is for DirectML only");
 
-  auto* device = dml::get_device();
-  auto* dml_device = dml::get_dml_device();
-
   if constexpr (std::is_same_v<T, ctranslate2::bfloat16_t>) {
     throw std::invalid_argument(
         "DirectML does not support bfloat16 for Tile operation");
