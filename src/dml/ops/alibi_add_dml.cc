@@ -24,7 +24,6 @@ void AlibiAdd::compute(const StorageView& input,
   }
 
   // Get device and tensor properties
-  dml::Device* device = dml::get_device();
   const auto& input_shape = input.shape();
   const dim_t batch_size = input_shape[0];
   const dim_t num_heads = input_shape[1];
