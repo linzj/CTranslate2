@@ -159,7 +159,8 @@ void Slide::compute(const StorageView& input,
           dml::utils::ResourceFromStorageView(input))});
   dml::utils::DmlBindingArrayBundle output_bindings(
       {dml::utils::DmlBufferBindingBundle(
-          dml::utils::ResourceFromStorageView(output))});
+          dml::utils::ResourceFromStorageView(output), 0,
+          output.size() * output.item_size())});
 
   compiled_op->Execute(input_bindings.get_descs(), output_bindings.get_descs());
 }

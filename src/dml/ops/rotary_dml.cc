@@ -102,7 +102,8 @@ class RotaryDMLCompute {
             dml::utils::ResourceFromStorageView(input))});
     dml::utils::DmlBindingArrayBundle outputs(
         {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(output))});
+            dml::utils::ResourceFromStorageView(output), 0,
+            output.size() * output.item_size())});
     op->Execute(inputs.get_descs(), outputs.get_descs());
   }
 

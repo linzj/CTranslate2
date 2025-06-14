@@ -82,7 +82,8 @@ void AlibiAdd::compute(const StorageView& input,
       {dml::utils::DmlBufferBindingBundle(
            dml::utils::ResourceFromStorageView(input)),
        dml::utils::DmlBufferBindingBundle(
-           dml::utils::ResourceFromStorageView(alibi), alibi_byte_offset)});
+           dml::utils::ResourceFromStorageView(alibi), alibi_byte_offset,
+           static_cast<UINT64>(key_length) * item_size)});
 
   dml::utils::DmlBindingArrayBundle output_bindings(
       {dml::utils::DmlBufferBindingBundle(

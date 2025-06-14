@@ -50,7 +50,8 @@ void slice_tensor_k_dimension(const StorageView& input,
   dml::utils::DmlBindingArrayBundle inputs({dml::utils::DmlBufferBindingBundle(
       dml::utils::ResourceFromStorageView(input))});
   dml::utils::DmlBindingArrayBundle outputs({dml::utils::DmlBufferBindingBundle(
-      dml::utils::ResourceFromStorageView(output))});
+      dml::utils::ResourceFromStorageView(output), 0,
+      output.size() * output.item_size())});
   compiled_op->Execute(inputs.get_descs(), outputs.get_descs());
 }
 
