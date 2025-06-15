@@ -616,10 +616,14 @@ Microsoft::WRL::ComPtr<ID3D12Resource> Device::Upload(uint64_t totalSize,
   ComPtr<ID3D12Resource> resourceToMap;
 
   if (!data.empty()) {
-    ComPtr<IResourceWrapper> uploadResourceWrapper =
-        m_uploadAllocator->Alloc(totalSize, D3D12_RESOURCE_FLAG_NONE);
-    uploadBuffer = uploadResourceWrapper->GetD3D12Resource();
-    KeepAliveUntilNextCommandListDispatch(uploadResourceWrapper);
+    if (totalSize < 1024 * 1024) {
+      ComPtr<IResourceWrapper> uploadResourceWrapper =
+          m_uploadAllocator->Alloc(totalSize, D3D12_RESOURCE_FLAG_NONE);
+      uploadBuffer = uploadResourceWrapper->GetD3D12Resource();
+      KeepAliveUntilNextCommandListDispatch(uploadResourceWrapper);
+    } else {
+      uploadBuffer = CreateUploadBuffer(totalSize);
+    }
     uploadBuffer->SetName(L"Device::Upload");
     resourceToMap = uploadBuffer;
   }
