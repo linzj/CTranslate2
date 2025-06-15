@@ -204,11 +204,6 @@ class Device {
                        std::vector<DML_BINDING_DESC> inputBindings,
                        std::vector<DML_BINDING_DESC> outputBindings);
 
-  void ExecuteOperator(IDMLCompiledOperator* compiled_op,
-                       const std::vector<ID3D12Resource*>& input_resources,
-                       const std::vector<ID3D12Resource*>& output_resources,
-                       ID3D12Resource* persistent_resource = nullptr);
-
   void DummyPresent();
 
   DMLOperatorCache* GetOperatorCache() { return m_operatorCache.get(); }

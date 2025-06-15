@@ -1082,31 +1082,6 @@ void Device::ExecuteOperator(IDMLCompiledOperator* op,
                   std::move(outputBindings));
 }
 
-void Device::ExecuteOperator(
-    IDMLCompiledOperator* compiled_op,
-    const std::vector<ID3D12Resource*>& input_resources,
-    const std::vector<ID3D12Resource*>& output_resources,
-    ID3D12Resource* persistent_resource) {
-  // Use DmlBufferBindingBundle for the optional persistent resource.
-  utils::DmlBufferBindingBundle persistent_binding_bundle;
-  if (persistent_resource) {
-    persistent_binding_bundle =
-        utils::DmlBufferBindingBundle(persistent_resource);
-  }
-  DML_BINDING_DESC persistent_binding_desc =
-      persistent_binding_bundle.get_desc();
-
-  // Use DmlBindingArrayBundle for input and output resources.
-  // These bundles will manage the underlying DmlBufferBindingBundle objects
-  // and provide a vector of DML_BINDING_DESC.
-  utils::DmlBindingArrayBundle input_array_bundle(input_resources);
-  utils::DmlBindingArrayBundle output_array_bundle(output_resources);
-
-  ExecuteOperator(compiled_op, persistent_binding_desc,
-                  input_array_bundle.get_descs(),
-                  output_array_bundle.get_descs());
-}
-
 void Device::SetDescriptorHeap(ID3D12DescriptorHeap* descriptorHeap) {
   if (descriptorHeap != nullptr) {
     if (descriptorHeap != m_currentDescriptorHeap) {

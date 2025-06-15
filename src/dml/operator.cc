@@ -1,8 +1,10 @@
 #include "operator.h"
-#include <spdlog/spdlog.h>
+
 #include "backend_dml.h"
+#include "dml_utils.h"
 #include "dxdevice.h"
 
+#include <spdlog/spdlog.h>
 namespace ctranslate2 {
 namespace dml {
 
@@ -238,10 +240,9 @@ void Operator::Execute(std::vector<DML_BINDING_DESC> inputBindings,
 
 void Operator::Execute(const std::vector<ID3D12Resource*>& input_resources,
                        const std::vector<ID3D12Resource*>& output_resources) {
-  TraceExecute(GetType(), input_resources, output_resources);
-  auto device = dml::get_device();
-  device->ExecuteOperator(m_compiledOperator.Get(), input_resources,
-                          output_resources, m_persistentResource.Get());
+  dml::utils::DmlBindingArrayBundle inputs{input_resources};
+  dml::utils::DmlBindingArrayBundle outputs{output_resources};
+  Execute(inputs.get_descs(), outputs.get_descs());
 }
 }  // namespace dml
 }  // namespace ctranslate2
