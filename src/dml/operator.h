@@ -16,7 +16,8 @@ class Operator
  public:
   explicit Operator(Device* device,
                     utils::DmlOperatorDescBundle&& op_desc,
-                    ComPtr<IDMLCompiledOperator>&& compiled_operator);
+                    ComPtr<IDMLCompiledOperator>&& compiled_operator,
+                  const std::string& key);
   ~Operator();
 
   void Execute(const utils::DmlBindingArrayBundle& inputs,
@@ -27,11 +28,13 @@ class Operator
 
   DML_OPERATOR_TYPE GetType() const { return m_op_desc.get_desc().Type; }
 
+  const std::string& key() const { return m_key; }
  private:
   ComPtr<IDMLCompiledOperator> m_compiledOperator;
   ComPtr<ID3D12Resource> m_persistentResource;
   std::optional<DML_BUFFER_BINDING> m_persistentResourceBinding;
   utils::DmlOperatorDescBundle m_op_desc;
+  std::string m_key;
 };
 }  // namespace dml
 }  // namespace ctranslate2

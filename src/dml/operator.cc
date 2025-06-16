@@ -198,9 +198,11 @@ using Microsoft::WRL::ComPtr;
 
 Operator::Operator(Device* device,
                    utils::DmlOperatorDescBundle&& op_desc,
-                   ComPtr<IDMLCompiledOperator>&& compiled_operator)
+                   ComPtr<IDMLCompiledOperator>&& compiled_operator,
+                   const std::string& key)
     : m_compiledOperator(std::move(compiled_operator)),
-      m_op_desc(std::move(op_desc)) {
+      m_op_desc(std::move(op_desc)),
+      m_key(key) {
   UINT64 persistentResourceSize =
       m_compiledOperator->GetBindingProperties().PersistentResourceSize;
   if (persistentResourceSize > 0) {

@@ -63,7 +63,7 @@ Operator* DMLOperatorCache::GetOrCreateCompiledOperator(
   if (name)
     compiled_operator->SetName(name);
   ComPtr<Operator> operator_obj(Microsoft::WRL::Make<Operator>(
-      _device, std::move(op_desc), std::move(compiled_operator)));
+      _device, std::move(op_desc), std::move(compiled_operator), key));
 
   if (kCacheEnabled) {
     // Re-lock to insert into the cache
@@ -73,7 +73,7 @@ Operator* DMLOperatorCache::GetOrCreateCompiledOperator(
     if (it != _cache.end()) {
       return it->second.Get();  // Another thread created and inserted it
     }
-    _cache[key] = operator_obj;
+    _cache.emplace(std::move(key), operator_obj);
   }
   if (!kCacheEnabled) {
     _device->KeepAliveUntilNextCommandListDispatch(operator_obj);
