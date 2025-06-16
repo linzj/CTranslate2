@@ -753,8 +753,14 @@ void primitives<Device::DirectML>::gemm<int8_t, int32_t>(
       matmul_op_bundle.AddInput(DML_TENSOR_DATA_TYPE_INT8, b_dims, &b_strides,
                                 b_mem_rows * ldb * sizeof(int8_t));
 
-  StorageView matmul_output({(dim_t)m, (dim_t)n}, DataType::INT32,
-                            Device::DirectML);
+  StorageView matmul_output(DataType::INT32, Device::DirectML);
+
+  if (ldc == n && beta == 0.0f) {
+    matmul_output.view(c, Shape{1, 1, m, n});
+  } else {
+    matmul_output =
+        StorageView({(dim_t)m, (dim_t)n}, DataType::INT32, Device::DirectML);
+  }
   auto& c_bundle = matmul_op_bundle.AddOutput(matmul_output);
 
   auto& matmul_desc =
@@ -782,7 +788,7 @@ void primitives<Device::DirectML>::gemm<int8_t, int32_t>(
       }
       add(matmul_output.data<int32_t>(), c, c, m * n);
     } else {
-      copy(matmul_output.data<int32_t>(), c, m * n);
+      // matmul_output is already in c.
     }
     if (a_shift_compensation) {
       add_batch_broadcast(a_shift_compensation, c, c, n, m * n, 0);
