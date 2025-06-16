@@ -39,13 +39,18 @@ void Gather::compute(const StorageView& data,
   // Use copies for potential reshaping. StorageView copy is shallow.
   // ScopedReshape will modify these copies' metadata and restore on
   // destruction.
-  StorageView data_for_dml = data;
-  StorageView indices_for_dml = indices;
-  StorageView output_for_dml = output;
+  StorageView data_for_dml(data.dtype(), data.device());
+  data_for_dml.view(static_cast<T*>(const_cast<void*>(data.buffer())),
+                    data.shape());
+  StorageView indices_for_dml(indices.dtype(), indices.device());
+  indices_for_dml.view(
+      static_cast<int32_t*>(const_cast<void*>(indices.buffer())),
+      indices.shape());
+  StorageView output_for_dml(output.dtype(), output.device());
+  output_for_dml.view(static_cast<T*>(output.buffer()), output.shape());
 
   dim_t dml_axis = axis;  // Axis to be used for DML, may be adjusted
 
-  std::unique_ptr<dml::utils::ScopedReshape> scoped_data_reshape;
   if (original_data_rank < target_dml_rank) {
     Shape new_data_shape;
     dim_t dims_to_prepend = target_dml_rank - original_data_rank;
@@ -56,12 +61,10 @@ void Gather::compute(const StorageView& data,
       new_data_shape.push_back(data.shape()[i]);
     }
     // data_for_dml is non-const, ScopedReshape is fine.
-    scoped_data_reshape.reset(
-        new dml::utils::ScopedReshape(data_for_dml, new_data_shape));
+    data_for_dml.reshape(new_data_shape);
     dml_axis += dims_to_prepend;  // Adjust axis due to prepended dimensions
   }
 
-  std::unique_ptr<dml::utils::ScopedReshape> scoped_indices_reshape;
   if (original_indices_rank < target_dml_rank) {
     Shape new_indices_shape;
     dim_t dims_to_prepend = target_dml_rank - original_indices_rank;
@@ -72,14 +75,12 @@ void Gather::compute(const StorageView& data,
       new_indices_shape.push_back(indices.shape()[i]);
     }
     // indices_for_dml is non-const, ScopedReshape is fine.
-    scoped_indices_reshape.reset(
-        new dml::utils::ScopedReshape(indices_for_dml, new_indices_shape));
+    indices_for_dml.reshape(new_indices_shape);
   }
   // Note: The original ScopedReshape for indices compared indices.rank with
   // data.rank. The new logic correctly compares with target_dml_rank
   // (output.rank).
 
-  std::unique_ptr<dml::utils::ScopedReshape> scoped_output_reshape;
   if (original_output_rank < target_dml_rank) {
     Shape new_output_shape;
     dim_t dims_to_prepend = target_dml_rank - original_output_rank;
@@ -89,8 +90,7 @@ void Gather::compute(const StorageView& data,
     for (dim_t i = 0; i < original_output_rank; ++i) {
       new_output_shape.push_back(output.shape()[i]);
     }
-    scoped_output_reshape.reset(
-        new dml::utils::ScopedReshape(output_for_dml, new_output_shape));
+    output_for_dml.reshape(new_output_shape);
   }
 
   // Create tensor and operator descriptors

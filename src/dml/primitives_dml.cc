@@ -270,7 +270,8 @@ void primitives<Device::DirectML>::copy(const T* x, T* y, dim_t size) {
     return;
   }
   auto dxdevice = dml::get_device();
-  if (dxdevice->GetGraphRecorder() && dxdevice->GetGraphRecorder()) {
+  if (dxdevice->GetGraphRecorder() &&
+      dxdevice->GetGraphRecorder()->has_begun()) {
     throw std::invalid_argument(
         "DirectML copy operation cannot be "
         "recorded in a graph.");
