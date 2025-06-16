@@ -594,6 +594,23 @@ class DmlBindingArrayBundle {
       std::vector<DmlBufferBindingBundle>&& bundles) noexcept
       : buffer_binding_bundles_(std::move(bundles)) {}
 
+  // Constructor from initializer list that accepts tuples with arguments for
+  // DmlBufferBindingBundle. This constructor perfectly forwards arguments to
+  // DmlBufferBindingBundle's constructor, avoiding copies.
+  DmlBindingArrayBundle(
+      std::initializer_list<std::tuple<ID3D12Resource*, UINT64, UINT64>>
+          init_list) {
+    buffer_binding_bundles_.reserve(init_list.size());
+    for (const auto& args_tuple : init_list) {
+      std::apply(
+          [this](auto&&... args) {
+            buffer_binding_bundles_.emplace_back(
+                std::forward<decltype(args)>(args)...);
+          },
+          args_tuple);
+    }
+  }
+
   // Returns a vector of DML_BINDING_DESC.
   // The DML_BUFFER_BINDING structures are managed by the DmlBufferBindingBundle
   // instances within this class.

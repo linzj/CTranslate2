@@ -2,7 +2,6 @@
 
 #include "ctranslate2/ops/layer_norm.h"
 
-#include "dml/backend_dml.h"
 #include "dml/dml_utils.h"
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
@@ -27,6 +26,7 @@ void LayerNorm::compute(const StorageView* beta,
   StorageView* output_ptr = &output;
   StorageView output_tmp;
 
+  // FIXME(linzj): avoid copying the output if it is not inplace.
   if (is_inplace) {
     output_tmp = StorageView(output.shape(), output.dtype(), output.device());
     output_ptr = &output_tmp;
@@ -70,17 +70,14 @@ void LayerNorm::compute(const StorageView* beta,
   auto* compiled_op =
       dml::GetOrCreateCompiledOperatorApi(std::move(op_desc_bundle));
 
-  std::vector<dml::utils::DmlBufferBindingBundle> input_bundles;
-  input_bundles.emplace_back(dml::utils::ResourceFromStorageView(input));
-  input_bundles.emplace_back(dml::utils::ResourceFromStorageView(*gamma));
-  input_bundles.emplace_back(dml::utils::ResourceFromStorageView(*beta));
+  dml::utils::DmlBindingArrayBundle input_bindings{
+      {dml::utils::ResourceFromStorageView(input), 0, 0},
+      {dml::utils::ResourceFromStorageView(*gamma), 0, 0},
+      {dml::utils::ResourceFromStorageView(*beta), 0, 0}};
+  dml::utils::DmlBindingArrayBundle output_bindings{
+      {dml::utils::ResourceFromStorageView(*output_ptr), 0, 0}};
 
-  dml::utils::DmlBindingArrayBundle input_bindings(std::move(input_bundles));
-  dml::utils::DmlBindingArrayBundle output_bindings(
-      {dml::utils::DmlBufferBindingBundle(
-          dml::utils::ResourceFromStorageView(*output_ptr))});
-
-  compiled_op->Execute(input_bindings.get_descs(), output_bindings.get_descs());
+  compiled_op->Execute(input_bindings, output_bindings);
 
   if (is_inplace) {
     output.copy_from(*output_ptr);

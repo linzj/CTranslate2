@@ -1,6 +1,6 @@
 #if defined(CT2_WITH_DIRECTML)
 #include "ctranslate2/ops/mean.h"
-#include "dml/backend_dml.h"
+
 #include "dml/dml_utils.h"
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
@@ -47,14 +47,12 @@ void Mean::compute(const StorageView& input,
   auto* compiled_op =
       dml::GetOrCreateCompiledOperatorApi(std::move(op_desc_bundle));
 
-  dml::utils::DmlBindingArrayBundle input_bindings(
-      {dml::utils::DmlBufferBindingBundle(
-          dml::utils::ResourceFromStorageView(input))});
-  dml::utils::DmlBindingArrayBundle output_bindings(
-      {dml::utils::DmlBufferBindingBundle(
-          dml::utils::ResourceFromStorageView(output))});
+  dml::utils::DmlBindingArrayBundle input_bindings{
+      {dml::utils::ResourceFromStorageView(input), 0, 0}};
+  dml::utils::DmlBindingArrayBundle output_bindings{
+      {dml::utils::ResourceFromStorageView(output), 0, 0}};
 
-  compiled_op->Execute(input_bindings.get_descs(), output_bindings.get_descs());
+  compiled_op->Execute(input_bindings, output_bindings);
 }
 
 #define DECLARE_IMPL(T)                                                        \

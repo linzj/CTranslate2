@@ -1073,19 +1073,18 @@ void primitives<Device::DirectML>::add_batch_broadcast(const T* a,
   const auto element_size =
       dml::utils::get_dml_element_size_in_bytes(a_bundle.get_data_type());
 
-  dml::utils::DmlBufferBindingBundle a_binding(
-      dml::utils::ResourceFromRawBuffer(a),
-      static_cast<UINT64>(a_offset * element_size),
-      static_cast<UINT64>(a_size * element_size));
-  dml::utils::DmlBufferBindingBundle b_binding(
-      dml::utils::ResourceFromRawBuffer(b), 0,
-      static_cast<UINT64>(b_size * element_size));
-  dml::utils::DmlBufferBindingBundle c_binding(
-      dml::utils::ResourceFromRawBuffer(c), 0,
-      static_cast<UINT64>(b_size * element_size));
+  dml::utils::DmlBindingArrayBundle intputs{
+      {dml::utils::ResourceFromRawBuffer(a),
+       static_cast<UINT64>(a_offset * element_size),
+       static_cast<UINT64>(a_size * element_size)},
 
-  compiled_op->Execute({a_binding.get_desc(), b_binding.get_desc()},
-                       {c_binding.get_desc()});
+      {dml::utils::ResourceFromRawBuffer(b), 0,
+       static_cast<UINT64>(b_size * element_size)}};
+  dml::utils::DmlBindingArrayBundle outputs{
+      {dml::utils::ResourceFromRawBuffer(c), 0,
+       static_cast<UINT64>(b_size * element_size)}};
+
+  compiled_op->Execute(intputs, outputs);
 }
 
 template <>
@@ -1515,12 +1514,12 @@ float primitives<Device::DirectML>::logsumexp(const T* x,
     byte_offset = 0;
   }
 
-  dml::utils::DmlBufferBindingBundle x_binding(input_resource, byte_offset,
-                                               buffer_size);
-  dml::utils::DmlBufferBindingBundle output_binding(
-      dml::utils::ResourceFromStorageView(output_storage));
+  dml::utils::DmlBindingArrayBundle x_binding{
+      {input_resource, byte_offset, buffer_size}};
+  dml::utils::DmlBindingArrayBundle output_binding{
+      {dml::utils::ResourceFromStorageView(output_storage), 0, 0}};
 
-  compiled_op->Execute({x_binding.get_desc()}, {output_binding.get_desc()});
+  compiled_op->Execute(x_binding, output_binding);
 
   return output_storage.to(Device::CPU).at<float>({0, 0, 0, 0});
 }

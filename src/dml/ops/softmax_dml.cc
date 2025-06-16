@@ -2,7 +2,6 @@
 
 #include "ctranslate2/ops/softmax.h"
 
-#include "dml/backend_dml.h"
 #include "dml/dml_utils.h"
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
@@ -62,9 +61,10 @@ void SoftMax::compute(const StorageView& input,
     dml::utils::DmlBufferBindingBundle seq_indices_buffer_binding_bundle(
         dml::utils::ResourceFromStorageView(sequence_indices_gpu), 0,
         sequence_indices_size);
-    dml::utils::DmlBindingArrayBundle fill_seq_output_bundle(
-        {seq_indices_buffer_binding_bundle});
-    compiled_fill_seq_op->Execute({}, fill_seq_output_bundle.get_descs());
+    dml::utils::DmlBindingArrayBundle fill_seq_output_bundle{
+        {dml::utils::ResourceFromStorageView(sequence_indices_gpu), 0,
+         sequence_indices_size}};
+    compiled_fill_seq_op->Execute({}, fill_seq_output_bundle);
 
     // 2. Create Condition Tensor using
     // DML_OPERATOR_ELEMENT_WISE_LOGICAL_LESS_THAN
@@ -105,12 +105,16 @@ void SoftMax::compute(const StorageView& input,
             dml::utils::ResourceFromStorageView(condition_tensor_gpu), 0,
             condition_desc.get_buffer_desc().TotalTensorSizeInBytes);
 
-    dml::utils::DmlBindingArrayBundle less_than_inputs_bundle(
-        {seq_indices_buffer_binding_bundle, lengths_buffer_binding_bundle});
-    dml::utils::DmlBindingArrayBundle less_than_output_bundle(
-        {condition_buffer_binding_for_cmp_output_bundle});
-    compiled_less_than_op->Execute(less_than_inputs_bundle.get_descs(),
-                                   less_than_output_bundle.get_descs());
+    dml::utils::DmlBindingArrayBundle less_than_inputs_bundle{
+        {dml::utils::ResourceFromStorageView(sequence_indices_gpu), 0,
+         sequence_indices_size},
+        {dml::utils::ResourceFromStorageView(*lengths), 0,
+         lengths->size() * sizeof(int32_t)}};
+    dml::utils::DmlBindingArrayBundle less_than_output_bundle{
+        {dml::utils::ResourceFromStorageView(condition_tensor_gpu), 0,
+         condition_desc.get_buffer_desc().TotalTensorSizeInBytes}};
+    compiled_less_than_op->Execute(less_than_inputs_bundle,
+                                   less_than_output_bundle);
 
     // 3. Prepare Padding Value Tensor
     T padding_scalar_value = -std::numeric_limits<T>::infinity();
@@ -141,10 +145,10 @@ void SoftMax::compute(const StorageView& input,
     dml::utils::DmlBufferBindingBundle padding_value_binding_bundle(
         dml::utils::ResourceFromStorageView(padding_value_gpu_storage), 0,
         padding_value_size);
-    dml::utils::DmlBindingArrayBundle fill_padding_output_bundle(
-        {padding_value_binding_bundle});
-    compiled_fill_padding_op->Execute({},
-                                      fill_padding_output_bundle.get_descs());
+    dml::utils::DmlBindingArrayBundle fill_padding_output_bundle{
+        {dml::utils::ResourceFromStorageView(padding_value_gpu_storage), 0,
+         padding_value_size}};
+    compiled_fill_padding_op->Execute({}, fill_padding_output_bundle);
 
     // 4. ELEMENT_WISE_IF to create `masked_logits`
     StorageView masked_logits_storage(output.dtype(), output.device());
@@ -178,14 +182,17 @@ void SoftMax::compute(const StorageView& input,
     dml::utils::DmlBufferBindingBundle masked_logits_buffer_binding_bundle(
         dml::utils::ResourceFromStorageView(masked_logits_storage), 0,
         masked_logits_size);
-    dml::utils::DmlBindingArrayBundle if_logits_op_input_bindings_bundle(
-        {condition_buffer_binding_for_cmp_output_bundle,
-         input_buffer_binding_bundle, padding_value_binding_bundle});
-    dml::utils::DmlBindingArrayBundle if_logits_op_output_bindings_bundle(
-        {masked_logits_buffer_binding_bundle});
-    compiled_if_logits_op->Execute(
-        if_logits_op_input_bindings_bundle.get_descs(),
-        if_logits_op_output_bindings_bundle.get_descs());
+    dml::utils::DmlBindingArrayBundle if_logits_op_input_bindings_bundle{
+        {dml::utils::ResourceFromStorageView(condition_tensor_gpu), 0,
+         condition_tensor_gpu.size()},
+        {input_resource, 0, input_buffer_size},
+        {dml::utils::ResourceFromStorageView(padding_value_gpu_storage), 0,
+         padding_value_size}};
+    dml::utils::DmlBindingArrayBundle if_logits_op_output_bindings_bundle{
+        {dml::utils::ResourceFromStorageView(masked_logits_storage), 0,
+         masked_logits_size}};
+    compiled_if_logits_op->Execute(if_logits_op_input_bindings_bundle,
+                                   if_logits_op_output_bindings_bundle);
 
     // 5. Softmax or LogSoftmax on `masked_logits` into the final output.
     dml::utils::DmlOperatorDescBundle softmax_on_masked_op_bundle;
@@ -234,14 +241,15 @@ void SoftMax::compute(const StorageView& input,
     dml::utils::DmlBufferBindingBundle final_output_buffer_binding_bundle(
         dml::utils::ResourceFromStorageView(output), 0,
         output_desc_final.get_buffer_desc().TotalTensorSizeInBytes);
-    dml::utils::DmlBindingArrayBundle softmax_op_input_bindings_bundle(
-        {masked_logits_buffer_binding_bundle});
-    dml::utils::DmlBindingArrayBundle softmax_op_output_bindings_bundle(
-        {final_output_buffer_binding_bundle});
+    dml::utils::DmlBindingArrayBundle softmax_op_input_bindings_bundle{
+        {dml::utils::ResourceFromStorageView(masked_logits_storage), 0,
+         masked_logits_size}};
+    dml::utils::DmlBindingArrayBundle softmax_op_output_bindings_bundle{
+        {dml::utils::ResourceFromStorageView(output), 0,
+         output_desc_final.get_buffer_desc().TotalTensorSizeInBytes}};
 
-    compiled_softmax_on_masked_op->Execute(
-        softmax_op_input_bindings_bundle.get_descs(),
-        softmax_op_output_bindings_bundle.get_descs());
+    compiled_softmax_on_masked_op->Execute(softmax_op_input_bindings_bundle,
+                                           softmax_op_output_bindings_bundle);
   } else {
     // --- Original path: Softmax directly to final 'output' ---
     dml::utils::DmlOperatorDescBundle softmax_op_bundle;
@@ -290,14 +298,14 @@ void SoftMax::compute(const StorageView& input,
         dml::utils::ResourceFromStorageView(output), 0,
         output_desc.get_buffer_desc().TotalTensorSizeInBytes);
 
-    dml::utils::DmlBindingArrayBundle softmax_input_bindings_bundle(
-        {input_buffer_binding_bundle});
-    dml::utils::DmlBindingArrayBundle softmax_final_output_bindings_bundle(
-        {output_buffer_binding_bundle});
+    dml::utils::DmlBindingArrayBundle softmax_input_bindings_bundle{
+        {input_resource, 0, input_buffer_size}};
+    dml::utils::DmlBindingArrayBundle softmax_final_output_bindings_bundle{
+        {dml::utils::ResourceFromStorageView(output), 0,
+         output_desc.get_buffer_desc().TotalTensorSizeInBytes}};
 
-    compiled_softmax_to_final_op->Execute(
-        softmax_input_bindings_bundle.get_descs(),
-        softmax_final_output_bindings_bundle.get_descs());
+    compiled_softmax_to_final_op->Execute(softmax_input_bindings_bundle,
+                                          softmax_final_output_bindings_bundle);
   }
 }
 

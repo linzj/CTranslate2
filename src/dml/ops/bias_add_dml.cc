@@ -1,8 +1,8 @@
 #ifdef CT2_WITH_DIRECTML
 
 #include "ctranslate2/ops/bias_add.h"
-#include "dml/backend_dml.h"
-#include "dml/dml_utils.h"  // Added
+
+#include "dml/dml_utils.h"
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
 
@@ -170,41 +170,35 @@ void BiasAdd::compute(const StorageView& value,
         dml::GetOrCreateCompiledOperatorApi(std::move(add_op_bundle));
 
     // Execute the standalone Add
-    dml::utils::DmlBufferBindingBundle value_binding_bundle_add(
-        dml::utils::ResourceFromStorageView(value), 0,
-        value.size() * sizeof(T));
-    dml::utils::DmlBufferBindingBundle bias_binding_bundle_add(
-        dml::utils::ResourceFromStorageView(bias), 0, bias.size() * sizeof(T));
-    dml::utils::DmlBufferBindingBundle output_binding_bundle_add(
-        dml::utils::ResourceFromStorageView(output), 0,
-        output.size() * sizeof(T));
+    dml::utils::DmlBindingArrayBundle inputs_add{
+        {dml::utils::ResourceFromStorageView(value), 0,
+         value.size() * sizeof(T)},
+        {dml::utils::ResourceFromStorageView(bias), 0,
+         bias.size() * sizeof(T)}};
+    dml::utils::DmlBindingArrayBundle outputs_add{
+        {dml::utils::ResourceFromStorageView(output), 0,
+         output.size() * sizeof(T)}};
 
-    add_compiled_op->Execute({value_binding_bundle_add.get_desc(),
-                              bias_binding_bundle_add.get_desc()},
-                             {output_binding_bundle_add.get_desc()});
+    add_compiled_op->Execute(inputs_add, outputs_add);
   }
 
   if (compiled_op_ptr) {
-    dml::utils::DmlBufferBindingBundle final_output_binding_bundle(
-        dml::utils::ResourceFromStorageView(output), 0,
-        output.size() * sizeof(T));
+    dml::utils::DmlBindingArrayBundle final_outputs_main{
+        {dml::utils::ResourceFromStorageView(output), 0,
+         output.size() * sizeof(T)}};
 
     if (!perform_separate_activation) {  // Fused case
-      dml::utils::DmlBufferBindingBundle value_binding_bundle_final(
-          dml::utils::ResourceFromStorageView(value), 0,
-          value.size() * sizeof(T));
-      dml::utils::DmlBufferBindingBundle bias_binding_bundle_final(
-          dml::utils::ResourceFromStorageView(bias), 0,
-          bias.size() * sizeof(T));
-      compiled_op_ptr->Execute({value_binding_bundle_final.get_desc(),
-                                bias_binding_bundle_final.get_desc()},
-                               {final_output_binding_bundle.get_desc()});
+      dml::utils::DmlBindingArrayBundle inputs_fused{
+          {dml::utils::ResourceFromStorageView(value), 0,
+           value.size() * sizeof(T)},
+          {dml::utils::ResourceFromStorageView(bias), 0,
+           bias.size() * sizeof(T)}};
+      compiled_op_ptr->Execute(inputs_fused, final_outputs_main);
     } else {  // Separate activation case
-      dml::utils::DmlBufferBindingBundle act_input_binding_bundle_final(
-          dml::utils::ResourceFromStorageView(output), 0,
-          output.size() * sizeof(T));
-      compiled_op_ptr->Execute({act_input_binding_bundle_final.get_desc()},
-                               {final_output_binding_bundle.get_desc()});
+      dml::utils::DmlBindingArrayBundle inputs_separate_act{
+          {dml::utils::ResourceFromStorageView(output), 0,
+           output.size() * sizeof(T)}};
+      compiled_op_ptr->Execute(inputs_separate_act, final_outputs_main);
     }
   }
 }

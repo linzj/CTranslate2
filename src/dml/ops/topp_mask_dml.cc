@@ -1,7 +1,6 @@
 #if defined(CT2_WITH_DIRECTML)
 #include "ctranslate2/ops/topp_mask.h"
 #include "ctranslate2/types.h"
-#include "dml/backend_dml.h"
 #include "dml/dml_utils.h"
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
@@ -54,15 +53,12 @@ void TopPMask::compute(const StorageView& input,
     topk_desc.AxisDirection = DML_AXIS_DIRECTION_DECREASING;
     auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_desc));
 
-    dml::utils::DmlBindingArrayBundle inputs(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(probs))});
-    dml::utils::DmlBindingArrayBundle outputs(
-        {dml::utils::DmlBufferBindingBundle(
-             dml::utils::ResourceFromStorageView(sorted_probs)),
-         dml::utils::DmlBufferBindingBundle(
-             dml::utils::ResourceFromStorageView(sorted_indices))});
-    op->Execute(inputs.get_descs(), outputs.get_descs());
+    dml::utils::DmlBindingArrayBundle inputs{
+        {dml::utils::ResourceFromStorageView(probs), 0, 0}};
+    dml::utils::DmlBindingArrayBundle outputs{
+        {dml::utils::ResourceFromStorageView(sorted_probs), 0, 0},
+        {dml::utils::ResourceFromStorageView(sorted_indices), 0, 0}};
+    op->Execute(inputs, outputs);
   }
 
   // Step 2: Cumulative sum
@@ -79,13 +75,11 @@ void TopPMask::compute(const StorageView& input,
     cumsum_op_desc.HasExclusiveSum = TRUE;
     auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_desc));
 
-    dml::utils::DmlBindingArrayBundle inputs(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(sorted_probs))});
-    dml::utils::DmlBindingArrayBundle outputs(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(cumsum))});
-    op->Execute(inputs.get_descs(), outputs.get_descs());
+    dml::utils::DmlBindingArrayBundle inputs{
+        {dml::utils::ResourceFromStorageView(sorted_probs), 0, 0}};
+    dml::utils::DmlBindingArrayBundle outputs{
+        {dml::utils::ResourceFromStorageView(cumsum), 0, 0}};
+    op->Execute(inputs, outputs);
   }
 
   // Step 3: Compare cumsum < p
@@ -102,15 +96,12 @@ void TopPMask::compute(const StorageView& input,
     op_payload.OutputTensor = &mask_desc.get_tensor_desc();
     auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_desc));
 
-    dml::utils::DmlBindingArrayBundle inputs(
-        {dml::utils::DmlBufferBindingBundle(
-             dml::utils::ResourceFromStorageView(cumsum)),
-         dml::utils::DmlBufferBindingBundle(
-             dml::utils::ResourceFromStorageView(threshold))});
-    dml::utils::DmlBindingArrayBundle outputs(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(mask))});
-    op->Execute(inputs.get_descs(), outputs.get_descs());
+    dml::utils::DmlBindingArrayBundle inputs{
+        {dml::utils::ResourceFromStorageView(cumsum), 0, 0},
+        {dml::utils::ResourceFromStorageView(threshold), 0, 0}};
+    dml::utils::DmlBindingArrayBundle outputs{
+        {dml::utils::ResourceFromStorageView(mask), 0, 0}};
+    op->Execute(inputs, outputs);
   }
 
   // Step 4: Gather original input values in sorted order
@@ -127,15 +118,12 @@ void TopPMask::compute(const StorageView& input,
     op_payload.Axis = 1;
     auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_desc));
 
-    dml::utils::DmlBindingArrayBundle inputs(
-        {dml::utils::DmlBufferBindingBundle(
-             dml::utils::ResourceFromStorageView(input)),
-         dml::utils::DmlBufferBindingBundle(
-             dml::utils::ResourceFromStorageView(sorted_indices))});
-    dml::utils::DmlBindingArrayBundle outputs(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(gathered_input))});
-    op->Execute(inputs.get_descs(), outputs.get_descs());
+    dml::utils::DmlBindingArrayBundle inputs{
+        {dml::utils::ResourceFromStorageView(input), 0, 0},
+        {dml::utils::ResourceFromStorageView(sorted_indices), 0, 0}};
+    dml::utils::DmlBindingArrayBundle outputs{
+        {dml::utils::ResourceFromStorageView(gathered_input), 0, 0}};
+    op->Execute(inputs, outputs);
   }
 
   // Step 5: Select between gathered input and mask value based on the top-p
@@ -155,17 +143,13 @@ void TopPMask::compute(const StorageView& input,
     op_payload.OutputTensor = &masked_gathered_desc.get_tensor_desc();
     auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_desc));
 
-    dml::utils::DmlBindingArrayBundle inputs(
-        {dml::utils::DmlBufferBindingBundle(
-             dml::utils::ResourceFromStorageView(mask)),
-         dml::utils::DmlBufferBindingBundle(
-             dml::utils::ResourceFromStorageView(gathered_input)),
-         dml::utils::DmlBufferBindingBundle(
-             dml::utils::ResourceFromStorageView(mask_value))});
-    dml::utils::DmlBindingArrayBundle outputs(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(masked_gathered))});
-    op->Execute(inputs.get_descs(), outputs.get_descs());
+    dml::utils::DmlBindingArrayBundle inputs{
+        {dml::utils::ResourceFromStorageView(mask), 0, 0},
+        {dml::utils::ResourceFromStorageView(gathered_input), 0, 0},
+        {dml::utils::ResourceFromStorageView(mask_value), 0, 0}};
+    dml::utils::DmlBindingArrayBundle outputs{
+        {dml::utils::ResourceFromStorageView(masked_gathered), 0, 0}};
+    op->Execute(inputs, outputs);
   }
 
   // Step 6: Scatter results back to original positions
@@ -184,17 +168,13 @@ void TopPMask::compute(const StorageView& input,
     op_payload.Axis = 1;
     auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_desc));
 
-    dml::utils::DmlBindingArrayBundle inputs(
-        {dml::utils::DmlBufferBindingBundle(
-             dml::utils::ResourceFromStorageView(output)),
-         dml::utils::DmlBufferBindingBundle(
-             dml::utils::ResourceFromStorageView(sorted_indices)),
-         dml::utils::DmlBufferBindingBundle(
-             dml::utils::ResourceFromStorageView(masked_gathered))});
-    dml::utils::DmlBindingArrayBundle outputs(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(output))});
-    op->Execute(inputs.get_descs(), outputs.get_descs());
+    dml::utils::DmlBindingArrayBundle inputs{
+        {dml::utils::ResourceFromStorageView(output), 0, 0},
+        {dml::utils::ResourceFromStorageView(sorted_indices), 0, 0},
+        {dml::utils::ResourceFromStorageView(masked_gathered), 0, 0}};
+    dml::utils::DmlBindingArrayBundle outputs{
+        {dml::utils::ResourceFromStorageView(output), 0, 0}};
+    op->Execute(inputs, outputs);
   }
 }
 

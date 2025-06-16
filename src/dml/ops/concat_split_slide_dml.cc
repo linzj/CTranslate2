@@ -57,12 +57,11 @@ void Concat::compute(const std::vector<const StorageView*>& inputs,
   dml::utils::DmlBindingArrayBundle input_bindings(
       std::move(input_binding_bundles));
 
-  // Create output binding using DmlBufferBindingBundle
-  dml::utils::DmlBufferBindingBundle output_binding(
-      dml::utils::ResourceFromStorageView(output), 0,
-      output.size() * output.item_size());
+  dml::utils::DmlBindingArrayBundle output_bindings{
+      {dml::utils::ResourceFromStorageView(output), 0,
+       output.size() * output.item_size()}};
 
-  compiled_op->Execute(input_bindings.get_descs(), {output_binding.get_desc()});
+  compiled_op->Execute(input_bindings, output_bindings);
 }
 
 template <Device D, typename T>
@@ -92,12 +91,10 @@ void Split::compute(const StorageView& input,
 
   auto compiled_op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
 
-  // Create input binding using DmlBufferBindingBundle
-  dml::utils::DmlBufferBindingBundle input_binding(
-      dml::utils::ResourceFromStorageView(input), 0,
-      input.size() * input.item_size());
+  dml::utils::DmlBindingArrayBundle input_bindings{
+      {dml::utils::ResourceFromStorageView(input), 0,
+       input.size() * input.item_size()}};
 
-  // Create output bindings using DmlBindingArrayBundle
   std::vector<dml::utils::DmlBufferBindingBundle> output_binding_bundles;
   output_binding_bundles.reserve(outputs.size());
   for (const auto* output_sv : outputs) {
@@ -108,7 +105,7 @@ void Split::compute(const StorageView& input,
   dml::utils::DmlBindingArrayBundle output_bindings(
       std::move(output_binding_bundles));
 
-  compiled_op->Execute({input_binding.get_desc()}, output_bindings.get_descs());
+  compiled_op->Execute(input_bindings, output_bindings);
 }
 
 template <Device D, typename T>
@@ -155,7 +152,7 @@ void Slide::compute(const StorageView& input,
           dml::utils::ResourceFromStorageView(output), 0,
           output.size() * output.item_size())});
 
-  compiled_op->Execute(input_bindings.get_descs(), output_bindings.get_descs());
+  compiled_op->Execute(input_bindings, output_bindings);
 }
 
 // Explicit template instantiations for DirectML

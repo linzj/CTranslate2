@@ -1,8 +1,6 @@
 #ifdef CT2_WITH_DIRECTML
 #include "ctranslate2/ops/awq/dequantize_awq.h"
 
-#include <array>
-#include "dml/backend_dml.h"
 #include "dml/dml_utils.h"
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
@@ -71,17 +69,14 @@ void DequantizeAwq::dequantize(const StorageView& input,
   auto* compiled_op =
       dml::GetOrCreateCompiledOperatorApi(std::move(op_desc_bundle));
 
-  dml::utils::DmlBindingArrayBundle inputs(
-      {dml::utils::DmlBufferBindingBundle(
-           dml::utils::ResourceFromStorageView(input)),
-       dml::utils::DmlBufferBindingBundle(
-           dml::utils::ResourceFromStorageView(scale)),
-       dml::utils::DmlBufferBindingBundle(
-           dml::utils::ResourceFromStorageView(zero))});
-  dml::utils::DmlBindingArrayBundle outputs({dml::utils::DmlBufferBindingBundle(
-      dml::utils::ResourceFromStorageView(output))});
+  dml::utils::DmlBindingArrayBundle inputs{
+      {dml::utils::ResourceFromStorageView(input), 0, 0},
+      {dml::utils::ResourceFromStorageView(scale), 0, 0},
+      {dml::utils::ResourceFromStorageView(zero), 0, 0}};
+  dml::utils::DmlBindingArrayBundle outputs{
+      {dml::utils::ResourceFromStorageView(output), 0, 0}};
 
-  compiled_op->Execute(inputs.get_descs(), outputs.get_descs());
+  compiled_op->Execute(inputs, outputs);
 }
 
 #define DECLARE_IMPL(T)                                              \

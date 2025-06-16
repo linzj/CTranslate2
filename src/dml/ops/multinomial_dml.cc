@@ -7,7 +7,6 @@
 #include "dml/dml_utils.h"  // Centralized DML utilities
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
-#include "type_dispatch.h"
 
 // Ensure THROW_INVALID_ARGUMENT is available (should be via dml_utils.h ->
 // utils.h)
@@ -57,14 +56,14 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
     dml::Operator* cast_op =
         dml::GetOrCreateCompiledOperatorApi(std::move(cast_op_bundle));
 
-    dml::utils::DmlBufferBindingBundle cast_input_b(
-        dml::utils::ResourceFromStorageView(probs_input), 0,
-        input_desc.get_buffer_desc().TotalTensorSizeInBytes);
-    dml::utils::DmlBufferBindingBundle cast_output_b(
-        dml::utils::ResourceFromStorageView(probs_f32_sv), 0,
-        output_desc.get_buffer_desc().TotalTensorSizeInBytes);
+    dml::utils::DmlBindingArrayBundle cast_inputs{
+        {dml::utils::ResourceFromStorageView(probs_input), 0,
+         input_desc.get_buffer_desc().TotalTensorSizeInBytes}};
+    dml::utils::DmlBindingArrayBundle cast_outputs{
+        {dml::utils::ResourceFromStorageView(probs_f32_sv), 0,
+         output_desc.get_buffer_desc().TotalTensorSizeInBytes}};
 
-    cast_op->Execute({cast_input_b.get_desc()}, {cast_output_b.get_desc()});
+    cast_op->Execute(cast_inputs, cast_outputs);
 
     current_probs_resource_ptr =
         dml::utils::ResourceFromStorageView(probs_f32_sv);
@@ -121,7 +120,9 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
     dml::utils::DmlBufferBindingBundle fill_out_b_storage(
         dml::utils::ResourceFromStorageView(state_in_sv));
     // Fill state_in_sv
-    fill_op->Execute({}, {fill_out_b_storage.get_desc()});
+    dml::utils::DmlBindingArrayBundle fill_outputs{
+        {dml::utils::ResourceFromStorageView(state_in_sv), 0, 0}};
+    fill_op->Execute({}, fill_outputs);
   }
   StorageView state_out_sv(philox_state_dims_shape_ct2,
                            DataType::INT32,  // Corresponds to UINT32 for size
@@ -197,16 +198,12 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
     dml::Operator* op =
         dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
 
-    dml::utils::DmlBindingArrayBundle inputs(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(state_in_sv))});
-    dml::utils::DmlBindingArrayBundle outputs({
-        dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(random_numbers_sv)),
-        dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(state_out_sv)),
-    });
-    op->Execute(inputs.get_descs(), outputs.get_descs());
+    dml::utils::DmlBindingArrayBundle inputs{
+        {dml::utils::ResourceFromStorageView(state_in_sv), 0, 0}};
+    dml::utils::DmlBindingArrayBundle outputs{
+        {dml::utils::ResourceFromStorageView(random_numbers_sv), 0, 0},
+        {dml::utils::ResourceFromStorageView(state_out_sv), 0, 0}};
+    op->Execute(inputs, outputs);
   }
 
   // Op 2: Cumulative Sum
@@ -228,11 +225,11 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
     dml::Operator* op =
         dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
 
-    dml::utils::DmlBufferBindingBundle input_binding(
-        current_probs_resource_ptr);
-    dml::utils::DmlBufferBindingBundle output_binding(
-        dml::utils::ResourceFromStorageView(cumsum_sv));
-    op->Execute({input_binding.get_desc()}, {output_binding.get_desc()});
+    dml::utils::DmlBindingArrayBundle input_binding{
+        {current_probs_resource_ptr, 0, 0}};
+    dml::utils::DmlBindingArrayBundle output_binding{
+        {dml::utils::ResourceFromStorageView(cumsum_sv), 0, 0}};
+    op->Execute(input_binding, output_binding);
   }
 
   // Op 3: Compare (CumulativeProbs >= RandomSample), output should be UINT8
@@ -256,16 +253,12 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
     dml::Operator* op =
         dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
 
-    dml::utils::DmlBindingArrayBundle inputs({
-        dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(cumsum_sv)),
-        dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(random_numbers_sv)),
-    });
-    dml::utils::DmlBindingArrayBundle outputs(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(compare_sv))});
-    op->Execute(inputs.get_descs(), outputs.get_descs());
+    dml::utils::DmlBindingArrayBundle inputs{
+        {dml::utils::ResourceFromStorageView(cumsum_sv), 0, 0},
+        {dml::utils::ResourceFromStorageView(random_numbers_sv), 0, 0}};
+    dml::utils::DmlBindingArrayBundle outputs{
+        {dml::utils::ResourceFromStorageView(compare_sv), 0, 0}};
+    op->Execute(inputs, outputs);
   }
 
   // Op 4a: Fill Iota Tensor
@@ -284,9 +277,9 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
 
     dml::Operator* op_seq =
         dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
-    dml::utils::DmlBufferBindingBundle iota_binding(
-        dml::utils::ResourceFromStorageView(iota_sv));
-    op_seq->Execute({}, {iota_binding.get_desc()});
+    dml::utils::DmlBindingArrayBundle iota_binding{
+        {dml::utils::ResourceFromStorageView(iota_sv), 0, 0}};
+    op_seq->Execute({}, iota_binding);
   }
 
   // Op 4b: Fill Max Value Scalar Tensor
@@ -304,9 +297,9 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
 
     dml::Operator* op_fill_max =
         dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
-    dml::utils::DmlBufferBindingBundle max_val_binding(
-        dml::utils::ResourceFromStorageView(max_val_sv));
-    op_fill_max->Execute({}, {max_val_binding.get_desc()});
+    dml::utils::DmlBindingArrayBundle max_val_binding{
+        {dml::utils::ResourceFromStorageView(max_val_sv), 0, 0}};
+    op_fill_max->Execute({}, max_val_binding);
   }
 
   // Op 5: Conditional Select
@@ -329,18 +322,13 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
     dml::Operator* op =
         dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
 
-    dml::utils::DmlBindingArrayBundle if_inputs({
-        dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(compare_sv)),
-        dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(iota_sv)),
-        dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(max_val_sv)),
-    });
-    dml::utils::DmlBindingArrayBundle if_outputs(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(argmin_input_sv))});
-    op->Execute(if_inputs.get_descs(), if_outputs.get_descs());
+    dml::utils::DmlBindingArrayBundle if_inputs{
+        {dml::utils::ResourceFromStorageView(compare_sv), 0, 0},
+        {dml::utils::ResourceFromStorageView(iota_sv), 0, 0},
+        {dml::utils::ResourceFromStorageView(max_val_sv), 0, 0}};
+    dml::utils::DmlBindingArrayBundle if_outputs{
+        {dml::utils::ResourceFromStorageView(argmin_input_sv), 0, 0}};
+    op->Execute(if_inputs, if_outputs);
   }
 
   // Op 6: ArgMin
@@ -376,12 +364,11 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
     dml::Operator* op =
         dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
 
-    dml::utils::DmlBufferBindingBundle argmin_input_binding(
-        dml::utils::ResourceFromStorageView(argmin_input_sv));
-    dml::utils::DmlBufferBindingBundle argmin_output_binding(
-        dml::utils::ResourceFromStorageView(dml_argmin_out_sv));
-    op->Execute({argmin_input_binding.get_desc()},
-                {argmin_output_binding.get_desc()});
+    dml::utils::DmlBindingArrayBundle argmin_input_binding{
+        {dml::utils::ResourceFromStorageView(argmin_input_sv), 0, 0}};
+    dml::utils::DmlBindingArrayBundle argmin_output_binding{
+        {dml::utils::ResourceFromStorageView(dml_argmin_out_sv), 0, 0}};
+    op->Execute(argmin_input_binding, argmin_output_binding);
   }
 
   // Op 7: Cast/Copy to final output_indices buffer
@@ -407,12 +394,11 @@ void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
   dml::Operator* cast_final_op =
       dml::GetOrCreateCompiledOperatorApi(std::move(final_cast_op_bundle));
 
-  dml::utils::DmlBufferBindingBundle cast_final_input_binding(
-      dml::utils::ResourceFromStorageView(dml_argmin_out_sv));
-  dml::utils::DmlBufferBindingBundle cast_final_output_binding(
-      dml::utils::ResourceFromStorageView(output_indices));
-  cast_final_op->Execute({cast_final_input_binding.get_desc()},
-                         {cast_final_output_binding.get_desc()});
+  dml::utils::DmlBindingArrayBundle cast_final_input_binding{
+      {dml::utils::ResourceFromStorageView(dml_argmin_out_sv), 0, 0}};
+  dml::utils::DmlBindingArrayBundle cast_final_output_binding{
+      {dml::utils::ResourceFromStorageView(output_indices), 0, 0}};
+  cast_final_op->Execute(cast_final_input_binding, cast_final_output_binding);
 
   output_indices.reshape(original_output_shape);
 }

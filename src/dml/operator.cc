@@ -225,8 +225,11 @@ Operator::Operator(Device* device,
 
 Operator::~Operator() = default;
 
-void Operator::Execute(std::vector<DML_BINDING_DESC> inputBindings,
-                       std::vector<DML_BINDING_DESC> outputBindings) {
+void Operator::Execute(const utils::DmlBindingArrayBundle& inputs,
+                       const utils::DmlBindingArrayBundle& outputs) {
+  auto inputBindings = inputs.get_descs();
+  auto outputBindings = outputs.get_descs();
+
   TraceExecute(GetType(), inputBindings, outputBindings);
   auto device = dml::get_device();
   DML_BINDING_DESC persistentBindingDesc{};
@@ -242,7 +245,7 @@ void Operator::Execute(const std::vector<ID3D12Resource*>& input_resources,
                        const std::vector<ID3D12Resource*>& output_resources) {
   dml::utils::DmlBindingArrayBundle inputs{input_resources};
   dml::utils::DmlBindingArrayBundle outputs{output_resources};
-  Execute(inputs.get_descs(), outputs.get_descs());
+  Execute(inputs, outputs);
 }
 }  // namespace dml
 }  // namespace ctranslate2

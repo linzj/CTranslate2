@@ -1,8 +1,8 @@
 #ifdef CT2_WITH_DIRECTML
 
 #include "ctranslate2/ops/gather.h"
-#include "dml/backend_dml.h"
-#include "dml/dml_utils.h"  // Centralized DML utilities
+
+#include "dml/dml_utils.h"
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
 #include "type_dispatch.h"
@@ -122,22 +122,15 @@ void Gather::compute(const StorageView& data,
       dml::GetOrCreateCompiledOperatorApi(std::move(op_desc_bundle));
 
   // Create and bind resources using dml::utils
-  dml::utils::DmlBufferBindingBundle data_buffer_binding_storage(
-      dml::utils::ResourceFromStorageView(data_for_dml), 0, data_tensor_size);
-  dml::utils::DmlBufferBindingBundle indices_buffer_binding_storage(
-      dml::utils::ResourceFromStorageView(indices_for_dml), 0,
-      indices_tensor_size);
+  dml::utils::DmlBindingArrayBundle input_bindings_for_op{
+      {dml::utils::ResourceFromStorageView(data_for_dml), 0, data_tensor_size},
+      {dml::utils::ResourceFromStorageView(indices_for_dml), 0,
+       indices_tensor_size}};
 
-  dml::utils::DmlBindingArrayBundle input_bindings_for_op(
-      {data_buffer_binding_storage, indices_buffer_binding_storage});
+  dml::utils::DmlBindingArrayBundle output_bindings_for_op{
+      {dml::utils::ResourceFromStorageView(output), 0, output_tensor_size}};
 
-  dml::utils::DmlBufferBindingBundle output_buffer_binding_storage(
-      dml::utils::ResourceFromStorageView(output), 0, output_tensor_size);
-  dml::utils::DmlBindingArrayBundle output_bindings_for_op(
-      {output_buffer_binding_storage});
-
-  compiled_operator->Execute(input_bindings_for_op.get_descs(),
-                             output_bindings_for_op.get_descs());
+  compiled_operator->Execute(input_bindings_for_op, output_bindings_for_op);
 }
 
 #define DECLARE_IMPL(T)                                                    \

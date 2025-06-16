@@ -1,8 +1,8 @@
 #ifdef CT2_WITH_DIRECTML
 #include "ctranslate2/ops/quantize.h"
-#include "dml/backend_dml.h"
+
 #include "dml/constant_pool.h"
-#include "dml/dml_utils.h"  // Added
+#include "dml/dml_utils.h"
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
 

@@ -1,5 +1,6 @@
 #ifdef CT2_WITH_DIRECTML
 #include "ctranslate2/ops/nccl_ops.h"
+
 #include "dml/dml_utils.h"
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
@@ -60,11 +61,11 @@ void perform_dml_reduce_operation(const StorageView& input_sv,
 
   auto* compiled_op = dml::GetOrCreateCompiledOperatorApi(std::move(op_desc));
 
-  dml::utils::DmlBindingArrayBundle inputs({dml::utils::DmlBufferBindingBundle(
-      dml::utils::ResourceFromStorageView(input_sv))});
-  dml::utils::DmlBindingArrayBundle outputs({dml::utils::DmlBufferBindingBundle(
-      dml::utils::ResourceFromStorageView(output_sv))});
-  compiled_op->Execute(inputs.get_descs(), outputs.get_descs());
+  dml::utils::DmlBindingArrayBundle inputs{
+      {dml::utils::ResourceFromStorageView(input_sv), 0, 0}};
+  dml::utils::DmlBindingArrayBundle outputs{
+      {dml::utils::ResourceFromStorageView(output_sv), 0, 0}};
+  compiled_op->Execute(inputs, outputs);
 }
 
 template <Device D, typename T>
@@ -91,10 +92,10 @@ void GatherAll::compute(const StorageView& input, StorageView& output) const {
 
   auto* compiled_op = dml::GetOrCreateCompiledOperatorApi(std::move(op_desc));
 
-  dml::utils::DmlBindingArrayBundle inputs({dml::utils::DmlBufferBindingBundle(
-      dml::utils::ResourceFromStorageView(input))});
-  dml::utils::DmlBindingArrayBundle outputs({dml::utils::DmlBufferBindingBundle(
-      dml::utils::ResourceFromStorageView(output))});
+  dml::utils::DmlBindingArrayBundle inputs{
+      {dml::utils::ResourceFromStorageView(input), 0, 0}};
+  dml::utils::DmlBindingArrayBundle outputs{
+      {dml::utils::ResourceFromStorageView(output), 0, 0}};
 
   auto* device = dml::get_device();
   auto binding_props = compiled_op->GetBindingProperties();

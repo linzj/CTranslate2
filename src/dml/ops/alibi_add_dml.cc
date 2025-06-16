@@ -2,8 +2,8 @@
 
 #ifdef CT2_WITH_DIRECTML
 #include "ctranslate2/utils.h"
-#include "dml/backend_dml.h"
-#include "dml/dml_utils.h"  // Added for centralized DML utilities
+
+#include "dml/dml_utils.h"
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
 
@@ -78,19 +78,15 @@ void AlibiAdd::compute(const StorageView& input,
 
   // Execute the operator
   // Execute the operator
-  dml::utils::DmlBindingArrayBundle input_bindings(
-      {dml::utils::DmlBufferBindingBundle(
-           dml::utils::ResourceFromStorageView(input)),
-       dml::utils::DmlBufferBindingBundle(
-           dml::utils::ResourceFromStorageView(alibi), alibi_byte_offset,
-           static_cast<UINT64>(key_length) * item_size)});
+  dml::utils::DmlBindingArrayBundle input_bindings{
+      {dml::utils::ResourceFromStorageView(input), 0, 0},
+      {dml::utils::ResourceFromStorageView(alibi), alibi_byte_offset,
+       static_cast<UINT64>(key_length) * item_size}};
 
-  dml::utils::DmlBindingArrayBundle output_bindings(
-      {dml::utils::DmlBufferBindingBundle(
-          dml::utils::ResourceFromStorageView(output))});
+  dml::utils::DmlBindingArrayBundle output_bindings{
+      {dml::utils::ResourceFromStorageView(output), 0, 0}};
 
-  add_operator->Execute(input_bindings.get_descs(),
-                        output_bindings.get_descs());
+  add_operator->Execute(input_bindings, output_bindings);
 }
 
 #define DECLARE_IMPL(T)                                 \

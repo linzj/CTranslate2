@@ -74,17 +74,13 @@ void Conv1D::compute(const StorageView& input,
       dml::Operator* dml_op =
           dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
 
-      dml::utils::DmlBindingArrayBundle inputs(
-          {dml::utils::DmlBufferBindingBundle(
-              dml::utils::ResourceFromStorageView(input))});
-      dml::utils::DmlBindingArrayBundle outputs(
-          {dml::utils::DmlBufferBindingBundle(
-               dml::utils::ResourceFromStorageView(input_q8)),
-           dml::utils::DmlBufferBindingBundle(
-               dml::utils::ResourceFromStorageView(input_scale)),
-           dml::utils::DmlBufferBindingBundle(
-               dml::utils::ResourceFromStorageView(input_zero_point))});
-      dml_op->Execute(inputs.get_descs(), outputs.get_descs());
+      dml::utils::DmlBindingArrayBundle inputs{
+          {dml::utils::ResourceFromStorageView(input), 0, 0}};
+      dml::utils::DmlBindingArrayBundle outputs{
+          {dml::utils::ResourceFromStorageView(input_q8), 0, 0},
+          {dml::utils::ResourceFromStorageView(input_scale), 0, 0},
+          {dml::utils::ResourceFromStorageView(input_zero_point), 0, 0}};
+      dml_op->Execute(inputs, outputs);
     }
 
     // 2. Integer Convolution
@@ -128,20 +124,14 @@ void Conv1D::compute(const StorageView& input,
 
       dml::Operator* dml_op =
           dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
-      dml::utils::DmlBindingArrayBundle inputs({
-          dml::utils::DmlBufferBindingBundle(
-              dml::utils::ResourceFromStorageView(input_q8)),
-          dml::utils::DmlBufferBindingBundle(
-              dml::utils::ResourceFromStorageView(input_zero_point)),
-          dml::utils::DmlBufferBindingBundle(
-              dml::utils::ResourceFromStorageView(weight)),
-          dml::utils::DmlBufferBindingBundle(
-              dml::utils::ResourceFromStorageView(weight_zero_point)),
-      });
-      dml::utils::DmlBindingArrayBundle outputs(  //
-          {dml::utils::DmlBufferBindingBundle(
-              dml::utils::ResourceFromStorageView(output_q32))});
-      dml_op->Execute(inputs.get_descs(), outputs.get_descs());
+      dml::utils::DmlBindingArrayBundle inputs{
+          {dml::utils::ResourceFromStorageView(input_q8), 0, 0},
+          {dml::utils::ResourceFromStorageView(input_zero_point), 0, 0},
+          {dml::utils::ResourceFromStorageView(weight), 0, 0},
+          {dml::utils::ResourceFromStorageView(weight_zero_point), 0, 0}};
+      dml::utils::DmlBindingArrayBundle outputs{
+          {dml::utils::ResourceFromStorageView(output_q32), 0, 0}};
+      dml_op->Execute(inputs, outputs);
     }
 
     // 3. Dequantize
@@ -167,13 +157,11 @@ void Conv1D::compute(const StorageView& input,
       dml::Operator* dml_op =
           dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
 
-      dml::utils::DmlBindingArrayBundle inputs(
-          {dml::utils::DmlBufferBindingBundle(
-              dml::utils::ResourceFromStorageView(output_q32))});
-      dml::utils::DmlBindingArrayBundle outputs(
-          {dml::utils::DmlBufferBindingBundle(
-              dml::utils::ResourceFromStorageView(tmp_float))});
-      dml_op->Execute(inputs.get_descs(), outputs.get_descs());
+      dml::utils::DmlBindingArrayBundle inputs{
+          {dml::utils::ResourceFromStorageView(output_q32), 0, 0}};
+      dml::utils::DmlBindingArrayBundle outputs{
+          {dml::utils::ResourceFromStorageView(tmp_float), 0, 0}};
+      dml_op->Execute(inputs, outputs);
     }
 
     // 3b. Multiply by input_scale
@@ -197,16 +185,12 @@ void Conv1D::compute(const StorageView& input,
       dml::Operator* dml_op =
           dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
 
-      dml::utils::DmlBindingArrayBundle inputs({
-          dml::utils::DmlBufferBindingBundle(
-              dml::utils::ResourceFromStorageView(tmp_float)),
-          dml::utils::DmlBufferBindingBundle(
-              dml::utils::ResourceFromStorageView(input_scale)),
-      });
-      dml::utils::DmlBindingArrayBundle outputs(
-          {dml::utils::DmlBufferBindingBundle(
-              dml::utils::ResourceFromStorageView(tmp_float2))});
-      dml_op->Execute(inputs.get_descs(), outputs.get_descs());
+      dml::utils::DmlBindingArrayBundle inputs{
+          {dml::utils::ResourceFromStorageView(tmp_float), 0, 0},
+          {dml::utils::ResourceFromStorageView(input_scale), 0, 0}};
+      dml::utils::DmlBindingArrayBundle outputs{
+          {dml::utils::ResourceFromStorageView(tmp_float2), 0, 0}};
+      dml_op->Execute(inputs, outputs);
     }
 
     // 3c. Multiply by weight_scale (*1/qscale) is DIVIDE
@@ -228,16 +212,12 @@ void Conv1D::compute(const StorageView& input,
       dml::Operator* dml_op =
           dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
 
-      dml::utils::DmlBindingArrayBundle inputs({
-          dml::utils::DmlBufferBindingBundle(
-              dml::utils::ResourceFromStorageView(tmp_float2)),
-          dml::utils::DmlBufferBindingBundle(
-              dml::utils::ResourceFromStorageView(*qscale)),
-      });
-      dml::utils::DmlBindingArrayBundle outputs(
-          {dml::utils::DmlBufferBindingBundle(
-              dml::utils::ResourceFromStorageView(final_float_output))});
-      dml_op->Execute(inputs.get_descs(), outputs.get_descs());
+      dml::utils::DmlBindingArrayBundle inputs{
+          {dml::utils::ResourceFromStorageView(tmp_float2), 0, 0},
+          {dml::utils::ResourceFromStorageView(*qscale), 0, 0}};
+      dml::utils::DmlBindingArrayBundle outputs{
+          {dml::utils::ResourceFromStorageView(final_float_output), 0, 0}};
+      dml_op->Execute(inputs, outputs);
     }
 
     // 4. Add bias
@@ -259,16 +239,12 @@ void Conv1D::compute(const StorageView& input,
       dml::Operator* dml_op =
           dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
 
-      dml::utils::DmlBindingArrayBundle inputs({
-          dml::utils::DmlBufferBindingBundle(
-              dml::utils::ResourceFromStorageView(final_float_output)),
-          dml::utils::DmlBufferBindingBundle(
-              dml::utils::ResourceFromStorageView(*bias)),
-      });
-      dml::utils::DmlBindingArrayBundle outputs(
-          {dml::utils::DmlBufferBindingBundle(
-              dml::utils::ResourceFromStorageView(output))});
-      dml_op->Execute(inputs.get_descs(), outputs.get_descs());
+      dml::utils::DmlBindingArrayBundle inputs{
+          {dml::utils::ResourceFromStorageView(final_float_output), 0, 0},
+          {dml::utils::ResourceFromStorageView(*bias), 0, 0}};
+      dml::utils::DmlBindingArrayBundle outputs{
+          {dml::utils::ResourceFromStorageView(output), 0, 0}};
+      dml_op->Execute(inputs, outputs);
     }
   } else {
     const DML_TENSOR_DATA_TYPE dml_data_type =
@@ -330,19 +306,19 @@ void Conv1D::compute(const StorageView& input,
 
     // 4. Prepare Bindings and Execute
     std::vector<dml::utils::DmlBufferBindingBundle> input_bundles;
-    input_bundles.emplace_back(dml::utils::ResourceFromStorageView(input));
-    input_bundles.emplace_back(dml::utils::ResourceFromStorageView(weight));
+    input_bundles.emplace_back(dml::utils::ResourceFromStorageView(input), 0,
+                               0);
+    input_bundles.emplace_back(dml::utils::ResourceFromStorageView(weight), 0,
+                               0);
     if (bias) {
-      input_bundles.emplace_back(dml::utils::ResourceFromStorageView(*bias));
+      input_bundles.emplace_back(dml::utils::ResourceFromStorageView(*bias), 0,
+                                 0);
     }
-
     dml::utils::DmlBindingArrayBundle input_bindings(std::move(input_bundles));
-    dml::utils::DmlBindingArrayBundle output_bindings(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(output))});
+    dml::utils::DmlBindingArrayBundle output_bindings{
+        {dml::utils::ResourceFromStorageView(output), 0, 0}};
 
-    dml_convolution_operator->Execute(input_bindings.get_descs(),
-                                      output_bindings.get_descs());
+    dml_convolution_operator->Execute(input_bindings, output_bindings);
   }
 }
 

@@ -1,9 +1,7 @@
 #ifdef CT2_WITH_DIRECTML
 #include "ctranslate2/ops/rotary.h"
 
-#include <memory>
 #include <vector>
-#include "dml/backend_dml.h"
 #include "dml/dml_utils.h"
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
@@ -27,15 +25,12 @@ class RotaryDMLCompute {
     op_desc.OutputTensor = &output_desc.get_tensor_desc();
     auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
 
-    dml::utils::DmlBindingArrayBundle inputs(
-        {dml::utils::DmlBufferBindingBundle(
-             dml::utils::ResourceFromStorageView(a)),
-         dml::utils::DmlBufferBindingBundle(
-             dml::utils::ResourceFromStorageView(b))});
-    dml::utils::DmlBindingArrayBundle outputs(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(output))});
-    op->Execute(inputs.get_descs(), outputs.get_descs());
+    dml::utils::DmlBindingArrayBundle inputs{
+        {dml::utils::ResourceFromStorageView(a), 0, 0},
+        {dml::utils::ResourceFromStorageView(b), 0, 0}};
+    dml::utils::DmlBindingArrayBundle outputs{
+        {dml::utils::ResourceFromStorageView(output), 0, 0}};
+    op->Execute(inputs, outputs);
   }
 
   void add_tensors(const StorageView& a,
@@ -54,15 +49,12 @@ class RotaryDMLCompute {
 
     auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
 
-    dml::utils::DmlBindingArrayBundle inputs(
-        {dml::utils::DmlBufferBindingBundle(
-             dml::utils::ResourceFromStorageView(a)),
-         dml::utils::DmlBufferBindingBundle(
-             dml::utils::ResourceFromStorageView(b))});
-    dml::utils::DmlBindingArrayBundle outputs(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(output))});
-    op->Execute(inputs.get_descs(), outputs.get_descs());
+    dml::utils::DmlBindingArrayBundle inputs{
+        {dml::utils::ResourceFromStorageView(a), 0, 0},
+        {dml::utils::ResourceFromStorageView(b), 0, 0}};
+    dml::utils::DmlBindingArrayBundle outputs{
+        {dml::utils::ResourceFromStorageView(output), 0, 0}};
+    op->Execute(inputs, outputs);
   }
 
   void negate_tensor(const StorageView& input, StorageView& output) {
@@ -77,13 +69,11 @@ class RotaryDMLCompute {
 
     auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
 
-    dml::utils::DmlBindingArrayBundle inputs(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(input))});
-    dml::utils::DmlBindingArrayBundle outputs(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(output))});
-    op->Execute(inputs.get_descs(), outputs.get_descs());
+    dml::utils::DmlBindingArrayBundle inputs{
+        {dml::utils::ResourceFromStorageView(input), 0, 0}};
+    dml::utils::DmlBindingArrayBundle outputs{
+        {dml::utils::ResourceFromStorageView(output), 0, 0}};
+    op->Execute(inputs, outputs);
   }
 
   void copy_tensor(const StorageView& input, StorageView& output) {
@@ -97,14 +87,12 @@ class RotaryDMLCompute {
     op_desc.ScaleBias = nullptr;
 
     auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
-    dml::utils::DmlBindingArrayBundle inputs(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(input))});
-    dml::utils::DmlBindingArrayBundle outputs(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(output), 0,
-            output.size() * output.item_size())});
-    op->Execute(inputs.get_descs(), outputs.get_descs());
+    dml::utils::DmlBindingArrayBundle inputs{
+        {dml::utils::ResourceFromStorageView(input), 0, 0}};
+    dml::utils::DmlBindingArrayBundle outputs{
+        {dml::utils::ResourceFromStorageView(output), 0,
+         output.size() * output.item_size()}};
+    op->Execute(inputs, outputs);
   }
 
   void slice_tensor_last_dim(const StorageView& input,
@@ -129,13 +117,11 @@ class RotaryDMLCompute {
     op_desc.Strides = strides.data();
 
     auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
-    dml::utils::DmlBindingArrayBundle inputs(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(input))});
-    dml::utils::DmlBindingArrayBundle outputs(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(output))});
-    op->Execute(inputs.get_descs(), outputs.get_descs());
+    dml::utils::DmlBindingArrayBundle inputs{
+        {dml::utils::ResourceFromStorageView(input), 0, 0}};
+    dml::utils::DmlBindingArrayBundle outputs{
+        {dml::utils::ResourceFromStorageView(output), 0, 0}};
+    op->Execute(inputs, outputs);
   }
 
  public:

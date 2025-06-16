@@ -1,7 +1,6 @@
 #ifdef CT2_WITH_DIRECTML
 #include "ctranslate2/ops/rms_norm.h"
 
-#include "dml/backend_dml.h"
 #include "dml/dml_utils.h"
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
@@ -37,15 +36,12 @@ void RMSNorm::compute(const StorageView& gamma,
     op_desc.BTensor = &input_desc.get_tensor_desc();
     op_desc.OutputTensor = &output_desc.get_tensor_desc();
     auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
-    dml::utils::DmlBindingArrayBundle mult_inputs(
-        {dml::utils::DmlBufferBindingBundle(
-             dml::utils::ResourceFromStorageView(input)),
-         dml::utils::DmlBufferBindingBundle(
-             dml::utils::ResourceFromStorageView(input))});
-    dml::utils::DmlBindingArrayBundle mult_outputs(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(input_squared))});
-    op->Execute(mult_inputs.get_descs(), mult_outputs.get_descs());
+    dml::utils::DmlBindingArrayBundle mult_inputs{
+        {{dml::utils::ResourceFromStorageView(input), 0, 0},
+         {dml::utils::ResourceFromStorageView(input), 0, 0}}};
+    dml::utils::DmlBindingArrayBundle mult_outputs{
+        {{dml::utils::ResourceFromStorageView(input_squared), 0, 0}}};
+    op->Execute(mult_inputs, mult_outputs);
   }
 
   // Step 2: Compute mean_squared = reduce_mean(input_squared, axis=1)
@@ -62,13 +58,11 @@ void RMSNorm::compute(const StorageView& gamma,
     op_desc.AxisCount = 1;
     op_desc.Axes = reduce_axes;
     auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
-    dml::utils::DmlBindingArrayBundle reduce_inputs(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(input_squared))});
-    dml::utils::DmlBindingArrayBundle reduce_outputs(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(mean_squared))});
-    op->Execute(reduce_inputs.get_descs(), reduce_outputs.get_descs());
+    dml::utils::DmlBindingArrayBundle reduce_inputs{
+        {dml::utils::ResourceFromStorageView(input_squared), 0, 0}};
+    dml::utils::DmlBindingArrayBundle reduce_outputs{
+        {dml::utils::ResourceFromStorageView(mean_squared), 0, 0}};
+    op->Execute(reduce_inputs, reduce_outputs);
   }
 
   // Step 3: Add epsilon
@@ -86,15 +80,12 @@ void RMSNorm::compute(const StorageView& gamma,
     op_desc.BTensor = &input_b_desc.get_tensor_desc();
     op_desc.OutputTensor = &output_desc.get_tensor_desc();
     auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
-    dml::utils::DmlBindingArrayBundle add_inputs(
-        {dml::utils::DmlBufferBindingBundle(
-             dml::utils::ResourceFromStorageView(mean_squared)),
-         dml::utils::DmlBufferBindingBundle(
-             dml::utils::ResourceFromStorageView(epsilon_sv))});
-    dml::utils::DmlBindingArrayBundle add_outputs(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(variance))});
-    op->Execute(add_inputs.get_descs(), add_outputs.get_descs());
+    dml::utils::DmlBindingArrayBundle add_inputs{
+        {dml::utils::ResourceFromStorageView(mean_squared), 0, 0},
+        {dml::utils::ResourceFromStorageView(epsilon_sv), 0, 0}};
+    dml::utils::DmlBindingArrayBundle add_outputs{
+        {dml::utils::ResourceFromStorageView(variance), 0, 0}};
+    op->Execute(add_inputs, add_outputs);
   }
 
   // Step 4: Compute inv_rms = 1/sqrt(variance)
@@ -109,10 +100,9 @@ void RMSNorm::compute(const StorageView& gamma,
     op_desc.InputTensor = &desc.get_tensor_desc();
     op_desc.OutputTensor = &desc.get_tensor_desc();
     auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
-    dml::utils::DmlBindingArrayBundle sqrt_bindings(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(inv_rms))});
-    op->Execute(sqrt_bindings.get_descs(), sqrt_bindings.get_descs());
+    dml::utils::DmlBindingArrayBundle sqrt_bindings{
+        {dml::utils::ResourceFromStorageView(inv_rms), 0, 0}};
+    op->Execute(sqrt_bindings, sqrt_bindings);
   }
   {
     dml::utils::DmlOperatorDescBundle op_bundle;
@@ -123,10 +113,9 @@ void RMSNorm::compute(const StorageView& gamma,
     op_desc.InputTensor = &desc.get_tensor_desc();
     op_desc.OutputTensor = &desc.get_tensor_desc();  // In-place
     auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
-    dml::utils::DmlBindingArrayBundle recip_bindings(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(inv_rms))});
-    op->Execute(recip_bindings.get_descs(), recip_bindings.get_descs());
+    dml::utils::DmlBindingArrayBundle recip_bindings{
+        {dml::utils::ResourceFromStorageView(inv_rms), 0, 0}};
+    op->Execute(recip_bindings, recip_bindings);
   }
 
   // Step 5: Normalize input = input * inv_rms
@@ -147,15 +136,12 @@ void RMSNorm::compute(const StorageView& gamma,
     op_desc.BTensor = &inv_rms_broadcast_desc.get_tensor_desc();
     op_desc.OutputTensor = &output_desc.get_tensor_desc();
     auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
-    dml::utils::DmlBindingArrayBundle norm_mult_inputs(
-        {dml::utils::DmlBufferBindingBundle(
-             dml::utils::ResourceFromStorageView(input)),
-         dml::utils::DmlBufferBindingBundle(
-             dml::utils::ResourceFromStorageView(inv_rms))});
-    dml::utils::DmlBindingArrayBundle norm_mult_outputs(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(normalized))});
-    op->Execute(norm_mult_inputs.get_descs(), norm_mult_outputs.get_descs());
+    dml::utils::DmlBindingArrayBundle norm_mult_inputs{
+        {dml::utils::ResourceFromStorageView(input), 0, 0},
+        {dml::utils::ResourceFromStorageView(inv_rms), 0, 0}};
+    dml::utils::DmlBindingArrayBundle norm_mult_outputs{
+        {dml::utils::ResourceFromStorageView(normalized), 0, 0}};
+    op->Execute(norm_mult_inputs, norm_mult_outputs);
   }
 
   // Step 6: Final scale: normalized * gamma or normalized * (1 + gamma)
@@ -178,15 +164,12 @@ void RMSNorm::compute(const StorageView& gamma,
     op_desc.BTensor = &ones_desc.get_tensor_desc();
     op_desc.OutputTensor = &output_desc.get_tensor_desc();
     auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
-    dml::utils::DmlBindingArrayBundle gamma_add_inputs(
-        {dml::utils::DmlBufferBindingBundle(
-             dml::utils::ResourceFromStorageView(gamma)),
-         dml::utils::DmlBufferBindingBundle(
-             dml::utils::ResourceFromStorageView(ones))});
-    dml::utils::DmlBindingArrayBundle gamma_add_outputs(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(gamma_plus_one))});
-    op->Execute(gamma_add_inputs.get_descs(), gamma_add_outputs.get_descs());
+    dml::utils::DmlBindingArrayBundle gamma_add_inputs{
+        {dml::utils::ResourceFromStorageView(gamma), 0, 0},
+        {dml::utils::ResourceFromStorageView(ones), 0, 0}};
+    dml::utils::DmlBindingArrayBundle gamma_add_outputs{
+        {dml::utils::ResourceFromStorageView(gamma_plus_one), 0, 0}};
+    op->Execute(gamma_add_inputs, gamma_add_outputs);
     gamma_final = &gamma_plus_one;
   }
   {
@@ -201,15 +184,12 @@ void RMSNorm::compute(const StorageView& gamma,
     op_desc.BTensor = &gamma_desc.get_tensor_desc();
     op_desc.OutputTensor = &out_desc.get_tensor_desc();
     auto* op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
-    dml::utils::DmlBindingArrayBundle final_mult_inputs(
-        {dml::utils::DmlBufferBindingBundle(
-             dml::utils::ResourceFromStorageView(normalized)),
-         dml::utils::DmlBufferBindingBundle(
-             dml::utils::ResourceFromStorageView(*gamma_final))});
-    dml::utils::DmlBindingArrayBundle final_mult_outputs(
-        {dml::utils::DmlBufferBindingBundle(
-            dml::utils::ResourceFromStorageView(output))});
-    op->Execute(final_mult_inputs.get_descs(), final_mult_outputs.get_descs());
+    dml::utils::DmlBindingArrayBundle final_mult_inputs{
+        {dml::utils::ResourceFromStorageView(normalized), 0, 0},
+        {dml::utils::ResourceFromStorageView(*gamma_final), 0, 0}};
+    dml::utils::DmlBindingArrayBundle final_mult_outputs{
+        {dml::utils::ResourceFromStorageView(output), 0, 0}};
+    op->Execute(final_mult_inputs, final_mult_outputs);
   }
 }
 

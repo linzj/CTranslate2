@@ -1,7 +1,6 @@
 #ifdef CT2_WITH_DIRECTML
 
 #include "ctranslate2/ops/awq/gemv.h"
-#include "dml/backend_dml.h"
 #include "dml/dml_utils.h"
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
@@ -47,12 +46,12 @@ void slice_tensor_k_dimension(const StorageView& input,
   slice_desc.Strides = strides.data();
 
   auto* compiled_op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
-  dml::utils::DmlBindingArrayBundle inputs({dml::utils::DmlBufferBindingBundle(
-      dml::utils::ResourceFromStorageView(input))});
-  dml::utils::DmlBindingArrayBundle outputs({dml::utils::DmlBufferBindingBundle(
-      dml::utils::ResourceFromStorageView(output), 0,
-      output.size() * output.item_size())});
-  compiled_op->Execute(inputs.get_descs(), outputs.get_descs());
+  dml::utils::DmlBindingArrayBundle inputs{
+      {dml::utils::ResourceFromStorageView(input), 0, 0}};
+  dml::utils::DmlBindingArrayBundle outputs{
+      {dml::utils::ResourceFromStorageView(output), 0,
+       output.size() * output.item_size()}};
+  compiled_op->Execute(inputs, outputs);
 }
 
 void perform_partial_gemv(const StorageView& a_slice,
@@ -77,14 +76,16 @@ void perform_partial_gemv(const StorageView& a_slice,
 
   auto* compiled_op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
 
-  dml::utils::DmlBindingArrayBundle inputs(
-      {dml::utils::DmlBufferBindingBundle(
-           dml::utils::ResourceFromStorageView(reshaped_a)),
-       dml::utils::DmlBufferBindingBundle(
-           dml::utils::ResourceFromStorageView(b_slice))});
-  dml::utils::DmlBindingArrayBundle outputs({dml::utils::DmlBufferBindingBundle(
-      dml::utils::ResourceFromStorageView(c_slice))});
-  compiled_op->Execute(inputs.get_descs(), outputs.get_descs());
+  dml::utils::DmlBindingArrayBundle inputs{
+      {
+          dml::utils::ResourceFromStorageView(reshaped_a),
+          0,
+          0,
+      },
+      {dml::utils::ResourceFromStorageView(b_slice), 0, 0}};
+  dml::utils::DmlBindingArrayBundle outputs{
+      {dml::utils::ResourceFromStorageView(c_slice), 0, 0}};
+  compiled_op->Execute(inputs, outputs);
 }
 
 void reduce_split_k_results(StorageView& c) {
@@ -109,11 +110,11 @@ void reduce_split_k_results(StorageView& c) {
   reduce_desc.Axes = reduce_axes;
   auto* compiled_op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
 
-  dml::utils::DmlBindingArrayBundle inputs({dml::utils::DmlBufferBindingBundle(
-      dml::utils::ResourceFromStorageView(c))});
-  dml::utils::DmlBindingArrayBundle outputs({dml::utils::DmlBufferBindingBundle(
-      dml::utils::ResourceFromStorageView(final_output))});
-  compiled_op->Execute(inputs.get_descs(), outputs.get_descs());
+  dml::utils::DmlBindingArrayBundle inputs{
+      {dml::utils::ResourceFromStorageView(c), 0, 0}};
+  dml::utils::DmlBindingArrayBundle outputs{
+      {dml::utils::ResourceFromStorageView(final_output), 0, 0}};
+  compiled_op->Execute(inputs, outputs);
 
   c = std::move(final_output);
 }
@@ -129,9 +130,10 @@ void zero_tensor_dml(StorageView& tensor) {
 
   auto* compiled_op = dml::GetOrCreateCompiledOperatorApi(std::move(op_bundle));
 
-  dml::utils::DmlBindingArrayBundle outputs({dml::utils::DmlBufferBindingBundle(
-      dml::utils::ResourceFromStorageView(tensor))});
-  compiled_op->Execute({}, outputs.get_descs());
+  dml::utils::DmlBindingArrayBundle outputs{
+      {dml::utils::ResourceFromStorageView(tensor), 0,
+       tensor.size() * tensor.item_size()}};
+  compiled_op->Execute({}, outputs);
 }
 
 }  // namespace

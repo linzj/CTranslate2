@@ -2,11 +2,10 @@
 
 #include "ctranslate2/ops/gumbel_max.h"
 
+#include <limits>
+
 #include "dml/backend_dml.h"
-// #include "dml/dxdevice.h" // dml::utils included via dml_utils.h, which
-// includes backend_dml.h
-#include <limits>           // For std::numeric_limits
-#include "dml/dml_utils.h"  // Added for centralized DML utilities
+#include "dml/dml_utils.h"
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
 
@@ -138,16 +137,12 @@ void GumbelMax::add_gumbel_noise(const StorageView& x, StorageView& y) const {
         current_x_tensor_desc_for_op_ptr;  // This is
                                            // x_fp32_desc_bundle_ptr->get_tensor_desc()
 
-    dml::utils::DmlBufferBindingBundle input_cast_binding(
-        dml::utils::ResourceFromStorageView(x), 0,
-        x_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes);
-    dml::utils::DmlBufferBindingBundle output_cast_binding(
-        current_x_resource_for_op_ptr, 0,
-        x_fp32_desc_bundle_ptr->get_buffer_desc().TotalTensorSizeInBytes);
-
     dml::GetOrCreateCompiledOperatorApi(std::move(cast_to_fp32_op))
-        ->Execute({input_cast_binding.get_desc()},
-                  {output_cast_binding.get_desc()});
+        ->Execute({{dml::utils::ResourceFromStorageView(x), 0,
+                    x_desc_bundle.get_buffer_desc().TotalTensorSizeInBytes}},
+                  {{current_x_resource_for_op_ptr, 0,
+                    x_fp32_desc_bundle_ptr->get_buffer_desc()
+                        .TotalTensorSizeInBytes}});
   }
 
   // Step 1.1: Generate Uniform UINT32 Random Numbers
@@ -185,19 +180,11 @@ void GumbelMax::add_gumbel_noise(const StorageView& x, StorageView& y) const {
   random_op_desc_payload.Type = DML_RANDOM_GENERATOR_TYPE_PHILOX_4X32_10;
 
   // Bind to two separate resources for input and output state
-  dml::utils::DmlBufferBindingBundle random_op_input_state_binding(
-      input_random_generator_state_resource->GetD3D12Resource());
-  dml::utils::DmlBufferBindingBundle random_op_output_val_binding(
-      uniform_uint32_resource->GetD3D12Resource());
-  dml::utils::DmlBufferBindingBundle random_op_output_state_binding(
-      output_random_generator_state_resource
-          ->GetD3D12Resource());  // State will be written here
-
-  std::vector<DML_BINDING_DESC> random_op_inputs = {
-      random_op_input_state_binding.get_desc()};
-  std::vector<DML_BINDING_DESC> random_op_outputs = {
-      random_op_output_val_binding.get_desc(),
-      random_op_output_state_binding.get_desc()};
+  dml::utils::DmlBindingArrayBundle random_op_inputs{
+      {input_random_generator_state_resource->GetD3D12Resource(), 0, 0}};
+  dml::utils::DmlBindingArrayBundle random_op_outputs{
+      {uniform_uint32_resource->GetD3D12Resource(), 0, 0},
+      {output_random_generator_state_resource->GetD3D12Resource(), 0, 0}};
   dml::GetOrCreateCompiledOperatorApi(std::move(random_op_bundle))
       ->Execute(random_op_inputs, random_op_outputs);
 
@@ -210,13 +197,12 @@ void GumbelMax::add_gumbel_noise(const StorageView& x, StorageView& y) const {
   cast_uint_to_fp32_desc.OutputTensor =
       &uniform_fp32_desc_bundle.get_tensor_desc();
 
-  dml::utils::DmlBufferBindingBundle cast_uint_input_binding(
-      uniform_uint32_resource->GetD3D12Resource());
-  dml::utils::DmlBufferBindingBundle cast_uint_output_binding(
-      uniform_fp32_resource->GetD3D12Resource());
+  dml::utils::DmlBindingArrayBundle cast_uint_inputs{
+      {uniform_uint32_resource->GetD3D12Resource(), 0, 0}};
+  dml::utils::DmlBindingArrayBundle cast_uint_outputs{
+      {uniform_fp32_resource->GetD3D12Resource(), 0, 0}};
   dml::GetOrCreateCompiledOperatorApi(std::move(cast_uint_op_bundle))
-      ->Execute({cast_uint_input_binding.get_desc()},
-                {cast_uint_output_binding.get_desc()});
+      ->Execute(cast_uint_inputs, cast_uint_outputs);
 
   // Step 1.3: Scale FLOAT32 random numbers to (0, 1]
   DML_SCALAR_UNION scale_val_scalar;
@@ -244,14 +230,12 @@ void GumbelMax::add_gumbel_noise(const StorageView& x, StorageView& y) const {
       eps_val_scalar.Float32 *
       scale_val_scalar.Float32;  // This is 'epsilon_const * scale_factor'
 
-  dml::utils::DmlBufferBindingBundle fused_linear_input_binding(
-      uniform_fp32_resource->GetD3D12Resource());
-  dml::utils::DmlBufferBindingBundle fused_linear_output_binding(
-      uniform_fp32_resource->GetD3D12Resource());
-
+  dml::utils::DmlBindingArrayBundle fused_linear_inputs{
+      {uniform_fp32_resource->GetD3D12Resource(), 0, 0}};
+  dml::utils::DmlBindingArrayBundle fused_linear_outputs{
+      {uniform_fp32_resource->GetD3D12Resource(), 0, 0}};
   dml::GetOrCreateCompiledOperatorApi(std::move(fused_linear_op_bundle))
-      ->Execute({fused_linear_input_binding.get_desc()},
-                {fused_linear_output_binding.get_desc()});
+      ->Execute(fused_linear_inputs, fused_linear_outputs);
 
   // Step 2: Compute Logarithm
   dml::utils::DmlOperatorDescBundle log_op_bundle;
@@ -260,13 +244,12 @@ void GumbelMax::add_gumbel_noise(const StorageView& x, StorageView& y) const {
   log_desc.InputTensor = &uniform_fp32_desc_bundle.get_tensor_desc();
   log_desc.OutputTensor = &log_uniform_fp32_desc_bundle.get_tensor_desc();
 
-  dml::utils::DmlBufferBindingBundle log_op_input_binding(
-      uniform_fp32_resource->GetD3D12Resource());
-  dml::utils::DmlBufferBindingBundle log_op_output_binding(
-      log_uniform_fp32_resource->GetD3D12Resource());
+  dml::utils::DmlBindingArrayBundle log_op_inputs{
+      {uniform_fp32_resource->GetD3D12Resource(), 0, 0}};
+  dml::utils::DmlBindingArrayBundle log_op_outputs{
+      {log_uniform_fp32_resource->GetD3D12Resource(), 0, 0}};
   dml::GetOrCreateCompiledOperatorApi(std::move(log_op_bundle))
-      ->Execute({log_op_input_binding.get_desc()},
-                {log_op_output_binding.get_desc()});
+      ->Execute(log_op_inputs, log_op_outputs);
 
   // Step 3: Negate
 #if DML_TARGET_VERSION >= 0x5000 && !defined(CT2_DML_USE_MULTIPLY_FOR_NEGATE)
@@ -278,13 +261,12 @@ void GumbelMax::add_gumbel_noise(const StorageView& x, StorageView& y) const {
   negate_desc_payload.OutputTensor =
       &gumbel_noise_fp32_desc_bundle.get_tensor_desc();
 
-  dml::utils::DmlBufferBindingBundle negate_op_input_binding(
-      log_uniform_fp32_resource->GetD3D12Resource());
-  dml::utils::DmlBufferBindingBundle negate_op_output_binding(
-      gumbel_noise_fp32_resource->GetD3D12Resource());
+  dml::utils::DmlBindingArrayBundle negate_op_inputs{
+      {log_uniform_fp32_resource->GetD3D12Resource(), 0, 0}};
+  dml::utils::DmlBindingArrayBundle negate_op_outputs{
+      {gumbel_noise_fp32_resource->GetD3D12Resource(), 0, 0}};
   dml::GetOrCreateCompiledOperatorApi(std::move(negate_op_bundle))
-      ->Execute({negate_op_input_binding.get_desc()},
-                {negate_op_output_binding.get_desc()});
+      ->Execute(negate_op_inputs, negate_op_outputs);
 #else  // Fallback: Multiply by -1
   DML_SCALAR_UNION m1_val_scalar;
   m1_val_scalar.Float32 = -1.0f;
@@ -300,14 +282,12 @@ void GumbelMax::add_gumbel_noise(const StorageView& x, StorageView& y) const {
   negate_op_payload.Alpha = m1_val_scalar.Float32;  // -1.0f
   negate_op_payload.Beta = 0.0f;
 
-  dml::utils::DmlBufferBindingBundle neg_fallback_input_binding(
-      log_uniform_fp32_resource.Get());
-  dml::utils::DmlBufferBindingBundle neg_fallback_output_binding(
-      gumbel_noise_fp32_resource.Get());
-
+  dml::utils::DmlBindingArrayBundle neg_fallback_inputs{
+      {log_uniform_fp32_resource.Get(), 0, 0}};
+  dml::utils::DmlBindingArrayBundle neg_fallback_outputs{
+      {gumbel_noise_fp32_resource.Get(), 0, 0}};
   dml::GetOrCreateCompiledOperatorApi(std::move(negate_op_bundle))
-      ->Execute({neg_fallback_input_binding.get_desc()},
-                {neg_fallback_output_binding.get_desc()});
+      ->Execute(neg_fallback_inputs, neg_fallback_outputs);
 #endif
 
   // Step 4: Add Gumbel noise to input x
@@ -318,17 +298,11 @@ void GumbelMax::add_gumbel_noise(const StorageView& x, StorageView& y) const {
   add_noise_desc.BTensor = &gumbel_noise_fp32_desc_bundle.get_tensor_desc();
   add_noise_desc.OutputTensor = target_sum_tensor_desc_for_op_ptr;
 
-  dml::utils::DmlBufferBindingBundle add_noise_A_binding(
-      current_x_resource_for_op_ptr);
-  dml::utils::DmlBufferBindingBundle add_noise_B_binding(
-      gumbel_noise_fp32_resource->GetD3D12Resource());
-  dml::utils::DmlBufferBindingBundle add_noise_Out_binding(
-      target_sum_resource_for_op_ptr);
-
-  std::vector<DML_BINDING_DESC> add_noise_inputs = {
-      add_noise_A_binding.get_desc(), add_noise_B_binding.get_desc()};
-  std::vector<DML_BINDING_DESC> add_noise_outputs = {
-      add_noise_Out_binding.get_desc()};
+  dml::utils::DmlBindingArrayBundle add_noise_inputs = {
+      {current_x_resource_for_op_ptr, 0, 0},
+      {gumbel_noise_fp32_resource->GetD3D12Resource(), 0, 0}};
+  dml::utils::DmlBindingArrayBundle add_noise_outputs = {
+      {target_sum_resource_for_op_ptr, 0, 0}};
   dml::GetOrCreateCompiledOperatorApi(std::move(add_noise_op_bundle))
       ->Execute(add_noise_inputs, add_noise_outputs);
 
@@ -342,13 +316,12 @@ void GumbelMax::add_gumbel_noise(const StorageView& x, StorageView& y) const {
     cast_back_desc.OutputTensor =
         &y_desc_bundle.get_tensor_desc();  // Target y tensor (original type)
 
-    dml::utils::DmlBufferBindingBundle cast_back_input_binding(
-        target_sum_resource_for_op_ptr);
-    dml::utils::DmlBufferBindingBundle cast_back_output_binding(
-        dml::utils::ResourceFromStorageView(y));
+    dml::utils::DmlBindingArrayBundle cast_back_inputs{
+        {target_sum_resource_for_op_ptr, 0, 0}};
+    dml::utils::DmlBindingArrayBundle cast_back_outputs{
+        {dml::utils::ResourceFromStorageView(y), 0, 0}};
     dml::GetOrCreateCompiledOperatorApi(std::move(cast_back_op))
-        ->Execute({cast_back_input_binding.get_desc()},
-                  {cast_back_output_binding.get_desc()});
+        ->Execute(cast_back_inputs, cast_back_outputs);
   }
 }
 

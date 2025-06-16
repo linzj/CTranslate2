@@ -1,7 +1,6 @@
 #pragma once
 #include <vector>
 #include "dml_utils.h"
-#include "dxmodule.h"
 
 #include <wrl/implements.h>
 
@@ -20,8 +19,8 @@ class Operator
                     ComPtr<IDMLCompiledOperator>&& compiled_operator);
   ~Operator();
 
-  void Execute(std::vector<DML_BINDING_DESC> inputBindings,
-               std::vector<DML_BINDING_DESC> outputBindings);
+  void Execute(const utils::DmlBindingArrayBundle& inputs,
+               const utils::DmlBindingArrayBundle& outputs);
 
   void Execute(const std::vector<ID3D12Resource*>& input_resources,
                const std::vector<ID3D12Resource*>& output_resources);

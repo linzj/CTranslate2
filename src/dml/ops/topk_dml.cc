@@ -3,7 +3,6 @@
 #ifdef CT2_WITH_DIRECTML
 
 #include "dml/dml_utils.h"
-#include "dml/dxdevice.h"
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
 
@@ -71,17 +70,14 @@ void TopK::compute(const StorageView& x,
       std::move(op_desc_bundle), DML_EXECUTION_FLAG_NONE);
 
   // Bindings
-  dml::utils::DmlBindingArrayBundle input_bindings(
-      {dml::utils::DmlBufferBindingBundle(
-          dml::utils::ResourceFromStorageView(x))});
+  dml::utils::DmlBindingArrayBundle input_bindings{
+      {dml::utils::ResourceFromStorageView(x), 0, 0}};
 
-  dml::utils::DmlBindingArrayBundle output_bindings(
-      {dml::utils::DmlBufferBindingBundle(
-           dml::utils::ResourceFromStorageView(values)),
-       dml::utils::DmlBufferBindingBundle(
-           dml::utils::ResourceFromStorageView(indices))});
+  dml::utils::DmlBindingArrayBundle output_bindings{
+      {dml::utils::ResourceFromStorageView(values), 0, 0},
+      {dml::utils::ResourceFromStorageView(indices), 0, 0}};
 
-  compiled_op->Execute(input_bindings.get_descs(), output_bindings.get_descs());
+  compiled_op->Execute(input_bindings, output_bindings);
 }
 
 #define DECLARE_IMPL_DML_TOPK(DataType, IndexType)                    \

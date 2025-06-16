@@ -1,13 +1,10 @@
 #ifdef CT2_WITH_DIRECTML
 
 #include "ctranslate2/ops/dequantize.h"
-#include "dml/backend_dml.h"
-#include "dml/common.h"
+
 #include "dml/dml_utils.h"
 #include "dml/operator.h"
 #include "dml/operator_cache.h"
-
-#include <variant>
 
 namespace ctranslate2 {
 namespace ops {
@@ -37,16 +34,15 @@ void Dequantize::dequantize<Device::DirectML, int8_t, float>(
   auto recip_compiled_op =
       dml::GetOrCreateCompiledOperatorApi(std::move(recip_op_bundle));
 
-  dml::utils::DmlBufferBindingBundle scale_binding(
-      dml::utils::ResourceFromStorageView(scale), 0,
-      scale.size() * sizeof(float));
+  dml::utils::DmlBindingArrayBundle inputs_for_recip_op{
+      {dml::utils::ResourceFromStorageView(scale), 0,
+       scale.size() * sizeof(float)}};
 
-  dml::utils::DmlBufferBindingBundle recip_output_binding(
-      dml::utils::ResourceFromStorageView(reciprocal_scale), 0,
-      reciprocal_scale.size() * sizeof(float));
+  dml::utils::DmlBindingArrayBundle outputs_for_recip_op{
+      {dml::utils::ResourceFromStorageView(reciprocal_scale), 0,
+       reciprocal_scale.size() * sizeof(float)}};
 
-  recip_compiled_op->Execute({scale_binding.get_desc()},
-                             {recip_output_binding.get_desc()});
+  recip_compiled_op->Execute(inputs_for_recip_op, outputs_for_recip_op);
 
   // Step 2: Dequantize using DML_ELEMENT_WISE_DEQUANTIZE_LINEAR.
   // This operation implicitly handles the int8 -> float32 cast and multiplies
@@ -79,22 +75,20 @@ void Dequantize::dequantize<Device::DirectML, int8_t, float>(
   auto dequantize_compiled_op =
       dml::GetOrCreateCompiledOperatorApi(std::move(dequantize_op_bundle));
 
-  dml::utils::DmlBufferBindingBundle dequant_input_binding(
-      dml::utils::ResourceFromStorageView(input), 0,
-      input.size() * sizeof(int8_t));
-  dml::utils::DmlBufferBindingBundle dequant_scale_binding(
-      dml::utils::ResourceFromStorageView(reciprocal_scale), 0,
-      reciprocal_scale.size() * sizeof(float));
+  dml::utils::DmlBindingArrayBundle dequant_inputs{
+      {dml::utils::ResourceFromStorageView(input), 0,
+       input.size() * sizeof(int8_t)},
+      {dml::utils::ResourceFromStorageView(reciprocal_scale), 0,
+       reciprocal_scale.size() * sizeof(float)},
+      {static_cast<ID3D12Resource*>(nullptr), 0, 0}
+      // explicit nullptr for ZeroPointTensor
+  };
 
-  dml::utils::DmlBindingArrayBundle dequant_input_bindings(
-      {dequant_input_binding, dequant_scale_binding, nullptr});
+  dml::utils::DmlBindingArrayBundle dequant_outputs{
+      {dml::utils::ResourceFromStorageView(output), 0,
+       output.size() * sizeof(float)}};
 
-  dml::utils::DmlBufferBindingBundle dequant_output_binding(
-      dml::utils::ResourceFromStorageView(output), 0,
-      output.size() * sizeof(float));
-
-  dequantize_compiled_op->Execute(dequant_input_bindings.get_descs(),
-                                  {dequant_output_binding.get_desc()});
+  dequantize_compiled_op->Execute(dequant_inputs, dequant_outputs);
 }  // namespace ops
 
 template <>
@@ -245,55 +239,51 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
   }
 
   // --- Execution ---
-  dml::utils::DmlBufferBindingBundle a_scale_binding(
-      dml::utils::ResourceFromStorageView(a_scale));
-  dml::utils::DmlBufferBindingBundle b_scale_binding(
-      dml::utils::ResourceFromStorageView(b_scale));
-  dml::utils::DmlBufferBindingBundle combined_scale_binding(
-      dml::utils::ResourceFromStorageView(combined_scale));
-  scale_mult_op->Execute(
-      {a_scale_binding.get_desc(), b_scale_binding.get_desc()},
-      {combined_scale_binding.get_desc()});
+  dml::utils::DmlBindingArrayBundle scale_mult_inputs{
+      {dml::utils::ResourceFromStorageView(a_scale), 0, 0},
+      {dml::utils::ResourceFromStorageView(b_scale), 0, 0}};
+  dml::utils::DmlBindingArrayBundle scale_mult_outputs{
+      {dml::utils::ResourceFromStorageView(combined_scale), 0, 0}};
+  scale_mult_op->Execute(scale_mult_inputs, scale_mult_outputs);
 
-  dml::utils::DmlBufferBindingBundle reciprocal_scale_binding(
-      dml::utils::ResourceFromStorageView(reciprocal_scale));
-  recip_op->Execute({combined_scale_binding.get_desc()},
-                    {reciprocal_scale_binding.get_desc()});
+  dml::utils::DmlBindingArrayBundle recip_inputs{
+      {dml::utils::ResourceFromStorageView(combined_scale), 0, 0}};
+  dml::utils::DmlBindingArrayBundle recip_outputs{
+      {dml::utils::ResourceFromStorageView(reciprocal_scale), 0, 0}};
+  recip_op->Execute(recip_inputs, recip_outputs);
 
   ID3D12Resource* dequantize_output_resource =
       (bias || _activation_type)
           ? dml::utils::ResourceFromStorageView(dequantize_output_buffer)
           : dml::utils::ResourceFromStorageView(y);
-  dml::utils::DmlBufferBindingBundle c_binding(
-      dml::utils::ResourceFromStorageView(c));
-  dml::utils::DmlBufferBindingBundle dequant_out_binding(
-      dequantize_output_resource);
-  dequantize_op->Execute(dml::utils::DmlBindingArrayBundle(
-                             {c_binding, reciprocal_scale_binding, nullptr})
-                             .get_descs(),
-                         {dequant_out_binding.get_desc()});
+  dml::utils::DmlBindingArrayBundle dequantize_inputs_combined{
+      {dml::utils::ResourceFromStorageView(c), 0, 0},
+      {dml::utils::ResourceFromStorageView(reciprocal_scale), 0, 0},
+      {static_cast<ID3D12Resource*>(nullptr), 0, 0}};  // ZeroPointTensor
+  dml::utils::DmlBindingArrayBundle dequantize_outputs_combined{
+      {dequantize_output_resource, 0, 0}};
+  dequantize_op->Execute(dequantize_inputs_combined,
+                         dequantize_outputs_combined);
 
   ID3D12Resource* current_buffer_resource = dequantize_output_resource;
 
   if (bias_add_op) {
-    dml::utils::DmlBufferBindingBundle bias_binding(
-        dml::utils::ResourceFromStorageView(*bias));
-    dml::utils::DmlBufferBindingBundle bias_add_out_binding(
-        dml::utils::ResourceFromStorageView(bias_add_output_buffer));
-    bias_add_op->Execute(
-        {dequant_out_binding.get_desc(), bias_binding.get_desc()},
-        {bias_add_out_binding.get_desc()});
+    dml::utils::DmlBindingArrayBundle bias_add_inputs{
+        {dequantize_output_resource, 0, 0},
+        {dml::utils::ResourceFromStorageView(*bias), 0, 0}};
+    dml::utils::DmlBindingArrayBundle bias_add_outputs{
+        {dml::utils::ResourceFromStorageView(bias_add_output_buffer), 0, 0}};
+    bias_add_op->Execute(bias_add_inputs, bias_add_outputs);
     current_buffer_resource =
         dml::utils::ResourceFromStorageView(bias_add_output_buffer);
   }
 
   if (activation_op) {
-    dml::utils::DmlBufferBindingBundle activation_input_binding(
-        current_buffer_resource);
-    dml::utils::DmlBufferBindingBundle y_binding(
-        dml::utils::ResourceFromStorageView(y));
-    activation_op->Execute({activation_input_binding.get_desc()},
-                           {y_binding.get_desc()});
+    dml::utils::DmlBindingArrayBundle activation_inputs{
+        {current_buffer_resource, 0, 0}};
+    dml::utils::DmlBindingArrayBundle activation_outputs{
+        {dml::utils::ResourceFromStorageView(y), 0, 0}};
+    activation_op->Execute(activation_inputs, activation_outputs);
   } else if (current_buffer_resource !=
              dml::utils::ResourceFromStorageView(y)) {
     throw std::invalid_argument(
