@@ -40,20 +40,6 @@ class DMLOperatorCache {
   DMLOperatorCache(const DMLOperatorCache&) = delete;
   DMLOperatorCache& operator=(const DMLOperatorCache&) = delete;
 
-  // Generates a unique string key based on the operator description and flags.
-  std::string GenerateCacheKey(const DML_OPERATOR_DESC* op_desc,
-                               DML_EXECUTION_FLAGS flags);
-
-  void GenerateCacheKeyForDesc(std::ostringstream& key_stream,
-                               const DML_OPERATOR_DESC* op_desc);
-
-  // Helper to serialize DML_TENSOR_DESC into the key stream.
-  void SerializeTensorDesc(std::ostringstream& key_stream,
-                           const DML_TENSOR_DESC* tensor_desc);
-  // Helper to serialize DML_BUFFER_TENSOR_DESC into the key stream.
-  void SerializeBufferTensorDesc(std::ostringstream& key_stream,
-                                 const DML_BUFFER_TENSOR_DESC* buffer_desc);
-
   std::unordered_map<std::string, Microsoft::WRL::ComPtr<Operator>> _cache;
   std::mutex _mutex;      // Mutex to protect cache access.
   class Device* _device;  // The DML device used for operator creation.

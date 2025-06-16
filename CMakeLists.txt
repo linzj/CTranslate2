@@ -256,6 +256,8 @@ if(WITH_DIRECTML)
     src/dml/graph_recorder.cc
     src/dml/operator.cc
     src/dml/operator.h
+    src/dml/operator_utils.cc
+    src/dml/operator_utils.h
     src/dml/primitives_dml.cc
     src/dml/dml_utils.cc
     src/dml/dml_utils.h
