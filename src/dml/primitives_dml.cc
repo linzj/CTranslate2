@@ -268,48 +268,28 @@ void primitives<Device::DirectML>::copy(const T* x, T* y, dim_t size) {
   if (size == 0) {
     return;
   }
-  auto dxdevice = dml::get_device();
-  // This call is expected to provide a command list that is ready for
-  // recording. It will be closed and executed by
-  // dxdevice->ExecuteCommandList().
-  auto command_list = dxdevice->GetCommandList();
+  // Create operator to copy data using DML_ELEMENT_WISE_IDENTITY
+  ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
+  std::vector<UINT> input_copy_dims = {1, 1, 1, static_cast<UINT>(size)};
+  auto& input_copy_bundle =
+      op_bundle.AddInput(dml::get_dml_data_type<T>(), input_copy_dims, nullptr);
 
-  ID3D12Resource* src_resource = dml::utils::ResourceFromRawBuffer(x);
-  ID3D12Resource* dst_resource = dml::utils::ResourceFromRawBuffer(y);
+  std::vector<UINT> output_copy_dims = {1, 1, 1, static_cast<UINT>(size)};
+  auto& output_copy_bundle = op_bundle.AddOutput(dml::get_dml_data_type<T>(),
+                                                 output_copy_dims, nullptr);
 
-  D3D12_RESOURCE_BARRIER barriers[2];
+  auto& identity_desc =
+      op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC>();
+  identity_desc.InputTensor = &input_copy_bundle.get_tensor_desc();
+  identity_desc.OutputTensor = &output_copy_bundle.get_tensor_desc();
 
-  // Transition source resource from UNORDERED_ACCESS to COPY_SOURCE
-  barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-  barriers[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-  barriers[0].Transition.pResource = src_resource;
-  barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-  barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-  barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
+      std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
-  // Transition destination resource from UNORDERED_ACCESS to COPY_DEST
-  barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-  barriers[1].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-  barriers[1].Transition.pResource = dst_resource;
-  barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-  barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-  barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-
-  command_list->ResourceBarrier(2, barriers);
-
-  // Perform the copy
-  command_list->CopyBufferRegion(dst_resource, 0, src_resource, 0,
-                                 static_cast<UINT64>(size) * sizeof(T));
-
-  // Transition source resource back to UNORDERED_ACCESS
-  barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-  barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-
-  // Transition destination resource back to UNORDERED_ACCESS
-  barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-  barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-
-  command_list->ResourceBarrier(2, barriers);
+  // Execute the operator
+  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
+  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
+  compiled_op->Execute(inputs, outputs);
 }
 
 template <>

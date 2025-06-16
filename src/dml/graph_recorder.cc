@@ -11,12 +11,6 @@ GraphRecorder::GraphRecorder()
 GraphRecorder::~GraphRecorder() = default;
 
 void GraphRecorder::Begin() {
-  // Clear all existing states
-  m_all_binding_nodes.clear();
-  m_binding_lookup.clear();
-  m_operator_nodes.clear();
-  m_graph_inputs.clear();
-  m_graph_outputs.clear();
   m_has_begun = true;  // Mark that Begin has been called
 }
 
@@ -130,11 +124,12 @@ void GraphRecorder::End() {
 
 // After execution, you might want to log or return something,
 // e.g., the graph inputs and outputs.
-#if 1
+#if 0
   std::cout << "Graph execution finished." << std::endl;
   std::cout << "Graph Inputs: " << m_graph_inputs.size() << std::endl;
   std::cout << "Graph Outputs: " << m_graph_outputs.size() << std::endl;
 #endif
+  Reset();
 }
 
 BindingNode* GraphRecorder::GetOrCreateBindingNode(ID3D12Resource* resource,
@@ -162,6 +157,15 @@ BindingNode* GraphRecorder::GetOrCreateBindingNode(ID3D12Resource* resource,
   created = true;                   // Node was created
 
   return raw_ptr;
+}
+
+void GraphRecorder::Reset() {
+  // Clear all existing states
+  m_all_binding_nodes.clear();
+  m_binding_lookup.clear();
+  m_operator_nodes.clear();
+  m_graph_inputs.clear();
+  m_graph_outputs.clear();
 }
 
 }  // namespace dml

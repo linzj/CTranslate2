@@ -55,6 +55,7 @@ class GraphRecorder {
   bool has_begun() const { return m_has_begun; }
 
  private:
+  void Reset();
   // Storage for all unique BindingNodes in the graph. Using unique_ptr for
   // ownership.
   std::vector<std::unique_ptr<BindingNode>> m_all_binding_nodes;
