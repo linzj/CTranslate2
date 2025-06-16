@@ -32,6 +32,7 @@ class DescriptorPool;
 class BucketizedBufferAllocator;
 class DMLOperatorCache;
 class ConstantPool;
+class GraphRecorder;
 
 template <typename T>
 struct ComPtrHasher {
@@ -209,6 +210,10 @@ class Device {
   DMLOperatorCache* GetOperatorCache() { return m_operatorCache.get(); }
   ConstantPool* GetConstantPool() { return m_constantPool.get(); }
 
+  void BeginGraphRecording();
+  void EndGraphRecording();
+  GraphRecorder* GetGraphRecorder() { return m_graphRecorder.get(); }
+
  private:
   void EnsureDxcInterfaces();
   void SetDescriptorHeap(ID3D12DescriptorHeap* descriptorHeap);
@@ -248,8 +253,12 @@ class Device {
   std::unique_ptr<DescriptorPool> m_descriptorPool;
   std::unique_ptr<BucketizedBufferAllocator> m_allocator;
   std::unique_ptr<BucketizedBufferAllocator> m_uploadAllocator;
+  // Must split temporary allocator from the main allocator to avoid
+  // overlapping allocations that can cause issues with DML operators.
+  std::unique_ptr<BucketizedBufferAllocator> m_temporaryAllocator;
   std::unique_ptr<DMLOperatorCache> m_operatorCache;
   std::unique_ptr<ConstantPool> m_constantPool;
+  std::unique_ptr<GraphRecorder> m_graphRecorder;
 
   DWORD m_callbackCookie = 0;
   int m_recordCommands = 0;

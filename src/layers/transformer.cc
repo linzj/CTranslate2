@@ -2,6 +2,10 @@
 
 #include <cmath>
 
+#if defined(CT2_WITH_DIRECTML)
+#include "dml/backend_dml.h"
+#endif
+
 namespace ctranslate2 {
   namespace layers {
 
@@ -149,6 +153,9 @@ namespace ctranslate2 {
                                              StorageView* position_bias,
                                              dim_t offset) const {
       PROFILE("TransformerDecoderLayer");
+#if defined(CT2_WITH_DIRECTML)
+      dml::ScopedGraphRecording recording;
+#endif
 
       const DataType dtype = input.dtype();
       const Device device = input.device();

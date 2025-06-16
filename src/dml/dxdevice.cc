@@ -5,6 +5,7 @@
 #include "descriptor_pool.h"
 #include "dml/constant_pool.h"
 #include "dml/dml_utils.h"
+#include "dml/graph_recorder.h"
 #include "dml/operator_cache.h"
 
 #include <assert.h>
@@ -181,6 +182,10 @@ Device::Device(IAdapter* adapter,
   m_uploadAllocator = std::make_unique<BucketizedBufferAllocator>(
       [this](uint64_t size, D3D12_RESOURCE_FLAGS resourceFlags) {
         return CreateUploadBuffer(size);
+      });
+  m_temporaryAllocator = std::make_unique<BucketizedBufferAllocator>(
+      [this](uint64_t size, D3D12_RESOURCE_FLAGS resourceFlags) {
+        return CreatePreferredDeviceMemoryBufferWithoutPooling(size);
       });
   m_operatorCache = std::make_unique<DMLOperatorCache>(this);
   m_constantPool = std::make_unique<ConstantPool>();
@@ -419,6 +424,10 @@ Device::Device(ID3D12Device* d3ddevice,
   m_uploadAllocator = std::make_unique<BucketizedBufferAllocator>(
       [this](uint64_t size, D3D12_RESOURCE_FLAGS resourceFlags) {
         return CreateUploadBuffer(size);
+      });
+  m_temporaryAllocator = std::make_unique<BucketizedBufferAllocator>(
+      [this](uint64_t size, D3D12_RESOURCE_FLAGS resourceFlags) {
+        return CreatePreferredDeviceMemoryBufferWithoutPooling(size);
       });
   m_operatorCache = std::make_unique<DMLOperatorCache>(this);
   m_constantPool = std::make_unique<ConstantPool>();
@@ -1047,9 +1056,8 @@ void Device::ExecuteOperator(IDMLCompiledOperator* op,
   // Create a temporary resource for executing the op, if it's required.
   UINT64 temporaryResourceSize = execBindingProps.TemporaryResourceSize;
   if (temporaryResourceSize > 0) {
-    ComPtr<IResourceWrapper> resource_wrapper =
-        CreatePreferredDeviceMemoryBuffer(
-            temporaryResourceSize, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    ComPtr<IResourceWrapper> resource_wrapper = m_temporaryAllocator->Alloc(
+        temporaryResourceSize, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
 
     // Bind the temporary resource.
     DML_BUFFER_BINDING bufferBinding = {resource_wrapper->GetD3D12Resource(), 0,
@@ -1097,5 +1105,16 @@ void Device::SetDescriptorHeap(ID3D12DescriptorHeap* descriptorHeap) {
   }
 }
 
+void Device::BeginGraphRecording() {
+  if (!m_graphRecorder) {
+    m_graphRecorder = std::make_unique<GraphRecorder>();
+  }
+  m_graphRecorder->Begin();
+}
+
+void Device::EndGraphRecording() {
+  m_graphRecorder->End();
+}
 }  // namespace dml
+
 }  // namespace ctranslate2

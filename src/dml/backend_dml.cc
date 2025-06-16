@@ -279,9 +279,6 @@ Device* get_device() {
   return g_device.get();
 }
 
-IDMLDevice1* get_dml_device() {
-  return g_device->DML();
-}
 }  // namespace dml
 }  // namespace ctranslate2
 

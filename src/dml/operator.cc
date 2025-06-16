@@ -3,6 +3,7 @@
 #include "backend_dml.h"
 #include "dml_utils.h"
 #include "dxdevice.h"
+#include "graph_recorder.h"
 
 #include <spdlog/spdlog.h>
 namespace ctranslate2 {
@@ -227,11 +228,16 @@ Operator::~Operator() = default;
 
 void Operator::Execute(const utils::DmlBindingArrayBundle& inputs,
                        const utils::DmlBindingArrayBundle& outputs) {
+  auto device = dml::get_device();
+  GraphRecorder* graph_recorder = device->GetGraphRecorder();
+  if (graph_recorder && graph_recorder->has_begun()) {
+    graph_recorder->Execute(this, inputs, outputs);
+    return;
+  }
   auto inputBindings = inputs.get_descs();
   auto outputBindings = outputs.get_descs();
 
   TraceExecute(GetType(), inputBindings, outputBindings);
-  auto device = dml::get_device();
   DML_BINDING_DESC persistentBindingDesc{};
   if (m_persistentResourceBinding) {
     persistentBindingDesc.Type = DML_BINDING_TYPE_BUFFER;

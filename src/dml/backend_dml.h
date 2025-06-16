@@ -12,7 +12,17 @@ void initialize_directml();
 void release_directml();  // Added
 
 Device* get_device();
-IDMLDevice1* get_dml_device();
+
+class ScopedGraphRecording {
+ public:
+  ScopedGraphRecording() {
+    // dml::get_device()->BeginGraphRecording();
+  }
+  ~ScopedGraphRecording() {
+    // dml::get_device()->EndGraphRecording();
+  }
+};
+
 }  // namespace dml
 }  // namespace ctranslate2
 

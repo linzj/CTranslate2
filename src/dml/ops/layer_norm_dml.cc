@@ -26,7 +26,6 @@ void LayerNorm::compute(const StorageView* beta,
   StorageView* output_ptr = &output;
   StorageView output_tmp;
 
-  // FIXME(linzj): avoid copying the output if it is not inplace.
   if (is_inplace) {
     output_tmp = StorageView(output.shape(), output.dtype(), output.device());
     output_ptr = &output_tmp;
@@ -80,7 +79,7 @@ void LayerNorm::compute(const StorageView* beta,
   compiled_op->Execute(input_bindings, output_bindings);
 
   if (is_inplace) {
-    output.copy_from(*output_ptr);
+    output = std::move(*output_ptr);
   }
 }
 

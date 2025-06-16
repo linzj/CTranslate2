@@ -252,6 +252,8 @@ if(WITH_DIRECTML)
     src/dml/descriptor_pool.cc
     src/dml/descriptor_pool.h
     src/dml/gpu_event.h
+    src/dml/graph_recorder.h
+    src/dml/graph_recorder.cc
     src/dml/operator.cc
     src/dml/operator.h
     src/dml/primitives_dml.cc
