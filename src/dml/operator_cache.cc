@@ -63,7 +63,8 @@ Operator* DMLOperatorCache::GetOrCreateCompiledOperator(
   if (name)
     compiled_operator->SetName(name);
   ComPtr<Operator> operator_obj(Microsoft::WRL::Make<Operator>(
-      _device, std::move(op_desc), std::move(compiled_operator), key));
+      _device, std::move(op_desc), std::move(dml_operator),
+      std::move(compiled_operator), key));
 
   if (kCacheEnabled) {
     // Re-lock to insert into the cache
@@ -79,6 +80,21 @@ Operator* DMLOperatorCache::GetOrCreateCompiledOperator(
     _device->KeepAliveUntilNextCommandListDispatch(operator_obj);
   }
   return operator_obj.Get();
+}
+
+void DMLOperatorCache::AddOperator(std::string&& key,
+                                   Microsoft::WRL::ComPtr<Operator>&& op) {
+  std::lock_guard<std::mutex> lock(_mutex);
+  _cache.emplace(std::move(key), std::move(op));
+}
+
+Operator* DMLOperatorCache::GetOperator(const std::string& key) {
+  std::lock_guard<std::mutex> lock(_mutex);
+  auto it = _cache.find(key);
+  if (it != _cache.end()) {
+    return it->second.Get();
+  }
+  return nullptr;
 }
 
 // Implementation of the global helper function

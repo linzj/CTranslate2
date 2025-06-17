@@ -29,6 +29,8 @@ class BucketizedBufferAllocator {
 
   void EnableRounding(bool enabled) { m_roundingEnabled = enabled; }
 
+  void DisablePooling(bool disable) { m_disablePooling = disable; }
+
  private:
   using Bucket = std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>>;
 
@@ -41,6 +43,7 @@ class BucketizedBufferAllocator {
   static constexpr uint32_t c_minResourceSizeExponent = 4;  // 2^4 = 16
 
   bool m_roundingEnabled = true;
+  bool m_disablePooling = false;
 };
 
 }  // namespace dml

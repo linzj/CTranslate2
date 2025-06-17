@@ -7,6 +7,7 @@
 
 #include "dml/dml_utils.h"
 #include "dml/operator.h"
+#include "graph_builder.h"
 
 namespace ctranslate2 {
 namespace dml {
@@ -81,7 +82,8 @@ class GraphRecorder {
   BindingNode* GetOrCreateBindingNode(ID3D12Resource* resource,
                                       UINT64 offset,
                                       UINT64 size,
-                                      bool& created);
+                                      bool& created,
+                                      bool is_input);
 };
 
 }  // namespace dml

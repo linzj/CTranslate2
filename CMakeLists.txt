@@ -254,6 +254,8 @@ if(WITH_DIRECTML)
     src/dml/gpu_event.h
     src/dml/graph_recorder.h
     src/dml/graph_recorder.cc
+    src/dml/graph_builder.h
+    src/dml/graph_builder.cc
     src/dml/operator.cc
     src/dml/operator.h
     src/dml/operator_utils.cc

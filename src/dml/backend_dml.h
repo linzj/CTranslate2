@@ -16,13 +16,19 @@ Device* get_device();
 class ScopedGraphRecording {
  public:
   ScopedGraphRecording() {
-    dml::get_device()->BeginGraphRecording();
+    // dml::get_device()->BeginGraphRecording();
   }
   ~ScopedGraphRecording() {
-    dml::get_device()->EndGraphRecording();
+    // dml::get_device()->EndGraphRecording();
   }
 };
 
+inline void split_graph_recording() {
+  Device* device = dml::get_device();
+  if (device) {
+    device->SplitGraphRecording();
+  }
+}
 }  // namespace dml
 }  // namespace ctranslate2
 

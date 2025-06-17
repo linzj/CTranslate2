@@ -71,8 +71,9 @@ Microsoft::WRL::ComPtr<IResourceWrapper> BucketizedBufferAllocator::Alloc(
   uint32_t bucketIndex = GetBucketIndexFromSize(size);
   uint64_t bucketSize = GetBucketSizeFromIndex(bucketIndex);
 
-  bool isPooled =
-      (m_roundingEnabled || (size == bucketSize)) && !kForceDisablePooling;
+  bool isPooled = !m_disablePooling &&
+                  (m_roundingEnabled || (size == bucketSize)) &&
+                  !kForceDisablePooling;
 
   if (isPooled) {
     if (bucketIndex >= m_pool.size()) {
@@ -114,7 +115,8 @@ void BucketizedBufferAllocator::FreeResource(
   if (!resourceWrapper) {
     return;
   }
-  bool isPooled = m_roundingEnabled && !kForceDisablePooling;
+  bool isPooled =
+      !m_disablePooling && m_roundingEnabled && !kForceDisablePooling;
   if (!isPooled)
     return;
 

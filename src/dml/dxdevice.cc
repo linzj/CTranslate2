@@ -1115,6 +1115,17 @@ void Device::BeginGraphRecording() {
 void Device::EndGraphRecording() {
   m_graphRecorder->End();
 }
+
+void Device::SplitGraphRecording() {
+  if (m_graphRecorder && m_graphRecorder->has_begun()) {
+    m_graphRecorder->End();
+    m_graphRecorder->Begin();
+  }
+}
+
+void Device::EnableBucketizedBufferAllocator(bool enable) {
+  m_allocator->DisablePooling(!enable);
+}
 }  // namespace dml
 
 }  // namespace ctranslate2

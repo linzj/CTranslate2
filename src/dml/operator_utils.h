@@ -3,7 +3,6 @@
 #include <DirectML.h>
 #include <sstream>
 
-
 namespace ctranslate2 {
 namespace dml {
 
@@ -24,6 +23,8 @@ class OperatorUtils {
   // Generates a unique string key based on the operator description and flags.
   static std::string GenerateCacheKey(const DML_OPERATOR_DESC* op_desc,
                                       DML_EXECUTION_FLAGS flags);
+
+  static const char* DML_OPERATOR_TYPE_toString(DML_OPERATOR_TYPE type);
 
  private:
   // Private helper method to serialize the operator-specific description part

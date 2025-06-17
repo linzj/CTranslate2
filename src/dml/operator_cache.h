@@ -35,6 +35,10 @@ class DMLOperatorCache {
   // Useful if, for example, the DML device is recreated.
   void Clear();
 
+  void AddOperator(std::string&& key, Microsoft::WRL::ComPtr<Operator>&& op);
+
+  Operator* GetOperator(const std::string& key);
+
  private:
   // Delete copy constructor and assignment operator.
   DMLOperatorCache(const DMLOperatorCache&) = delete;

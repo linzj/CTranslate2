@@ -10,6 +10,10 @@
 #include "dispatch.h"
 #include "cpu/parallel.h"
 
+#if defined(CT2_WITH_DIRECTML)
+#include "dml/backend_dml.h"
+#endif
+
 namespace ctranslate2 {
   namespace layers {
 
@@ -268,6 +272,9 @@ namespace ctranslate2 {
         alibi->apply(output, queries_scale);
 
       StorageView attn(values.dtype(), values.device());
+#if defined(CT2_WITH_DIRECTML)
+      dml::split_graph_recording();
+#endif
       ops::SoftMax()(output, values_lengths, attn);
 
       if (attention && !return_normalized_attention)
@@ -450,6 +457,9 @@ namespace ctranslate2 {
             concat_op({&tmp, &keys_proj}, *cached_keys);
             tmp = std::move(*cached_values);
             concat_op({&tmp, &values_proj}, *cached_values);
+#if defined(CT2_WITH_DIRECTML)
+            dml::split_graph_recording();
+#endif
 
             if (!prefilling && _sliding_window > 0 && cached_keys->shape()[2] > _sliding_window) {
               // only for generation
@@ -519,6 +529,9 @@ namespace ctranslate2 {
       if (_layer_norm) {
         ops::Add()(queries, output, output);
 
+#if defined(CT2_WITH_DIRECTML)
+      dml::split_graph_recording();
+#endif
         if (!_pre_norm)
           (*_layer_norm)(output, output);
       }

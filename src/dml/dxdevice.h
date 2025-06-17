@@ -212,7 +212,9 @@ class Device {
 
   void BeginGraphRecording();
   void EndGraphRecording();
+  void SplitGraphRecording();
   GraphRecorder* GetGraphRecorder() { return m_graphRecorder.get(); }
+  void EnableBucketizedBufferAllocator(bool enable);
 
  private:
   void EnsureDxcInterfaces();
