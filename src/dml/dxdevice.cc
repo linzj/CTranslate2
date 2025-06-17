@@ -1123,9 +1123,5 @@ void Device::SplitGraphRecording() {
   }
 }
 
-void Device::EnableBucketizedBufferAllocator(bool enable) {
-  m_allocator->DisablePooling(!enable);
-}
 }  // namespace dml
-
 }  // namespace ctranslate2

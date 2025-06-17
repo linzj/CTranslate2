@@ -57,6 +57,7 @@ class GraphRecorder {
 
  private:
   void Reset();
+  void EvaluateGraphWithoutFusedGraph();
   // Storage for all unique BindingNodes in the graph. Using unique_ptr for
   // ownership.
   std::vector<std::unique_ptr<BindingNode>> m_all_binding_nodes;

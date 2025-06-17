@@ -20,7 +20,6 @@ GraphRecorder::~GraphRecorder() = default;
 
 void GraphRecorder::Begin() {
   m_has_begun = true;  // Mark that Begin has been called
-  get_device()->EnableBucketizedBufferAllocator(false);
 }
 
 void GraphRecorder::Execute(Operator* op,
@@ -84,9 +83,48 @@ void GraphRecorder::Execute(Operator* op,
   m_operator_nodes.push_back(std::move(op_node));
 }
 
+void GraphRecorder::EvaluateGraphWithoutFusedGraph() {
+  // Mark the last operator's outputs as graph outputs.
+  OperatorNode* last_op_node = m_operator_nodes.back().get();
+  for (BindingNode* output_node : last_op_node->outputs) {
+    output_node->is_graph_output = true;
+    m_graph_outputs.push_back(output_node);
+  }
+
+  // Now execute the graph
+  for (const auto& op_node : m_operator_nodes) {
+    // Prepare DmlBindingArrayBundle for inputs
+    std::vector<utils::DmlBufferBindingBundle> inputs_bundles;
+    inputs_bundles.reserve(op_node->inputs.size());
+    for (const BindingNode* binding_node : op_node->inputs) {
+      inputs_bundles.emplace_back(binding_node->resource, binding_node->offset,
+                                  binding_node->size_in_bytes);
+    }
+    utils::DmlBindingArrayBundle current_inputs(std::move(inputs_bundles));
+
+    // Prepare DmlBindingArrayBundle for outputs
+    std::vector<utils::DmlBufferBindingBundle> outputs_bundles;
+    outputs_bundles.reserve(op_node->outputs.size());
+    for (const BindingNode* binding_node : op_node->outputs) {
+      outputs_bundles.emplace_back(binding_node->resource, binding_node->offset,
+                                   binding_node->size_in_bytes);
+    }
+    utils::DmlBindingArrayBundle current_outputs(std::move(outputs_bundles));
+
+    op_node->op->Execute(current_inputs, current_outputs);
+  }
+  Reset();
+}
+
 void GraphRecorder::End() {
   m_has_begun = false;
-  get_device()->EnableBucketizedBufferAllocator(true);
+
+  constexpr bool kEvaluateWithoutFusedGraph = true;
+  if (kEvaluateWithoutFusedGraph) {
+    EvaluateGraphWithoutFusedGraph();
+    return;
+  }
+
   if (m_operator_nodes.empty()) {
     std::cout << "Graph is empty, nothing to execute." << std::endl;
     return;
