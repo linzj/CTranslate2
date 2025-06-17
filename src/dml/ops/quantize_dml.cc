@@ -91,8 +91,10 @@ void Quantize::quantize(const StorageView& input,
     dml::Operator* compiled_abs_op = dml::GetOrCreateCompiledOperatorApi(
         std::move(op_desc), DML_EXECUTION_FLAG_NONE, L"Quantize_Abs");
     compiled_abs_op->Execute(
-        {dml::utils::ResourceFromStorageView(input)},
-        {dml::utils::ResourceFromStorageView(abs_input_storage)});
+        {{dml::utils::ResourceFromStorageView(input), static_cast<UINT64>(0),
+          static_cast<UINT64>(0)}},
+        {{dml::utils::ResourceFromStorageView(abs_input_storage),
+          static_cast<UINT64>(0), static_cast<UINT64>(0)}});
   }
 
   // 2b. Reduce to get abs_max_value: abs_max = reduce_max(abs_input) along
@@ -111,8 +113,10 @@ void Quantize::quantize(const StorageView& input,
     dml::Operator* compiled_reduce_op = dml::GetOrCreateCompiledOperatorApi(
         std::move(op_desc), DML_EXECUTION_FLAG_NONE, L"Quantize_ReduceMax");
     compiled_reduce_op->Execute(
-        {dml::utils::ResourceFromStorageView(abs_input_storage)},
-        {dml::utils::ResourceFromStorageView(abs_max_storage)});
+        {{dml::utils::ResourceFromStorageView(abs_input_storage),
+          static_cast<UINT64>(0), static_cast<UINT64>(0)}},
+        {{dml::utils::ResourceFromStorageView(abs_max_storage),
+          static_cast<UINT64>(0), static_cast<UINT64>(0)}});
   }
 
   // 2c. Calculate final scale: scale_val = abs_max / 127.0f. Handle abs_max =
@@ -184,9 +188,12 @@ void Quantize::quantize(const StorageView& input,
     dml::Operator* compiled_div_op = dml::GetOrCreateCompiledOperatorApi(
         std::move(op_desc), DML_EXECUTION_FLAG_NONE, L"Quantize_DivideBy127");
     compiled_div_op->Execute(
-        {dml::utils::ResourceFromStorageView(abs_max_storage),
-         dml::utils::ResourceFromStorageView(const_127_storage)},
-        {dml::utils::ResourceFromStorageView(scale_if_amax_not_zero_storage)});
+        {{dml::utils::ResourceFromStorageView(abs_max_storage),
+          static_cast<UINT64>(0), static_cast<UINT64>(0)},
+         {dml::utils::ResourceFromStorageView(const_127_storage),
+          static_cast<UINT64>(0), static_cast<UINT64>(0)}},
+        {{dml::utils::ResourceFromStorageView(scale_if_amax_not_zero_storage),
+          static_cast<UINT64>(0), static_cast<UINT64>(0)}});
   }
 
   // Condition for IF operator: is_amax_zero = (abs_max == 0)
@@ -211,9 +218,12 @@ void Quantize::quantize(const StorageView& input,
     dml::Operator* compiled_equals_op = dml::GetOrCreateCompiledOperatorApi(
         std::move(op_desc), DML_EXECUTION_FLAG_NONE, L"Quantize_IsAmaxZero");
     compiled_equals_op->Execute(
-        {dml::utils::ResourceFromStorageView(abs_max_storage),
-         dml::utils::ResourceFromStorageView(const_0_storage)},
-        {dml::utils::ResourceFromStorageView(condition_storage)});
+        {{dml::utils::ResourceFromStorageView(abs_max_storage),
+          static_cast<UINT64>(0), static_cast<UINT64>(0)},
+         {dml::utils::ResourceFromStorageView(const_0_storage),
+          static_cast<UINT64>(0), static_cast<UINT64>(0)}},
+        {{dml::utils::ResourceFromStorageView(condition_storage),
+          static_cast<UINT64>(0), static_cast<UINT64>(0)}});
   }
 
   // IF Operator: scale = is_amax_zero ? 1.0f : (abs_max / 127.0f)
@@ -237,10 +247,14 @@ void Quantize::quantize(const StorageView& input,
     dml::Operator* compiled_if_op = dml::GetOrCreateCompiledOperatorApi(
         std::move(op_desc), DML_EXECUTION_FLAG_NONE, L"Quantize_SelectScale");
     compiled_if_op->Execute(
-        {dml::utils::ResourceFromStorageView(condition_storage),
-         dml::utils::ResourceFromStorageView(const_1_storage),
-         dml::utils::ResourceFromStorageView(scale_if_amax_not_zero_storage)},
-        {dml::utils::ResourceFromStorageView(scale)});
+        {{dml::utils::ResourceFromStorageView(condition_storage),
+          static_cast<UINT64>(0), static_cast<UINT64>(0)},
+         {dml::utils::ResourceFromStorageView(const_1_storage),
+          static_cast<UINT64>(0), static_cast<UINT64>(0)},
+         {dml::utils::ResourceFromStorageView(scale_if_amax_not_zero_storage),
+          static_cast<UINT64>(0), static_cast<UINT64>(0)}},
+        {{dml::utils::ResourceFromStorageView(scale), static_cast<UINT64>(0),
+          static_cast<UINT64>(0)}});
   }
 
   // --- Quantize Operation using Broadcasted Scale ---
@@ -280,12 +294,13 @@ void Quantize::quantize(const StorageView& input,
         std::move(op_desc), DML_EXECUTION_FLAG_NONE,
         L"ElementWiseQuantizeLinear_F32_S8_WithComputedBroadcastedScale");
     compiled_quantize_op->Execute(
-        {dml::utils::ResourceFromStorageView(input),
-         dml::utils::ResourceFromStorageView(
-             scale),              /* Use original scale buffer */
-         nullptr /*ZeroPoint*/},  // ZeroPoint tensor is explicitly null for
-                                  // int8 symmetric quantization in DML
-        {dml::utils::ResourceFromStorageView(output)});
+        {{dml::utils::ResourceFromStorageView(input), static_cast<UINT64>(0),
+          static_cast<UINT64>(0)},
+         {dml::utils::ResourceFromStorageView(scale), static_cast<UINT64>(0),
+          static_cast<UINT64>(0)},
+         {nullptr, static_cast<UINT64>(0), static_cast<UINT64>(0)}},
+        {{dml::utils::ResourceFromStorageView(output), static_cast<UINT64>(0),
+          static_cast<UINT64>(0)}});
   }
   // --- Correct the 'scale' to be its reciprocal for the output parameter ---
   // The 'scale' StorageView (output parameter) currently holds S_calc (abs_max
@@ -304,8 +319,11 @@ void Quantize::quantize(const StorageView& input,
     dml::Operator* compiled_recip_op = dml::GetOrCreateCompiledOperatorApi(
         std::move(op_desc), DML_EXECUTION_FLAG_NONE,
         L"Quantize_FinalReciprocalScale");
-    compiled_recip_op->Execute({dml::utils::ResourceFromStorageView(scale)},
-                               {dml::utils::ResourceFromStorageView(scale)});
+    compiled_recip_op->Execute(
+        {{dml::utils::ResourceFromStorageView(scale), static_cast<UINT64>(0),
+          static_cast<UINT64>(0)}},
+        {{dml::utils::ResourceFromStorageView(scale), static_cast<UINT64>(0),
+          static_cast<UINT64>(0)}});
   }
 }
 

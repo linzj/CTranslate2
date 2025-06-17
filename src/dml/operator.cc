@@ -136,11 +136,5 @@ void Operator::Execute(const utils::DmlBindingArrayBundle& inputs,
                           std::move(inputBindings), std::move(outputBindings));
 }
 
-void Operator::Execute(const std::vector<ID3D12Resource*>& input_resources,
-                       const std::vector<ID3D12Resource*>& output_resources) {
-  dml::utils::DmlBindingArrayBundle inputs{input_resources};
-  dml::utils::DmlBindingArrayBundle outputs{output_resources};
-  Execute(inputs, outputs);
-}
 }  // namespace dml
 }  // namespace ctranslate2

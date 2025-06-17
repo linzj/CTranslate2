@@ -611,6 +611,10 @@ class DmlBindingArrayBundle {
     }
   }
 
+  void AddBinding(ID3D12Resource* resource, UINT64 offset, UINT64 size) {
+    buffer_binding_bundles_.emplace_back(resource, offset, size);
+  }
+
   // Returns a vector of DML_BINDING_DESC.
   // The DML_BUFFER_BINDING structures are managed by the DmlBufferBindingBundle
   // instances within this class.

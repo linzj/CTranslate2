@@ -132,9 +132,8 @@ void primitives<Device::DirectML>::fill(T* x, T a, dim_t size) {
   }
 
   // For FILL_VALUE_CONSTANT, we don't need input resources
-  std::vector<ID3D12Resource*> inputs = {};
-  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(x)};
-  compiled_op->Execute(inputs, outputs);
+  compiled_op->Execute({}, {{dml::utils::ResourceFromRawBuffer(x),
+                             static_cast<UINT64>(0), static_cast<UINT64>(0)}});
 }
 
 template <>
@@ -190,9 +189,8 @@ void primitives<Device::DirectML>::strided_fill(T* x,
     return;
   }
 
-  std::vector<ID3D12Resource*> inputs = {};
-  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(x)};
-  compiled_op->Execute(inputs, outputs);
+  compiled_op->Execute({}, {{dml::utils::ResourceFromRawBuffer(x),
+                             static_cast<UINT64>(0), static_cast<UINT64>(0)}});
 }
 
 template <>
@@ -260,7 +258,14 @@ void primitives<Device::DirectML>::indexed_fill(T* x,
       dml::utils::ResourceFromStorageView(values)   // Values to scatter
   };
   std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(x)};
-  compiled_op->Execute(inputs, outputs);
+  compiled_op->Execute({{dml::utils::ResourceFromStorageView(x_view), 0,
+                         static_cast<UINT64>(x_total_elements * sizeof(T))},
+                        {dml::utils::ResourceFromRawBuffer(indices), 0,
+                         static_cast<UINT64>(num_indices * sizeof(int32_t))},
+                        {dml::utils::ResourceFromStorageView(values), 0,
+                         static_cast<UINT64>(num_indices * sizeof(T))}},
+                       {{dml::utils::ResourceFromRawBuffer(x), 0,
+                         static_cast<UINT64>(x_total_elements * sizeof(T))}});
 }
 
 template <>
@@ -339,9 +344,10 @@ void primitives<Device::DirectML>::convert(const U* x, V* y, dim_t size) {
   dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
       std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
-  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
-  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
-  compiled_op->Execute(inputs, outputs);
+  compiled_op->Execute({{dml::utils::ResourceFromRawBuffer(x), 0,
+                         static_cast<UINT64>(size * sizeof(U))}},
+                       {{dml::utils::ResourceFromRawBuffer(y), 0,
+                         static_cast<UINT64>(size * sizeof(V))}});
 }
 
 template <>
@@ -369,11 +375,10 @@ T primitives<Device::DirectML>::sum(const T* array, dim_t size) {
   dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
       std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
-  std::vector<ID3D12Resource*> inputs = {
-      dml::utils::ResourceFromRawBuffer(array)};
-  std::vector<ID3D12Resource*> outputs = {
-      dml::utils::ResourceFromStorageView(output_storage)};
-  compiled_op->Execute(inputs, outputs);
+  compiled_op->Execute({{dml::utils::ResourceFromRawBuffer(array), 0,
+                         static_cast<UINT64>(size * sizeof(T))}},
+                       {{dml::utils::ResourceFromStorageView(output_storage), 0,
+                         static_cast<UINT64>(sizeof(T))}});
 
   return output_storage.to(Device::CPU).at<T>({0, 0, 0, 0});
 }
@@ -401,11 +406,10 @@ dim_t primitives<Device::DirectML>::max_element(const T* array, dim_t size) {
   dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
       std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
-  std::vector<ID3D12Resource*> inputs = {
-      dml::utils::ResourceFromRawBuffer(array)};
-  std::vector<ID3D12Resource*> outputs = {
-      dml::utils::ResourceFromStorageView(output_storage)};
-  compiled_op->Execute(inputs, outputs);
+  compiled_op->Execute({{dml::utils::ResourceFromRawBuffer(array), 0,
+                         static_cast<UINT64>(size * sizeof(T))}},
+                       {{dml::utils::ResourceFromStorageView(output_storage), 0,
+                         static_cast<UINT64>(sizeof(int32_t))}});
 
   return output_storage.to(Device::CPU).at<int32_t>({0, 0, 0, 0});
 }
@@ -434,11 +438,10 @@ T primitives<Device::DirectML>::max(const T* array, dim_t size) {
   dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
       std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
-  std::vector<ID3D12Resource*> inputs = {
-      dml::utils::ResourceFromRawBuffer(array)};
-  std::vector<ID3D12Resource*> outputs = {
-      dml::utils::ResourceFromStorageView(output_storage)};
-  compiled_op->Execute(inputs, outputs);
+  compiled_op->Execute({{dml::utils::ResourceFromRawBuffer(array), 0,
+                         static_cast<UINT64>(size * sizeof(T))}},
+                       {{dml::utils::ResourceFromStorageView(output_storage), 0,
+                         static_cast<UINT64>(sizeof(T))}});
 
   return output_storage.to(Device::CPU).at<T>({0, 0, 0, 0});
 }
@@ -474,9 +477,12 @@ void primitives<Device::DirectML>::add(T a, const T* x, T* y, dim_t size) {
   dml::Operator* add_op = dml::GetOrCreateCompiledOperatorApi(
       std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
-  add_op->Execute({dml::utils::ResourceFromStorageView(a_scalar_storage),
-                   dml::utils::ResourceFromRawBuffer(x)},
-                  {dml::utils::ResourceFromRawBuffer(y)});
+  add_op->Execute({{dml::utils::ResourceFromStorageView(a_scalar_storage), 0,
+                    static_cast<UINT64>(sizeof(T))},
+                   {dml::utils::ResourceFromRawBuffer(x), 0,
+                    static_cast<UINT64>(size * sizeof(T))}},
+                  {{dml::utils::ResourceFromRawBuffer(y), 0,
+                    static_cast<UINT64>(size * sizeof(T))}});
 }
 
 template <>
@@ -507,10 +513,12 @@ void primitives<Device::DirectML>::add(const T* a,
   dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
       std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
-  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(a),
-                                         dml::utils::ResourceFromRawBuffer(b)};
-  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(c)};
-  compiled_op->Execute(inputs, outputs);
+  compiled_op->Execute({{dml::utils::ResourceFromRawBuffer(a), 0,
+                         static_cast<UINT64>(size * sizeof(T))},
+                        {dml::utils::ResourceFromRawBuffer(b), 0,
+                         static_cast<UINT64>(size * sizeof(T))}},
+                       {{dml::utils::ResourceFromRawBuffer(c), 0,
+                         static_cast<UINT64>(size * sizeof(T))}});
 }
 
 template <>
@@ -541,10 +549,12 @@ void primitives<Device::DirectML>::sub(const T* a,
   dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
       std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
-  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(a),
-                                         dml::utils::ResourceFromRawBuffer(b)};
-  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(c)};
-  compiled_op->Execute(inputs, outputs);
+  compiled_op->Execute({{dml::utils::ResourceFromRawBuffer(a), 0,
+                         static_cast<UINT64>(size * sizeof(T))},
+                        {dml::utils::ResourceFromRawBuffer(b), 0,
+                         static_cast<UINT64>(size * sizeof(T))}},
+                       {{dml::utils::ResourceFromRawBuffer(c), 0,
+                         static_cast<UINT64>(size * sizeof(T))}});
 }
 
 template <>
@@ -577,9 +587,12 @@ void primitives<Device::DirectML>::mul(T a, const T* x, T* y, dim_t size) {
 
   dml::Operator* mul_op = dml::GetOrCreateCompiledOperatorApi(
       std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
-  mul_op->Execute({dml::utils::ResourceFromStorageView(a_scalar_storage),
-                   dml::utils::ResourceFromRawBuffer(x)},
-                  {dml::utils::ResourceFromRawBuffer(y)});
+  mul_op->Execute({{dml::utils::ResourceFromStorageView(a_scalar_storage), 0,
+                    static_cast<UINT64>(sizeof(T))},
+                   {dml::utils::ResourceFromRawBuffer(x), 0,
+                    static_cast<UINT64>(size * sizeof(T))}},
+                  {{dml::utils::ResourceFromRawBuffer(y), 0,
+                    static_cast<UINT64>(size * sizeof(T))}});
 }
 
 template <>
@@ -610,10 +623,12 @@ void primitives<Device::DirectML>::mul(const T* a,
   dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
       std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
-  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(a),
-                                         dml::utils::ResourceFromRawBuffer(b)};
-  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(c)};
-  compiled_op->Execute(inputs, outputs);
+  compiled_op->Execute({{dml::utils::ResourceFromRawBuffer(a), 0,
+                         static_cast<UINT64>(size * sizeof(T))},
+                        {dml::utils::ResourceFromRawBuffer(b), 0,
+                         static_cast<UINT64>(size * sizeof(T))}},
+                       {{dml::utils::ResourceFromRawBuffer(c), 0,
+                         static_cast<UINT64>(size * sizeof(T))}});
 }
 
 // Activation functions
@@ -637,9 +652,10 @@ void primitives<Device::DirectML>::relu(const T* x, T* y, dim_t size) {
   dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
       std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
-  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
-  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
-  compiled_op->Execute(inputs, outputs);
+  compiled_op->Execute({{dml::utils::ResourceFromRawBuffer(x), 0,
+                         static_cast<UINT64>(size * sizeof(T))}},
+                       {{dml::utils::ResourceFromRawBuffer(y), 0,
+                         static_cast<UINT64>(size * sizeof(T))}});
 }
 
 template <>
@@ -662,9 +678,10 @@ void primitives<Device::DirectML>::sigmoid(const T* x, T* y, dim_t size) {
   dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
       std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
-  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
-  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
-  compiled_op->Execute(inputs, outputs);
+  compiled_op->Execute({{dml::utils::ResourceFromRawBuffer(x), 0,
+                         static_cast<UINT64>(size * sizeof(T))}},
+                       {{dml::utils::ResourceFromRawBuffer(y), 0,
+                         static_cast<UINT64>(size * sizeof(T))}});
 }
 
 template <>
@@ -687,9 +704,10 @@ void primitives<Device::DirectML>::tanh(const T* x, T* y, dim_t size) {
   dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
       std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
-  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
-  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
-  compiled_op->Execute(inputs, outputs);
+  compiled_op->Execute({{dml::utils::ResourceFromRawBuffer(x), 0,
+                         static_cast<UINT64>(size * sizeof(T))}},
+                       {{dml::utils::ResourceFromRawBuffer(y), 0,
+                         static_cast<UINT64>(size * sizeof(T))}});
 }
 
 // Matrix operations
@@ -774,9 +792,14 @@ void primitives<Device::DirectML>::gemm<int8_t, int32_t>(
   dml::Operator* matmul_op = dml::GetOrCreateCompiledOperatorApi(
       std::move(matmul_op_bundle), DML_EXECUTION_FLAG_NONE);
 
-  matmul_op->Execute({dml::utils::ResourceFromRawBuffer(a), nullptr,
-                      dml::utils::ResourceFromRawBuffer(b), nullptr},
-                     {dml::utils::ResourceFromStorageView(matmul_output)});
+  matmul_op->Execute({{dml::utils::ResourceFromRawBuffer(a), 0,
+                       static_cast<UINT64>(a_mem_rows * lda * sizeof(int8_t))},
+                      {nullptr, 0, 0},  // A_ZERO_POINT_TENSOR is nullptr
+                      {dml::utils::ResourceFromRawBuffer(b), 0,
+                       static_cast<UINT64>(b_mem_rows * ldb * sizeof(int8_t))},
+                      {nullptr, 0, 0}},  // B_ZERO_POINT_TENSOR is nullptr
+                     {{dml::utils::ResourceFromStorageView(matmul_output), 0,
+                       static_cast<UINT64>(m * n * sizeof(int32_t))}});
 
   // If C is contiguous (ldc == n), use the existing fast path which is
   // optimized for this case. Otherwise, use DML operators that can handle
@@ -823,9 +846,11 @@ void primitives<Device::DirectML>::gemm<int8_t, int32_t>(
       add_desc_inner.OutputTensor = &c_desc_bundle_output.get_tensor_desc();
       dml::Operator* add_op = dml::GetOrCreateCompiledOperatorApi(
           std::move(bundle_inner), DML_EXECUTION_FLAG_NONE);
-      add_op->Execute({dml::utils::ResourceFromStorageView(matmul_output),
-                       dml::utils::ResourceFromRawBuffer(c)},
-                      {dml::utils::ResourceFromRawBuffer(c)});
+      add_op->Execute(
+          {{dml::utils::ResourceFromStorageView(matmul_output), 0,
+            static_cast<UINT64>(m * n * sizeof(int32_t))},
+           {dml::utils::ResourceFromRawBuffer(c), 0, c_total_bytes}},
+          {{dml::utils::ResourceFromRawBuffer(c), 0, c_total_bytes}});
     } else {
       // c = matmul_output (contiguous to strided copy)
       auto& identity_desc =
@@ -835,8 +860,10 @@ void primitives<Device::DirectML>::gemm<int8_t, int32_t>(
       identity_desc.OutputTensor = &c_desc_bundle_output.get_tensor_desc();
       dml::Operator* copy_op = dml::GetOrCreateCompiledOperatorApi(
           std::move(bundle_inner), DML_EXECUTION_FLAG_NONE);
-      copy_op->Execute({dml::utils::ResourceFromStorageView(matmul_output)},
-                       {dml::utils::ResourceFromRawBuffer(c)});
+      copy_op->Execute(
+          {{dml::utils::ResourceFromStorageView(matmul_output), 0,
+            static_cast<UINT64>(m * n * sizeof(int32_t))}},
+          {{dml::utils::ResourceFromRawBuffer(c), 0, c_total_bytes}});
     }
 
     if (a_shift_compensation) {
@@ -858,9 +885,11 @@ void primitives<Device::DirectML>::gemm<int8_t, int32_t>(
       add_desc.OutputTensor = &c_bundle_shift_output.get_tensor_desc();
       dml::Operator* add_op = dml::GetOrCreateCompiledOperatorApi(
           std::move(shift_op_bundle), DML_EXECUTION_FLAG_NONE);
-      add_op->Execute({dml::utils::ResourceFromRawBuffer(c),
-                       dml::utils::ResourceFromRawBuffer(a_shift_compensation)},
-                      {dml::utils::ResourceFromRawBuffer(c)});
+      add_op->Execute(
+          {{dml::utils::ResourceFromRawBuffer(c), 0, c_total_bytes},
+           {dml::utils::ResourceFromRawBuffer(a_shift_compensation), 0,
+            static_cast<UINT64>(n * sizeof(int32_t))}},
+          {{dml::utils::ResourceFromRawBuffer(c), 0, c_total_bytes}});
     }
   }
 }
@@ -951,17 +980,23 @@ void primitives<Device::DirectML>::gemm(bool a_is_packed,
     dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
         std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
-    std::vector<ID3D12Resource*> inputs = {
-        dml::utils::ResourceFromRawBuffer(a),
-        dml::utils::ResourceFromRawBuffer(b)};
+    dml::utils::DmlBindingArrayBundle inputs_binding({
+        {dml::utils::ResourceFromRawBuffer(a), 0,
+         static_cast<UINT64>(lda * a_rows * sizeof(In))},
+        {dml::utils::ResourceFromRawBuffer(b), 0,
+         static_cast<UINT64>(ldb * b_rows * sizeof(In))},
+    });
 
     if (beta != 0.0f) {
-      inputs.push_back(dml::utils::ResourceFromRawBuffer(c));
+      inputs_binding.AddBinding(dml::utils::ResourceFromRawBuffer(c), 0,
+                                static_cast<UINT64>(ldc * m * sizeof(Out)));
     }
 
-    std::vector<ID3D12Resource*> outputs = {
-        dml::utils::ResourceFromRawBuffer(c)};
-    compiled_op->Execute(inputs, outputs);
+    dml::utils::DmlBindingArrayBundle outputs_binding({
+        {dml::utils::ResourceFromRawBuffer(c), 0,
+         static_cast<UINT64>(ldc * m * sizeof(Out))},
+    });
+    compiled_op->Execute(inputs_binding, outputs_binding);
 
     // Then add the shift compensation
     ::ctranslate2::dml::utils::DmlOperatorDescBundle shift_op_bundle;
@@ -988,12 +1023,13 @@ void primitives<Device::DirectML>::gemm(bool a_is_packed,
     dml::Operator* compiled_add_op = dml::GetOrCreateCompiledOperatorApi(
         std::move(shift_op_bundle), DML_EXECUTION_FLAG_NONE);
 
-    std::vector<ID3D12Resource*> add_inputs = {
-        dml::utils::ResourceFromRawBuffer(c),
-        dml::utils::ResourceFromRawBuffer(a_shift_compensation)};
-    std::vector<ID3D12Resource*> add_outputs = {
-        dml::utils::ResourceFromRawBuffer(c)};
-    compiled_add_op->Execute(add_inputs, add_outputs);
+    compiled_add_op->Execute(
+        {{dml::utils::ResourceFromRawBuffer(c), 0,
+          static_cast<UINT64>(ldc * m * sizeof(Out))},
+         {dml::utils::ResourceFromRawBuffer(a_shift_compensation), 0,
+          static_cast<UINT64>(n * sizeof(Out))}},
+        {{dml::utils::ResourceFromRawBuffer(c), 0,
+          static_cast<UINT64>(ldc * m * sizeof(Out))}});
 
   } else {
     // Standard GEMM without shift compensation
@@ -1025,19 +1061,25 @@ void primitives<Device::DirectML>::gemm(bool a_is_packed,
     dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
         std::move(op_bundle_std), DML_EXECUTION_FLAG_NONE, L"gemm");
 
-    std::vector<ID3D12Resource*> inputs = {
-        dml::utils::ResourceFromRawBuffer(a),
-        dml::utils::ResourceFromRawBuffer(b)};
+    dml::utils::DmlBindingArrayBundle inputs_binding({
+        {dml::utils::ResourceFromRawBuffer(a), 0,
+         static_cast<UINT64>(lda * a_rows * sizeof(In))},
+        {dml::utils::ResourceFromRawBuffer(b), 0,
+         static_cast<UINT64>(ldb * b_rows * sizeof(In))},
+    });
 
     if (beta != 0.0f) {
-      inputs.push_back(dml::utils::ResourceFromRawBuffer(c));
+      inputs_binding.AddBinding(dml::utils::ResourceFromRawBuffer(c), 0,
+                                static_cast<UINT64>(ldc * m * sizeof(Out)));
     } else {
-      inputs.push_back(nullptr);
+      inputs_binding.AddBinding(nullptr, 0, 0);
     }
 
-    std::vector<ID3D12Resource*> outputs = {
-        dml::utils::ResourceFromRawBuffer(c)};
-    compiled_op->Execute(inputs, outputs);
+    dml::utils::DmlBindingArrayBundle outputs_binding({
+        {dml::utils::ResourceFromRawBuffer(c), 0,
+         static_cast<UINT64>(ldc * m * sizeof(Out))},
+    });
+    compiled_op->Execute(inputs_binding, outputs_binding);
   }
 }
 
@@ -1086,18 +1128,18 @@ void primitives<Device::DirectML>::add_batch_broadcast(const T* a,
   const auto element_size =
       dml::utils::get_dml_element_size_in_bytes(a_bundle.get_data_type());
 
-  dml::utils::DmlBindingArrayBundle intputs{
-      {dml::utils::ResourceFromRawBuffer(a),
-       static_cast<UINT64>(a_offset * element_size),
-       static_cast<UINT64>(a_size * element_size)},
+  dml::utils::DmlBindingArrayBundle inputs{
+      std::make_tuple(dml::utils::ResourceFromRawBuffer(a),
+                      static_cast<UINT64>(a_offset * element_size),
+                      static_cast<UINT64>(a_size * element_size)),
 
-      {dml::utils::ResourceFromRawBuffer(b), 0,
-       static_cast<UINT64>(b_size * element_size)}};
+      std::make_tuple(dml::utils::ResourceFromRawBuffer(b), 0,
+                      static_cast<UINT64>(b_size * element_size))};
   dml::utils::DmlBindingArrayBundle outputs{
-      {dml::utils::ResourceFromRawBuffer(c), 0,
-       static_cast<UINT64>(b_size * element_size)}};
+      std::make_tuple(dml::utils::ResourceFromRawBuffer(c), 0,
+                      static_cast<UINT64>(b_size * element_size))};
 
-  compiled_op->Execute(intputs, outputs);
+  compiled_op->Execute(inputs, outputs);
 }
 
 template <>
@@ -1151,9 +1193,12 @@ void primitives<Device::DirectML>::max(T a, const T* x, T* y, dim_t size) {
 
   dml::Operator* max_op = dml::GetOrCreateCompiledOperatorApi(
       std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
-  max_op->Execute({dml::utils::ResourceFromStorageView(a_scalar_storage),
-                   dml::utils::ResourceFromRawBuffer(x)},
-                  {dml::utils::ResourceFromRawBuffer(y)});
+  max_op->Execute({{dml::utils::ResourceFromStorageView(a_scalar_storage), 0,
+                    static_cast<UINT64>(sizeof(T))},
+                   {dml::utils::ResourceFromRawBuffer(x), 0,
+                    static_cast<UINT64>(size * sizeof(T))}},
+                  {{dml::utils::ResourceFromRawBuffer(y), 0,
+                    static_cast<UINT64>(size * sizeof(T))}});
 }
 
 template <>
@@ -1184,10 +1229,12 @@ void primitives<Device::DirectML>::max(const T* a,
   dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
       std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
-  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(a),
-                                         dml::utils::ResourceFromRawBuffer(b)};
-  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(c)};
-  compiled_op->Execute(inputs, outputs);
+  compiled_op->Execute({{dml::utils::ResourceFromRawBuffer(a), 0,
+                         static_cast<UINT64>(size * sizeof(T))},
+                        {dml::utils::ResourceFromRawBuffer(b), 0,
+                         static_cast<UINT64>(size * sizeof(T))}},
+                       {{dml::utils::ResourceFromRawBuffer(c), 0,
+                         static_cast<UINT64>(size * sizeof(T))}});
 }
 
 template <>
@@ -1219,9 +1266,12 @@ void primitives<Device::DirectML>::min(T a, const T* x, T* y, dim_t size) {
 
   dml::Operator* min_op = dml::GetOrCreateCompiledOperatorApi(
       std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
-  min_op->Execute({dml::utils::ResourceFromStorageView(a_scalar_storage),
-                   dml::utils::ResourceFromRawBuffer(x)},
-                  {dml::utils::ResourceFromRawBuffer(y)});
+  min_op->Execute({{dml::utils::ResourceFromStorageView(a_scalar_storage), 0,
+                    static_cast<UINT64>(sizeof(T))},
+                   {dml::utils::ResourceFromRawBuffer(x), 0,
+                    static_cast<UINT64>(size * sizeof(T))}},
+                  {{dml::utils::ResourceFromRawBuffer(y), 0,
+                    static_cast<UINT64>(size * sizeof(T))}});
 }
 
 template <>
@@ -1252,10 +1302,12 @@ void primitives<Device::DirectML>::min(const T* a,
   dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
       std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
-  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(a),
-                                         dml::utils::ResourceFromRawBuffer(b)};
-  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(c)};
-  compiled_op->Execute(inputs, outputs);
+  compiled_op->Execute({{dml::utils::ResourceFromRawBuffer(a), 0,
+                         static_cast<UINT64>(size * sizeof(T))},
+                        {dml::utils::ResourceFromRawBuffer(b), 0,
+                         static_cast<UINT64>(size * sizeof(T))}},
+                       {{dml::utils::ResourceFromRawBuffer(c), 0,
+                         static_cast<UINT64>(size * sizeof(T))}});
 }
 
 // Remaining stub implementations for completeness
@@ -1277,9 +1329,10 @@ void primitives<Device::DirectML>::gelu(const T* x, T* y, dim_t size) {
   dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
       std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
-  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
-  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
-  compiled_op->Execute(inputs, outputs);
+  compiled_op->Execute({{dml::utils::ResourceFromRawBuffer(x), 0,
+                         static_cast<UINT64>(size * sizeof(T))}},
+                       {{dml::utils::ResourceFromRawBuffer(y), 0,
+                         static_cast<UINT64>(size * sizeof(T))}});
 }
 
 template <>
@@ -1311,9 +1364,10 @@ void primitives<Device::DirectML>::gelu_sigmoid(const T* x, T* y, dim_t size) {
   dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
       std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
-  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
-  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
-  compiled_op->Execute(inputs, outputs);
+  compiled_op->Execute({{dml::utils::ResourceFromRawBuffer(x), 0,
+                         static_cast<UINT64>(size * sizeof(T))}},
+                       {{dml::utils::ResourceFromRawBuffer(y), 0,
+                         static_cast<UINT64>(size * sizeof(T))}});
 }
 
 template <>
@@ -1336,9 +1390,10 @@ void primitives<Device::DirectML>::swish(const T* x, T* y, dim_t size) {
   dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
       std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
-  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
-  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
-  compiled_op->Execute(inputs, outputs);
+  compiled_op->Execute({{dml::utils::ResourceFromRawBuffer(x), 0,
+                         static_cast<UINT64>(size * sizeof(T))}},
+                       {{dml::utils::ResourceFromRawBuffer(y), 0,
+                         static_cast<UINT64>(size * sizeof(T))}});
 }
 
 template <>
@@ -1361,9 +1416,10 @@ void primitives<Device::DirectML>::exp(const T* x, T* y, dim_t size) {
   dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
       std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
-  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
-  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
-  compiled_op->Execute(inputs, outputs);
+  compiled_op->Execute({{dml::utils::ResourceFromRawBuffer(x), 0,
+                         static_cast<UINT64>(size * sizeof(T))}},
+                       {{dml::utils::ResourceFromRawBuffer(y), 0,
+                         static_cast<UINT64>(size * sizeof(T))}});
 }
 
 template <>
@@ -1386,9 +1442,10 @@ void primitives<Device::DirectML>::log(const T* x, T* y, dim_t size) {
   dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
       std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
-  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
-  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
-  compiled_op->Execute(inputs, outputs);
+  compiled_op->Execute({{dml::utils::ResourceFromRawBuffer(x), 0,
+                         static_cast<UINT64>(size * sizeof(T))}},
+                       {{dml::utils::ResourceFromRawBuffer(y), 0,
+                         static_cast<UINT64>(size * sizeof(T))}});
 }
 
 template <>
@@ -1411,9 +1468,10 @@ void primitives<Device::DirectML>::sin(const T* x, T* y, dim_t size) {
   dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
       std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
-  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
-  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
-  compiled_op->Execute(inputs, outputs);
+  compiled_op->Execute({{dml::utils::ResourceFromRawBuffer(x), 0,
+                         static_cast<UINT64>(size * sizeof(T))}},
+                       {{dml::utils::ResourceFromRawBuffer(y), 0,
+                         static_cast<UINT64>(size * sizeof(T))}});
 }
 
 template <>
@@ -1436,9 +1494,10 @@ void primitives<Device::DirectML>::cos(const T* x, T* y, dim_t size) {
   dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
       std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
-  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(x)};
-  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(y)};
-  compiled_op->Execute(inputs, outputs);
+  compiled_op->Execute({{dml::utils::ResourceFromRawBuffer(x), 0,
+                         static_cast<UINT64>(size * sizeof(T))}},
+                       {{dml::utils::ResourceFromRawBuffer(y), 0,
+                         static_cast<UINT64>(size * sizeof(T))}});
 }
 
 template <>
@@ -1593,8 +1652,11 @@ void primitives<Device::DirectML>::prepare_length_mask(const int32_t* lengths,
     dml::Operator* tile_op = dml::GetOrCreateCompiledOperatorApi(
         std::move(op_bundle_tile), DML_EXECUTION_FLAG_NONE);
 
-    tile_op->Execute({dml::utils::ResourceFromRawBuffer(lengths)},
-                     {dml::utils::ResourceFromRawBuffer(mask)});
+    tile_op->Execute({{dml::utils::ResourceFromRawBuffer(lengths), 0,
+                       static_cast<UINT64>(batch_size * sizeof(int32_t))}},
+                     {{dml::utils::ResourceFromRawBuffer(mask), 0,
+                       static_cast<UINT64>(batch_size * num_heads *
+                                           num_queries * sizeof(int32_t))}});
 
   } else {
     // Create a causal mask and apply std::min(length, causal_mask_value).
@@ -1635,8 +1697,11 @@ void primitives<Device::DirectML>::prepare_length_mask(const int32_t* lengths,
         std::move(op_bundle_tile_bcast), DML_EXECUTION_FLAG_NONE);
 
     tile_op->Execute(
-        {dml::utils::ResourceFromRawBuffer(lengths)},
-        {dml::utils::ResourceFromStorageView(lengths_tiled_storage)});
+        {{dml::utils::ResourceFromRawBuffer(lengths), 0,
+          static_cast<UINT64>(batch_size * sizeof(int32_t))}},
+        {{dml::utils::ResourceFromStorageView(lengths_tiled_storage), 0,
+          static_cast<UINT64>(batch_size * num_heads * num_queries *
+                              sizeof(int32_t))}});
 
     // 4. Prepare tensors for the MIN operation.
     ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle_min;
@@ -1659,9 +1724,15 @@ void primitives<Device::DirectML>::prepare_length_mask(const int32_t* lengths,
     dml::Operator* min_op = dml::GetOrCreateCompiledOperatorApi(
         std::move(op_bundle_min), DML_EXECUTION_FLAG_NONE);
 
-    min_op->Execute({dml::utils::ResourceFromStorageView(lengths_tiled_storage),
-                     dml::utils::ResourceFromStorageView(causal_storage)},
-                    {dml::utils::ResourceFromRawBuffer(mask)});
+    min_op->Execute(
+        {{dml::utils::ResourceFromStorageView(lengths_tiled_storage), 0,
+          static_cast<UINT64>(batch_size * num_heads * num_queries *
+                              sizeof(int32_t))},
+         {dml::utils::ResourceFromStorageView(causal_storage), 0,
+          static_cast<UINT64>(mask_size_per_batch * sizeof(int32_t))}},
+        {{dml::utils::ResourceFromRawBuffer(mask), 0,
+          static_cast<UINT64>(batch_size * num_heads * num_queries *
+                              sizeof(int32_t))}});
   }
 }
 
@@ -1718,10 +1789,10 @@ void primitives<Device::DirectML>::transpose_2d(const T* a,
   dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
       std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
-  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(a)};
-  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(b)};
-
-  compiled_op->Execute(inputs, outputs);
+  compiled_op->Execute({{dml::utils::ResourceFromRawBuffer(a), 0,
+                         static_cast<UINT64>(total_elements * sizeof(T))}},
+                       {{dml::utils::ResourceFromRawBuffer(b), 0,
+                         static_cast<UINT64>(total_elements * sizeof(T))}});
 }
 
 template <>
@@ -1781,10 +1852,10 @@ void primitives<Device::DirectML>::transpose_3d(const T* a,
   dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
       std::move(op_bundle), DML_EXECUTION_FLAG_NONE);
 
-  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(a)};
-  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(b)};
-
-  compiled_op->Execute(inputs, outputs);
+  compiled_op->Execute({{dml::utils::ResourceFromRawBuffer(a), 0,
+                         static_cast<UINT64>(total_elements * sizeof(T))}},
+                       {{dml::utils::ResourceFromRawBuffer(b), 0,
+                         static_cast<UINT64>(total_elements * sizeof(T))}});
 }
 
 template <>
@@ -1843,10 +1914,10 @@ void primitives<Device::DirectML>::transpose_4d(const T* a,
 
   ID3D12Resource* input_resource = dml::utils::ResourceFromRawBuffer(a);
 
-  std::vector<ID3D12Resource*> inputs = {input_resource};
-  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(b)};
-
-  compiled_op->Execute(inputs, outputs);
+  compiled_op->Execute(
+      {{input_resource, 0, static_cast<UINT64>(total_elements * sizeof(T))}},
+      {{dml::utils::ResourceFromRawBuffer(b), 0,
+        static_cast<UINT64>(total_elements * sizeof(T))}});
 }
 
 template <>
@@ -1949,12 +2020,11 @@ dim_t primitives<Device::DirectML>::gemm_pack_b(const T* b,
     dml::Operator* compiled_transpose_op = dml::GetOrCreateCompiledOperatorApi(
         std::move(transpose_op_bundle), DML_EXECUTION_FLAG_NONE);
 
-    std::vector<ID3D12Resource*> transpose_inputs = {
-        dml::utils::ResourceFromRawBuffer(b)};
-    std::vector<ID3D12Resource*> transpose_outputs = {
-        dml::utils::ResourceFromRawBuffer(dest)};
-
-    compiled_transpose_op->Execute(transpose_inputs, transpose_outputs);
+    compiled_transpose_op->Execute(
+        {{dml::utils::ResourceFromRawBuffer(b), 0,
+          static_cast<UINT64>(src_rows * src_cols * sizeof(T))}},
+        {{dml::utils::ResourceFromRawBuffer(dest), 0,
+          static_cast<UINT64>(dst_rows * dst_cols * sizeof(T))}});
   } else {
     // Just copy if no transpose needed
     copy(b, dest, total_elements);
@@ -2003,14 +2073,12 @@ dim_t primitives<Device::DirectML>::gemm_pack_b(const T* b,
         std::move(scale_op_bundle), DML_EXECUTION_FLAG_NONE);
 
     // Execute scaling (in-place on dest)
-    std::vector<ID3D12Resource*> inputs = {
-        dml::utils::ResourceFromRawBuffer(
-            dest),  // Input is the already transposed/copied data
-        dml::utils::ResourceFromStorageView(scalar_storage)};
-    std::vector<ID3D12Resource*> outputs = {
-        dml::utils::ResourceFromRawBuffer(dest)};
-
-    compiled_op->Execute(inputs, outputs);
+    compiled_op->Execute({{dml::utils::ResourceFromRawBuffer(dest), 0,
+                           static_cast<UINT64>(total_elements * sizeof(T))},
+                          {dml::utils::ResourceFromStorageView(scalar_storage),
+                           0, static_cast<UINT64>(sizeof(T))}},
+                         {{dml::utils::ResourceFromRawBuffer(dest), 0,
+                           static_cast<UINT64>(total_elements * sizeof(T))}});
   }
 
   // Return the size of the packed matrix in bytes
@@ -2126,17 +2194,26 @@ void primitives<Device::DirectML>::gemm_batch_strided(bool transpose_a,
     return;
   }
 
-  std::vector<ID3D12Resource*> inputs = {dml::utils::ResourceFromRawBuffer(a),
-                                         dml::utils::ResourceFromRawBuffer(b)};
+  dml::utils::DmlBindingArrayBundle inputs_binding({
+      {dml::utils::ResourceFromRawBuffer(a), 0,
+       static_cast<UINT64>(batch_size * stridea * sizeof(In))},
+      {dml::utils::ResourceFromRawBuffer(b), 0,
+       static_cast<UINT64>(batch_size * strideb * sizeof(In))},
+  });
 
   if (beta != 0.0f) {
-    inputs.push_back(dml::utils::ResourceFromRawBuffer(c));
+    inputs_binding.AddBinding(
+        dml::utils::ResourceFromRawBuffer(c), 0,
+        static_cast<UINT64>(batch_size * stridec * sizeof(Out)));
   } else {
-    inputs.push_back(nullptr);
+    inputs_binding.AddBinding(nullptr, 0, 0);
   }
 
-  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(c)};
-  compiled_op->Execute(inputs, outputs);
+  dml::utils::DmlBindingArrayBundle outputs_binding({
+      {dml::utils::ResourceFromRawBuffer(c), 0,
+       static_cast<UINT64>(batch_size * stridec * sizeof(Out))},
+  });
+  compiled_op->Execute(inputs_binding, outputs_binding);
 }
 
 // Cross-device copy operations

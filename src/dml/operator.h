@@ -24,9 +24,6 @@ class Operator
   void Execute(const utils::DmlBindingArrayBundle& inputs,
                const utils::DmlBindingArrayBundle& outputs);
 
-  void Execute(const std::vector<ID3D12Resource*>& input_resources,
-               const std::vector<ID3D12Resource*>& output_resources);
-
   DML_OPERATOR_TYPE GetType() const { return m_op_desc.get_desc().Type; }
 
   const DML_OPERATOR_DESC& GetOperatorDesc() const {
