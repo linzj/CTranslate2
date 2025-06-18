@@ -256,8 +256,6 @@ Device::Device(IAdapter* adapter,
 
   THROW_IF_FAILED(
       m_dml->CreateCommandRecorder(IID_PPV_ARGS(&m_commandRecorder)));
-  THROW_IF_FAILED(m_dml->CreateOperatorInitializer(
-      0, nullptr, IID_PPV_ARGS(&m_initializer)));
 
   // Each GPU time measurement requires a pair of timestamps
   m_timestampCapacity = maxGpuTimeMeasurements * 2;
@@ -966,11 +964,14 @@ void Device::InitializeOperator(
     const DML_BINDING_DESC& persistentResourceBinding,
     const DML_BINDING_DESC& inputArrayBinding) {
   // Reset the initializer to reference the input operator.
+  Microsoft::WRL::ComPtr<IDMLOperatorInitializer> ops_initializer;
   IDMLCompiledOperator* ops[] = {op};
-  THROW_IF_FAILED(m_initializer->Reset(ARRAYSIZE(ops), ops));
+
+  THROW_IF_FAILED(m_dml->CreateOperatorInitializer(
+      ARRAYSIZE(ops), ops, IID_PPV_ARGS(&ops_initializer)));
 
   DML_BINDING_PROPERTIES initBindingProps =
-      m_initializer->GetBindingProperties();
+      ops_initializer->GetBindingProperties();
 
   const uint32_t numDescriptors = initBindingProps.RequiredDescriptorCount;
   DescriptorRange descriptorRange = m_descriptorPool->AllocDescriptors(
@@ -978,7 +979,7 @@ void Device::InitializeOperator(
 
   // Create a binding table for initialization.
   DML_BINDING_TABLE_DESC bindingTableDesc = {};
-  bindingTableDesc.Dispatchable = m_initializer.Get();
+  bindingTableDesc.Dispatchable = ops_initializer.Get();
   bindingTableDesc.CPUDescriptorHandle = descriptorRange.cpuHandle;
   bindingTableDesc.GPUDescriptorHandle = descriptorRange.gpuHandle;
   bindingTableDesc.SizeInDescriptors = numDescriptors;
@@ -1017,7 +1018,7 @@ void Device::InitializeOperator(
 
   // Record the initialization work.
   SetDescriptorHeap(descriptorRange.heap);
-  m_commandRecorder->RecordDispatch(m_commandList.Get(), m_initializer.Get(),
+  m_commandRecorder->RecordDispatch(m_commandList.Get(), ops_initializer.Get(),
                                     bindingTable.Get());
 
   // Barrier if there's an output (i.e. persistent resource), or if any temps

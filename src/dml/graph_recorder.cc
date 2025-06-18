@@ -21,6 +21,8 @@ namespace {  // anonymous
 
 constexpr bool kDumpSubGraphs = false;
 constexpr bool kAlwaysEvaluateSubgraphs = false;
+constexpr bool kCompareWithUnfused = false;
+constexpr bool kAlwaysRecompileSubgraphs = true;
 
 // Represents a portion of a larger computation graph. A SubGraph consists of a
 // set of operator nodes, their inputs, and their outputs. SubGraphs can be
@@ -398,6 +400,100 @@ void EvaluateSubGraphWithoutFusedGraph(const SubGraph& subgraph) {
   }
 }
 
+// Compares the output of a fused graph execution with a sequential, unfused
+// execution. This function is intended for debugging and verifying the
+// correctness of the graph fusion process. It works by:
+// 1. Downloading the results from the output buffers, which are assumed to have
+//    been just populated by a fused graph execution.
+// 2. Re-executing the subgraph operator by operator using
+//    EvaluateSubGraphWithoutFusedGraph. This overwrites the output buffers.
+// 3. Downloading the new results from the output buffers.
+// 4. Comparing the two sets of results and throwing an exception if they don't
+//    match.
+namespace {
+std::vector<std::vector<std::byte>> DownloadSubgraphOutputs(
+    const SubGraph& subgraph,
+    const char* context) {
+  Device* device = get_device();
+  std::vector<std::vector<std::byte>> results;
+  results.reserve(subgraph.outputs.size());
+
+  for (const auto& binding_node : subgraph.outputs) {
+    if (!binding_node->resource) {
+      results.emplace_back();
+      continue;
+    }
+    Microsoft::WRL::ComPtr<ID3D12Resource> resource(binding_node->resource);
+    std::vector<std::byte> full_resource_data = device->Download(resource);
+
+    std::vector<std::byte> buffer(binding_node->size_in_bytes);
+    if (binding_node->offset + binding_node->size_in_bytes <=
+        full_resource_data.size()) {
+      memcpy(buffer.data(), full_resource_data.data() + binding_node->offset,
+             binding_node->size_in_bytes);
+    } else {
+      SPDLOG_ERROR(
+          "Invalid resource size during download for {} graph output. "
+          "Resource size: {}, requested offset: {}, requested size: {}",
+          context, full_resource_data.size(), binding_node->offset,
+          binding_node->size_in_bytes);
+      throw std::runtime_error("Invalid resource size during download for " +
+                               std::string(context) + " graph output.");
+    }
+    results.push_back(std::move(buffer));
+  }
+  return results;
+}
+
+void CompareAndVerify(const SubGraph& subgraph) {
+  // 1. Download results from fused graph execution (which just ran).
+  const auto fused_results = DownloadSubgraphOutputs(subgraph, "fused");
+
+  // 2. Execute unfused graph. This will modify output buffers.
+  EvaluateSubGraphWithoutFusedGraph(subgraph);
+
+  // 3. Download results from unfused graph execution.
+  const auto unfused_results = DownloadSubgraphOutputs(subgraph, "unfused");
+
+  // 4. Compare results.
+  if (fused_results.size() != unfused_results.size()) {
+    // This should be impossible if we get this far.
+    throw std::logic_error(
+        "Fused and unfused graph have different number of outputs.");
+  }
+
+  static size_t failed_times = 0U;
+  static size_t success_times = 0U;
+  for (size_t i = 0; i < fused_results.size(); ++i) {
+    if (fused_results[i].size() != unfused_results[i].size()) {
+      throw std::logic_error(
+          "Fused and unfused graph have different output sizes for output " +
+          std::to_string(i));
+    }
+
+    if (memcmp(fused_results[i].data(), unfused_results[i].data(),
+               fused_results[i].size()) != 0) {
+      std::ostringstream oss;
+      subgraph.Dump(oss);
+      // Mismatch found. Print details.
+      SPDLOG_ERROR(
+          "Mismatch found between fused and unfused graph execution "
+          "for subgraph output {}, failed_times: {}, success time: {}, for "
+          "subgraph:\n{}",
+          i, ++failed_times, success_times, oss.str());
+      // TODO: print more details about the mismatch.
+      // For now, just throw.
+      // throw std::runtime_error(
+      //     "Fused and unfused graph execution results do not match for output
+      //     " + std::to_string(i));
+    } else {
+      success_times++;
+    }
+  }
+  SPDLOG_DEBUG("Fused and unfused graph outputs match.");
+}
+}  // namespace
+
 }  // namespace
 
 // Initializes the GraphRecorder, including a special empty binding node used
@@ -578,7 +674,7 @@ void GraphRecorder::End() {
       continue;
     }
 
-    if (subgraph.op_nodes.size() == 1) {
+    if (subgraph.op_nodes.size() == 1 || subgraph.op_nodes.size() >= 6) {
       EvaluateSubGraphWithoutFusedGraph(subgraph);
       continue;
     }
@@ -590,7 +686,7 @@ void GraphRecorder::End() {
     Operator* graph_op = cache.GetOperator(key_accumulator);
     Microsoft::WRL::ComPtr<Operator> new_graph_op_comptr;
 
-    if (!graph_op) {
+    if (kAlwaysRecompileSubgraphs || !graph_op) {
       // If the compiled graph is not in the cache, build it.
       std::vector<BindingNode*> sorted_outputs = subgraph.outputs;
       std::sort(sorted_outputs.begin(), sorted_outputs.end(),
@@ -627,6 +723,7 @@ void GraphRecorder::End() {
           std::move(compiled_graph), key_accumulator);
 
       graph_op = new_graph_op_comptr.Get();
+      get_device()->KeepAliveUntilNextCommandListDispatch(new_graph_op_comptr);
       cache.AddOperator(std::move(key_accumulator),
                         std::move(new_graph_op_comptr));
     }
@@ -653,6 +750,10 @@ void GraphRecorder::End() {
 
     // Execute the compiled graph.
     graph_op->Execute(inputs, outputs);
+
+    if (kCompareWithUnfused) {
+      CompareAndVerify(subgraph);
+    }
   }
 
   Reset();

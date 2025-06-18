@@ -235,7 +235,6 @@ class Device {
 #endif
   Microsoft::WRL::ComPtr<IDMLDevice1> m_dml;
   Microsoft::WRL::ComPtr<IDMLCommandRecorder> m_commandRecorder;
-  Microsoft::WRL::ComPtr<IDMLOperatorInitializer> m_initializer;
   Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_timestampHeap;
   ID3D12DescriptorHeap* m_currentDescriptorHeap = nullptr;
   uint32_t m_timestampCapacity = 0;
