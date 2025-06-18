@@ -47,6 +47,59 @@ class SubGraph {
     outputs = graph_outputs;
   }
 
+  // Constructs a SubGraph from all operator nodes and the initial graph's
+  // inputs. The outputs are calculated using liveness analysis.
+  SubGraph(const std::vector<std::unique_ptr<OperatorNode>>& all_op_nodes,
+           const std::vector<BindingNode*>& graph_inputs) {
+    op_nodes.reserve(all_op_nodes.size());
+    for (const auto& node : all_op_nodes) {
+      op_nodes.push_back(node.get());
+    }
+    inputs = graph_inputs;
+    CalculateAndSetOutputs();
+  }
+
+  // Calculates and sets the outputs of the subgraph using liveness analysis.
+  // An output is a resource that is defined (kill) by an operator but is not
+  // used (live) by any subsequent operators in the block. The analysis is done
+  // by iterating through the operators in reverse order.
+  void CalculateAndSetOutputs() {
+    std::unordered_set<BindingNode*> live_nodes;
+    std::unordered_set<BindingNode*> final_outputs;
+
+    // Iterate backwards from the last operator to the first.
+    for (auto it = op_nodes.rbegin(); it != op_nodes.rend(); ++it) {
+      const auto* op_node = *it;
+
+      // Process outputs of the current operator. An output "defines" or "kills"
+      // a live variable. If a variable is defined but not live (i.e., not used
+      // later), it's a final output of this subgraph.
+      for (auto* output_node : op_node->outputs) {
+        if (!output_node->resource)
+          continue;
+
+        // If the output is not in the live set, it means it's not used by any
+        // subsequent operation, making it a final output.
+        if (live_nodes.find(output_node) == live_nodes.end()) {
+          final_outputs.insert(output_node);
+        }
+
+        // The variable is now defined, so we can remove it from the live set.
+        live_nodes.erase(output_node);
+      }
+
+      // Process inputs of the current operator. An input "uses" a variable, so
+      // we add it to the live set as it needs to be live before this point.
+      for (auto* input_node : op_node->inputs) {
+        if (!input_node->resource)
+          continue;
+        live_nodes.insert(input_node);
+      }
+    }
+
+    outputs.assign(final_outputs.begin(), final_outputs.end());
+  }
+
   // Splits the current SubGraph into two smaller SubGraphs at a specified
   // operator index. This is crucial for breaking down a large graph into
   // manageable parts that can be compiled and executed independently.
@@ -116,50 +169,9 @@ class SubGraph {
     second_half.inputs.assign(second_half_inputs_set.begin(),
                               second_half_inputs_set.end());
 
-    // 4. Determine the outputs for each half. An output of the first half is a
-    // resource that is either an output of the original graph or is consumed by
-    // the second half. An output of the second half is a resource that is also
-    // an output of the original graph.
-    // 4. Determine the outputs for each half. An output of a subgraph is a
-    // resource that is produced within that subgraph but not consumed by any
-    // operator within that same subgraph.
-    std::unordered_set<BindingNode*> consumed_in_first_half;
-    for (const auto* op_node : first_half.op_nodes) {
-      for (auto* input_node : op_node->inputs) {
-        if (input_node->resource) {
-          consumed_in_first_half.insert(input_node);
-        }
-      }
-    }
-
-    std::unordered_set<BindingNode*> first_half_outputs_set;
-    for (auto* produced_node : first_half_produced_outputs) {
-      if (consumed_in_first_half.find(produced_node) ==
-          consumed_in_first_half.end()) {
-        first_half_outputs_set.insert(produced_node);
-      }
-    }
-    first_half.outputs.assign(first_half_outputs_set.begin(),
-                              first_half_outputs_set.end());
-
-    std::unordered_set<BindingNode*> consumed_in_second_half;
-    for (const auto* op_node : second_half.op_nodes) {
-      for (auto* input_node : op_node->inputs) {
-        if (input_node->resource) {
-          consumed_in_second_half.insert(input_node);
-        }
-      }
-    }
-
-    std::unordered_set<BindingNode*> second_half_outputs_set;
-    for (auto* produced_node : second_half_produced_outputs) {
-      if (consumed_in_second_half.find(produced_node) ==
-          consumed_in_second_half.end()) {
-        second_half_outputs_set.insert(produced_node);
-      }
-    }
-    second_half.outputs.assign(second_half_outputs_set.begin(),
-                               second_half_outputs_set.end());
+    // 4. Determine the outputs for each half using liveness analysis.
+    first_half.CalculateAndSetOutputs();
+    second_half.CalculateAndSetOutputs();
 
     return {std::move(first_half), std::move(second_half)};
   }
@@ -495,31 +507,14 @@ void GraphRecorder::End() {
     return;
   }
 
-  // Identify the final outputs of the graph. An output is a resource produced
-  // by an operator that is not consumed by any other operator in the graph.
-  for (const auto& op_node : m_operator_nodes) {
-    for (auto& output_node : op_node->outputs) {
-      bool is_consumed = false;
-      for (const auto& consumer_node : m_operator_nodes) {
-        for (const auto& input_node : consumer_node->inputs) {
-          if (input_node == output_node) {
-            is_consumed = true;
-            break;
-          }
-        }
-        if (is_consumed)
-          break;
-      }
-      if (!is_consumed) {
-        m_graph_outputs.push_back(output_node);
-      }
-    }
-  }
-
   // Begin with a single subgraph containing the entire recorded graph.
   std::list<SubGraph> processing_list;
-  processing_list.emplace_back(m_operator_nodes, m_graph_inputs,
-                               m_graph_outputs);
+  processing_list.emplace_back(m_operator_nodes, m_graph_inputs);
+  if (kDumpSubGraphs) {
+    std::cout << "Initial SubGraph:\n";
+    processing_list.front().Dump(std::cout);
+    std::cout << "End of Initial SubGraph\n";
+  }
   std::vector<SubGraph> final_subgraphs;
 
   // Iteratively process subgraphs, splitting them as necessary until all
