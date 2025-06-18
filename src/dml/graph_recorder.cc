@@ -19,10 +19,20 @@ namespace dml {
 
 namespace {  // anonymous
 
+// When true, dumps the initial and final subgraphs to the console for
+// debugging.
 constexpr bool kDumpSubGraphs = false;
+// When true, dumps a subgraph to stderr if it's retrieved from the cache.
+constexpr bool kDumpSubGraphAfterCacheHit = false;
+// When true, forces all subgraphs to be executed operator-by-operator instead
+// of being fused.
 constexpr bool kAlwaysEvaluateSubgraphs = false;
+// When true, compares the output of fused graph execution with unfused
+// execution to verify correctness.
 constexpr bool kCompareWithUnfused = false;
-constexpr bool kAlwaysRecompileSubgraphs = true;
+// When true, forces recompilation of subgraphs even if they are found in the
+// cache.
+constexpr bool kAlwaysRecompileSubgraphs = false;
 
 // Represents a portion of a larger computation graph. A SubGraph consists of a
 // set of operator nodes, their inputs, and their outputs. SubGraphs can be
@@ -30,9 +40,12 @@ constexpr bool kAlwaysRecompileSubgraphs = true;
 // constraints.
 class SubGraph {
  public:
-  std::vector<OperatorNode*> op_nodes;
-  std::vector<BindingNode*> inputs;
-  std::vector<BindingNode*> outputs;
+  std::vector<OperatorNode*>
+      op_nodes;  // Operators in the subgraph, in execution order.
+  std::vector<BindingNode*>
+      inputs;  // External inputs required by the subgraph.
+  std::vector<BindingNode*> outputs;  // Outputs produced by the subgraph that
+                                      // are live after its execution.
 
   SubGraph() = default;
 
@@ -67,31 +80,24 @@ class SubGraph {
   // by iterating through the operators in reverse order.
   void CalculateAndSetOutputs() {
     std::unordered_set<BindingNode*> live_nodes;
-    std::unordered_set<BindingNode*> final_outputs;
+    std::unordered_set<BindingNode*> final_outputs_set;
 
-    // Iterate backwards from the last operator to the first.
+    // Iterate backwards from the last operator to the first to determine the
+    // set of final outputs using liveness analysis.
     for (auto it = op_nodes.rbegin(); it != op_nodes.rend(); ++it) {
       const auto* op_node = *it;
 
-      // Process outputs of the current operator. An output "defines" or "kills"
-      // a live variable. If a variable is defined but not live (i.e., not used
-      // later), it's a final output of this subgraph.
       for (auto* output_node : op_node->outputs) {
         if (!output_node->resource)
           continue;
 
-        // If the output is not in the live set, it means it's not used by any
-        // subsequent operation, making it a final output.
         if (live_nodes.find(output_node) == live_nodes.end()) {
-          final_outputs.insert(output_node);
+          final_outputs_set.insert(output_node);
         }
 
-        // The variable is now defined, so we can remove it from the live set.
         live_nodes.erase(output_node);
       }
 
-      // Process inputs of the current operator. An input "uses" a variable, so
-      // we add it to the live set as it needs to be live before this point.
       for (auto* input_node : op_node->inputs) {
         if (!input_node->resource)
           continue;
@@ -99,7 +105,19 @@ class SubGraph {
       }
     }
 
-    outputs.assign(final_outputs.begin(), final_outputs.end());
+    // Order the outputs based on the operator execution order to ensure a
+    // deterministic sequence.
+    outputs.clear();
+    std::unordered_set<BindingNode*> seen_outputs;
+    for (const auto* op_node : op_nodes) {
+      for (auto* output_node : op_node->outputs) {
+        if (final_outputs_set.count(output_node) &&
+            seen_outputs.find(output_node) == seen_outputs.end()) {
+          outputs.push_back(output_node);
+          seen_outputs.insert(output_node);
+        }
+      }
+    }
   }
 
   // Splits the current SubGraph into two smaller SubGraphs at a specified
@@ -144,32 +162,36 @@ class SubGraph {
 
     // 3. Determine the inputs for each half. An input to a half is a resource
     // that is consumed by an operator in that half but not produced within the
-    // same half.
-    std::unordered_set<BindingNode*> first_half_inputs_set;
+    // same half. The inputs are ordered by their first use.
+    std::unordered_set<BindingNode*> first_half_inputs_seen;
     for (const auto* op_node : first_half.op_nodes) {
       for (auto* input_node : op_node->inputs) {
         if (input_node->resource &&
             first_half_produced_outputs.find(input_node) ==
                 first_half_produced_outputs.end()) {
-          first_half_inputs_set.insert(input_node);
+          if (first_half_inputs_seen.find(input_node) ==
+              first_half_inputs_seen.end()) {
+            first_half.inputs.push_back(input_node);
+            first_half_inputs_seen.insert(input_node);
+          }
         }
       }
     }
-    first_half.inputs.assign(first_half_inputs_set.begin(),
-                             first_half_inputs_set.end());
 
-    std::unordered_set<BindingNode*> second_half_inputs_set;
+    std::unordered_set<BindingNode*> second_half_inputs_seen;
     for (const auto* op_node : second_half.op_nodes) {
       for (auto* input_node : op_node->inputs) {
         if (input_node->resource &&
             second_half_produced_outputs.find(input_node) ==
                 second_half_produced_outputs.end()) {
-          second_half_inputs_set.insert(input_node);
+          if (second_half_inputs_seen.find(input_node) ==
+              second_half_inputs_seen.end()) {
+            second_half.inputs.push_back(input_node);
+            second_half_inputs_seen.insert(input_node);
+          }
         }
       }
     }
-    second_half.inputs.assign(second_half_inputs_set.begin(),
-                              second_half_inputs_set.end());
 
     // 4. Determine the outputs for each half using liveness analysis.
     first_half.CalculateAndSetOutputs();
@@ -178,6 +200,9 @@ class SubGraph {
     return {std::move(first_half), std::move(second_half)};
   }
 
+  // Generates a unique cache key for the subgraph based on its operators and
+  // input/output bindings. This key is used to cache and retrieve compiled DML
+  // graphs.
   std::string GetCacheKey() const {
     std::string key = "Graph:";
     for (const auto* op_node : op_nodes) {
@@ -205,6 +230,8 @@ class SubGraph {
     return key;
   }
 
+  // Dumps a detailed, human-readable representation of the subgraph to the
+  // provided output stream. This is useful for debugging the graph structure.
   void Dump(std::ostream& os) const {
     std::unordered_map<const BindingNode*, size_t> graph_input_to_index;
     for (size_t i = 0; i < inputs.size(); ++i) {
@@ -410,6 +437,7 @@ void EvaluateSubGraphWithoutFusedGraph(const SubGraph& subgraph) {
 // 3. Downloading the new results from the output buffers.
 // 4. Comparing the two sets of results and throwing an exception if they don't
 //    match.
+// Anonymous namespace for helper functions used in correctness verification.
 namespace {
 std::vector<std::vector<std::byte>> DownloadSubgraphOutputs(
     const SubGraph& subgraph,
@@ -573,7 +601,8 @@ void GraphRecorder::Execute(Operator* op,
 }
 
 // A debug/testing function to execute the recorded graph without creating a
-// fused DML graph. This executes operators one by one.
+// fused DML graph. This executes operators one by one. This is useful for
+// bypassing the fusion logic to isolate issues.
 void GraphRecorder::EvaluateGraphWithoutFusedGraph() {
   // Mark the last operator's outputs as graph outputs.
   OperatorNode* last_op_node = m_operator_nodes.back().get();
@@ -726,6 +755,13 @@ void GraphRecorder::End() {
       get_device()->KeepAliveUntilNextCommandListDispatch(new_graph_op_comptr);
       cache.AddOperator(std::move(key_accumulator),
                         std::move(new_graph_op_comptr));
+    } else {
+      if (kDumpSubGraphAfterCacheHit) {
+        std::cerr << "Get graph op from cache: " << key_accumulator.size()
+                  << std::endl;
+        std::cerr << "Subgraph after cache hit:\n";
+        subgraph.Dump(std::cerr);
+      }
     }
 
     // Prepare input and output bindings for execution.
