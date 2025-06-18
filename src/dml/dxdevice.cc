@@ -1123,5 +1123,9 @@ void Device::SplitGraphRecording() {
   }
 }
 
+bool Device::HasGraphRecordingBegun() const {
+  return (m_graphRecorder && m_graphRecorder->has_begun());
+}
+
 }  // namespace dml
 }  // namespace ctranslate2

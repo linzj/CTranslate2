@@ -213,6 +213,7 @@ class Device {
   void BeginGraphRecording();
   void EndGraphRecording();
   void SplitGraphRecording();
+  bool HasGraphRecordingBegun() const;
   GraphRecorder* GetGraphRecorder() { return m_graphRecorder.get(); }
 
  private:

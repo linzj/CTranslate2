@@ -61,7 +61,7 @@ void dump_graph_for_debug(
     std::ostream& os,
     const DML_GRAPH_DESC& graph_desc,
     const std::vector<DML_GRAPH_NODE_DESC>& graph_nodes,
-    const std::vector<std::unique_ptr<OperatorNode>>& operator_nodes,
+    const std::vector<OperatorNode*>& operator_nodes,
     const std::map<const BindingNode*, std::pair<uint32_t, uint32_t>>&
         intermediate_producers,
     const std::map<const BindingNode*, uint32_t>& graph_input_to_index,
@@ -92,20 +92,15 @@ void dump_graph_for_debug(
       const auto& input_binding = op_node->inputs[j];
       os << "      Input[" << j << "]: " << input_binding;
       if (input_binding) {
-        os << " (is_graph_input: " << input_binding->is_graph_input;
         if (input_binding->resource) {
           os << ", resource: " << input_binding->resource
              << ", offset: " << input_binding->offset
              << ", size: " << input_binding->size_in_bytes;
         }
         os << ")";
-        if (input_binding->is_graph_input) {
-          auto it = graph_input_to_index.find(input_binding);
-          if (it != graph_input_to_index.end()) {
-            os << " -> Graph Input Index: " << it->second;
-          } else {
-            os << " -> ERROR: Not found in graph_input_to_index";
-          }
+        auto it_graph_input = graph_input_to_index.find(input_binding);
+        if (it_graph_input != graph_input_to_index.end()) {
+          os << " -> Graph Input Index: " << it_graph_input->second;
         } else {
           auto it = intermediate_producers.find(input_binding);
           if (it != intermediate_producers.end()) {
@@ -124,20 +119,15 @@ void dump_graph_for_debug(
       const auto& output_binding = op_node->outputs[j];
       os << "      Output[" << j << "]: " << output_binding;
       if (output_binding) {
-        os << " (is_graph_output: " << output_binding->is_graph_output;
         if (output_binding->resource) {
           os << ", resource: " << output_binding->resource
              << ", offset: " << output_binding->offset
              << ", size: " << output_binding->size_in_bytes;
         }
         os << ")";
-        if (output_binding->is_graph_output) {
-          auto it = graph_output_to_index.find(output_binding);
-          if (it != graph_output_to_index.end()) {
-            os << " -> Graph Output Index: " << it->second;
-          } else {
-            os << " -> ERROR: Not found in graph_output_to_index";
-          }
+        auto it_graph_output = graph_output_to_index.find(output_binding);
+        if (it_graph_output != graph_output_to_index.end()) {
+          os << " -> Graph Output Index: " << it_graph_output->second;
         }
       }
       os << "\n";
@@ -187,7 +177,7 @@ void dump_graph_for_debug(
 
 // Builds a DirectML graph from a collection of operator nodes and compiles it.
 Microsoft::WRL::ComPtr<IDMLCompiledOperator> GraphBuilder::Build(
-    const std::vector<std::unique_ptr<OperatorNode>>& operator_nodes,
+    const std::vector<OperatorNode*>& operator_nodes,
     const std::vector<BindingNode*>& graph_inputs,
     const std::vector<BindingNode*>& graph_outputs,
     DML_EXECUTION_FLAGS flags,
@@ -280,7 +270,7 @@ Microsoft::WRL::ComPtr<IDMLCompiledOperator> GraphBuilder::Build(
   for (const auto& op_node : operator_nodes) {
     for (const auto& input_binding : op_node->inputs) {
       if (input_binding && input_binding->resource) {
-        if (input_binding->is_graph_input) {
+        if (graph_input_to_index.count(input_binding)) {
           input_edge_count++;
         } else {
           intermediate_edge_count++;
@@ -288,7 +278,7 @@ Microsoft::WRL::ComPtr<IDMLCompiledOperator> GraphBuilder::Build(
       }
     }
     for (const auto& output_binding : op_node->outputs) {
-      if (output_binding && output_binding->is_graph_output) {
+      if (output_binding && graph_output_to_index.count(output_binding)) {
         output_edge_count++;
       }
     }
@@ -308,15 +298,11 @@ Microsoft::WRL::ComPtr<IDMLCompiledOperator> GraphBuilder::Build(
     for (size_t j = 0; j < op_node->inputs.size(); ++j) {
       BindingNode* input_binding = op_node->inputs[j];
       if (input_binding && input_binding->resource) {
-        if (input_binding->is_graph_input) {
+        auto it_graph_input = graph_input_to_index.find(input_binding);
+        if (it_graph_input != graph_input_to_index.end()) {
           // This input is a main graph input. Create an input edge.
-          auto it = graph_input_to_index.find(input_binding);
-          if (it == graph_input_to_index.end())
-            THROW_RUNTIME_ERROR(
-                "Binding node is a graph input but not in the graph input "
-                "list.");
           input_edge_descs.push_back(
-              {it->second, (UINT)i, dml_input_idx, nullptr});
+              {it_graph_input->second, (UINT)i, dml_input_idx, nullptr});
           input_edges.push_back(
               {DML_GRAPH_EDGE_TYPE_INPUT, &input_edge_descs.back()});
         } else {
@@ -338,14 +324,11 @@ Microsoft::WRL::ComPtr<IDMLCompiledOperator> GraphBuilder::Build(
     // Check for outputs that are also main graph outputs.
     for (size_t j = 0; j < op_node->outputs.size(); ++j) {
       BindingNode* output_binding = op_node->outputs[j];
-      if (output_binding && output_binding->is_graph_output) {
+      auto it_graph_output = graph_output_to_index.find(output_binding);
+      if (output_binding && it_graph_output != graph_output_to_index.end()) {
         // This output is a main graph output. Create an output edge.
-        auto it = graph_output_to_index.find(output_binding);
-        if (it == graph_output_to_index.end())
-          THROW_RUNTIME_ERROR(
-              "Binding node is a graph output but not in the graph output "
-              "list.");
-        output_edge_descs.push_back({(UINT)i, (UINT)j, it->second, nullptr});
+        output_edge_descs.push_back(
+            {(UINT)i, (UINT)j, it_graph_output->second, nullptr});
         output_edges.push_back(
             {DML_GRAPH_EDGE_TYPE_OUTPUT, &output_edge_descs.back()});
       }

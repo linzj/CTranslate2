@@ -1,6 +1,7 @@
 #ifdef CT2_WITH_DIRECTML
 #include "ctranslate2/ops/quantize.h"
 
+#include "dml/backend_dml.h"
 #include "dml/constant_pool.h"
 #include "dml/dml_utils.h"
 #include "dml/operator.h"
@@ -319,9 +320,19 @@ void Quantize::quantize(const StorageView& input,
     dml::Operator* compiled_recip_op = dml::GetOrCreateCompiledOperatorApi(
         std::move(op_desc), DML_EXECUTION_FLAG_NONE,
         L"Quantize_FinalReciprocalScale");
+    // Avoid input overlaps output if graph recording is enabled.
+    StorageView scale_storage;
+    StorageView* scale_input = &scale;
+    if (dml::get_device()->HasGraphRecordingBegun()) {
+      scale_storage = std::move(scale);
+      scale_input = &scale_storage;
+      StorageView output(scale_storage.shape(), scale_storage.dtype(),
+                         Device::DirectML);
+      scale = std::move(output);
+    }
     compiled_recip_op->Execute(
-        {{dml::utils::ResourceFromStorageView(scale), static_cast<UINT64>(0),
-          static_cast<UINT64>(0)}},
+        {{dml::utils::ResourceFromStorageView(*scale_input),
+          static_cast<UINT64>(0), static_cast<UINT64>(0)}},
         {{dml::utils::ResourceFromStorageView(scale), static_cast<UINT64>(0),
           static_cast<UINT64>(0)}});
   }

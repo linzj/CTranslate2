@@ -18,7 +18,7 @@ class GraphBuilder {
  public:
   // Builds a DML_GRAPH_DESC and compiles it into an IDMLCompiledOperator.
   static Microsoft::WRL::ComPtr<IDMLCompiledOperator> Build(
-      const std::vector<std::unique_ptr<OperatorNode>>& operator_nodes,
+      const std::vector<OperatorNode*>& operator_nodes,
       const std::vector<BindingNode*>& graph_inputs,
       const std::vector<BindingNode*>& graph_outputs,
       DML_EXECUTION_FLAGS flags,
