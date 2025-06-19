@@ -7,7 +7,7 @@
 #include "operator_utils.h"
 
 #include <iostream>
-#include <map>
+#include <unordered_map>
 #include <vector>
 
 namespace ctranslate2 {
@@ -35,15 +35,18 @@ struct Value {
 
 void check_for_graph_binding_overlaps(
     std::ostream& os,
+    const std::vector<OperatorNode*>& operator_nodes,
     const std::vector<BindingNode*>& graph_inputs,
-    const std::vector<BindingNode*>& graph_outputs) {
+    const std::vector<OutputEdge>& graph_outputs) {
   bool overlap_found = false;
 
   for (const auto* input_binding : graph_inputs) {
     if (!input_binding || !input_binding->resource)
       continue;
 
-    for (const auto* output_binding : graph_outputs) {
+    for (const auto output_edge : graph_outputs) {
+      const auto* output_binding = operator_nodes[output_edge.node_index]
+                                       ->outputs[output_edge.output_index];
       if (!output_binding || !output_binding->resource)
         continue;
 
@@ -79,10 +82,9 @@ void dump_graph_for_debug(
     const DML_GRAPH_DESC& graph_desc,
     const std::vector<DML_GRAPH_NODE_DESC>& graph_nodes,
     const std::vector<OperatorNode*>& operator_nodes,
-    const std::map<const ID3D12Resource*, Value>& value_producers,
-    const std::map<const ID3D12Resource*, uint32_t>& graph_output_to_index,
+    const std::unordered_map<const ID3D12Resource*, Value>& value_producers,
     const std::vector<BindingNode*>& graph_inputs,
-    const std::vector<BindingNode*>& graph_outputs) {
+    const std::vector<OutputEdge>& graph_outputs) {
   os << "Dumping DML Graph State for Debugging:\n";
   os << "=======================================\n";
 
@@ -145,10 +147,13 @@ void dump_graph_for_debug(
         }
         os << ")";
         if (output_binding->resource) {
-          auto it_graph_output =
-              graph_output_to_index.find(output_binding->resource);
-          if (it_graph_output != graph_output_to_index.end()) {
-            os << " -> Graph Output Index: " << it_graph_output->second;
+          OutputEdge maybe_output_edge = {static_cast<UINT>(i), (UINT)j};
+          auto it_graph_output = std::find(
+              graph_outputs.begin(), graph_outputs.end(), maybe_output_edge);
+          if (it_graph_output != graph_outputs.end()) {
+            os << " -> Graph Output Index: "
+               << static_cast<UINT>(
+                      std::distance(graph_outputs.begin(), it_graph_output));
           }
         }
       }
@@ -201,7 +206,7 @@ void dump_graph_for_debug(
 Microsoft::WRL::ComPtr<IDMLCompiledOperator> GraphBuilder::Build(
     const std::vector<OperatorNode*>& operator_nodes,
     const std::vector<BindingNode*>& graph_inputs,
-    const std::vector<BindingNode*>& graph_outputs,
+    const std::vector<OutputEdge>& graph_outputs,
     DML_EXECUTION_FLAGS flags,
     const std::string& key) {
   // Get the DML device and query for the IDMLDevice1 interface, which is
@@ -233,7 +238,7 @@ Microsoft::WRL::ComPtr<IDMLCompiledOperator> GraphBuilder::Build(
   graph_desc.Nodes = graph_nodes.data();
 
   // Map to track the origin of each tensor value in the graph.
-  std::map<const ID3D12Resource*, Value> value_producers;
+  std::unordered_map<const ID3D12Resource*, Value> value_producers;
 
   // Initialize with graph inputs.
   for (size_t i = 0; i < graph_inputs.size(); ++i) {
@@ -243,14 +248,6 @@ Microsoft::WRL::ComPtr<IDMLCompiledOperator> GraphBuilder::Build(
       val.type = ValueType::GRAPH_INPUT;
       val.graph_input_index = static_cast<uint32_t>(i);
       value_producers[input_binding->resource] = val;
-    }
-  }
-
-  // Map graph output resources to their index in the graph's output list.
-  std::map<const ID3D12Resource*, uint32_t> graph_output_to_index;
-  for (size_t i = 0; i < graph_outputs.size(); ++i) {
-    if (graph_outputs[i] && graph_outputs[i]->resource) {
-      graph_output_to_index[graph_outputs[i]->resource] = i;
     }
   }
 
@@ -289,11 +286,16 @@ Microsoft::WRL::ComPtr<IDMLCompiledOperator> GraphBuilder::Build(
     for (size_t j = 0; j < op_node->outputs.size(); ++j) {
       BindingNode* output_binding = op_node->outputs[j];
       if (output_binding && output_binding->resource) {
-        auto it_graph_output =
-            graph_output_to_index.find(output_binding->resource);
-        if (it_graph_output != graph_output_to_index.end()) {
+        OutputEdge maybe_output_edge = {static_cast<UINT>(i), (UINT)j};
+
+        auto it_graph_output = std::find(
+            graph_outputs.begin(), graph_outputs.end(), maybe_output_edge);
+        if (it_graph_output != graph_outputs.end()) {
           output_edge_descs.push_back(
-              {(UINT)i, (UINT)j, it_graph_output->second, nullptr});
+              {(UINT)i, (UINT)j,
+               static_cast<UINT>(
+                   std::distance(graph_outputs.begin(), it_graph_output)),
+               nullptr});
         }
         // This output is now a value producer for subsequent nodes.
         Value val;
@@ -325,11 +327,11 @@ Microsoft::WRL::ComPtr<IDMLCompiledOperator> GraphBuilder::Build(
 
   if (kDumpGraphForDebug) {
     dump_graph_for_debug(std::cerr, graph_desc, graph_nodes, operator_nodes,
-                         value_producers, graph_output_to_index, graph_inputs,
-                         graph_outputs);
+                         value_producers, graph_inputs, graph_outputs);
   }
 
-  check_for_graph_binding_overlaps(std::cerr, graph_inputs, graph_outputs);
+  check_for_graph_binding_overlaps(std::cerr, operator_nodes, graph_inputs,
+                                   graph_outputs);
 
   // Compile the graph description into a runnable, optimized operator.
   Microsoft::WRL::ComPtr<IDMLCompiledOperator> compiled_graph;

@@ -34,6 +34,14 @@ struct OperatorNode {
   std::vector<BindingNode*> outputs;  // Pointers to the output BindingNodes.
 };
 
+struct OutputEdge {
+  UINT32 node_index;    // Index of the operator node producing this output.
+  UINT32 output_index;  // Index of the output binding within the operator.
+  bool operator==(const OutputEdge& other) const {
+    return node_index == other.node_index && output_index == other.output_index;
+  }
+};
+
 // The GraphRecorder class is responsible for capturing a sequence of DML
 // operator executions and transforming them into a series of executable DML
 // graphs. It handles resource dependencies, splits the graph when necessary,

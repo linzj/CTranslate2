@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -60,27 +61,14 @@ constexpr bool kDumpSubGraphBeforeBuild = false;
 // constraints.
 class SubGraph {
  public:
-  std::vector<OperatorNode*>
-      op_nodes;  // Operators in the subgraph, in execution order.
-  std::vector<BindingNode*>
-      inputs;  // External inputs required by the subgraph.
-  std::vector<BindingNode*> outputs;  // Outputs produced by the subgraph that
-                                      // are live after its execution.
+  // Operators in the subgraph, in execution order.
+  std::vector<OperatorNode*> op_nodes;
+  // External inputs required by the subgraph.
+  std::vector<BindingNode*> inputs;
+  // Outputs produced by the subgraph that are live after its execution.
+  std::vector<OutputEdge> outputs;
 
   SubGraph() = default;
-
-  // Constructs a SubGraph from all operator nodes and the initial graph's
-  // inputs and outputs.
-  SubGraph(const std::vector<std::unique_ptr<OperatorNode>>& all_op_nodes,
-           const std::vector<BindingNode*>& graph_inputs,
-           const std::vector<BindingNode*>& graph_outputs) {
-    op_nodes.reserve(all_op_nodes.size());
-    for (const auto& node : all_op_nodes) {
-      op_nodes.push_back(node.get());
-    }
-    inputs = graph_inputs;
-    outputs = graph_outputs;
-  }
 
   // Constructs a SubGraph from all operator nodes and the initial graph's
   // inputs. The outputs are calculated using liveness analysis.
@@ -99,20 +87,22 @@ class SubGraph {
   // used (live) by any subsequent operators in the block. The analysis is done
   // by iterating through the operators in reverse order.
   void CalculateAndSetOutputs() {
+    outputs.clear();
     std::unordered_set<ID3D12Resource*> live_nodes;
-    std::unordered_set<BindingNode*> final_outputs_set;
-
     // Iterate backwards from the last operator to the first to determine the
     // set of final outputs using liveness analysis.
-    for (auto it = op_nodes.rbegin(); it != op_nodes.rend(); ++it) {
-      const auto* op_node = *it;
+    using ssize_t = std::make_signed_t<size_t>;
+    for (ssize_t i = static_cast<ssize_t>(op_nodes.size()) - 1; i >= 0; --i) {
+      const auto* op_node = op_nodes[i];
 
-      for (auto* output_node : op_node->outputs) {
+      for (size_t j = 0; j < op_node->outputs.size(); ++j) {
+        BindingNode* output_node = op_node->outputs[j];
         if (!output_node->resource)
           continue;
 
         if (live_nodes.find(output_node->resource) == live_nodes.end()) {
-          final_outputs_set.insert(output_node);
+          outputs.emplace_back(
+              OutputEdge{static_cast<UINT32>(i), static_cast<UINT32>(j)});
         }
 
         live_nodes.erase(output_node->resource);
@@ -122,20 +112,6 @@ class SubGraph {
         if (!input_node->resource)
           continue;
         live_nodes.insert(input_node->resource);
-      }
-    }
-
-    // Order the outputs based on the operator execution order to ensure a
-    // deterministic sequence.
-    outputs.clear();
-    std::unordered_set<BindingNode*> seen_outputs;
-    for (const auto* op_node : op_nodes) {
-      for (auto* output_node : op_node->outputs) {
-        if (final_outputs_set.count(output_node) &&
-            seen_outputs.find(output_node) == seen_outputs.end()) {
-          outputs.push_back(output_node);
-          seen_outputs.insert(output_node);
-        }
       }
     }
   }
@@ -243,8 +219,9 @@ class SubGraph {
     }
 
     key += "Outputs:";
-    for (const auto* output_node : outputs) {
-      key += binding_to_string(output_node) + ";";
+    for (const auto& output_node : outputs) {
+      key.append(reinterpret_cast<const char*>(&output_node),
+                 sizeof(OutputEdge));
     }
 
     return key;
@@ -259,8 +236,10 @@ class SubGraph {
       return true;
     }
 
-    for (auto* output_node : outputs) {
+    for (const auto& output_edge : outputs) {
       for (auto* input_node : inputs) {
+        auto* output_node =
+            op_nodes[output_edge.node_index]->outputs[output_edge.output_index];
         if (bindings_overlap(output_node, input_node)) {
           return true;
         }
@@ -272,8 +251,10 @@ class SubGraph {
 
   bool FindOutputsOverlapInputs(
       std::vector<std::pair<BindingNode*, BindingNode*>>& overlapping_pairs) {
-    for (auto* output_node : outputs) {
+    for (const auto& output_edge : outputs) {
       for (auto* input_node : inputs) {
+        auto* output_node =
+            op_nodes[output_edge.node_index]->outputs[output_edge.output_index];
         if (bindings_overlap(output_node, input_node)) {
           overlapping_pairs.emplace_back(output_node, input_node);
         }
@@ -301,11 +282,6 @@ class SubGraph {
       if (inputs[i] && inputs[i]->resource) {
         value_map[inputs[i]->resource] = {Value::Type::kGraphInput, i, 0};
       }
-    }
-
-    std::unordered_map<const BindingNode*, size_t> graph_output_to_index;
-    for (size_t i = 0; i < outputs.size(); ++i) {
-      graph_output_to_index[outputs[i]] = i;
     }
 
     os << "Nodes (" << op_nodes.size() << "):\n";
@@ -355,9 +331,15 @@ class SubGraph {
                << ", size: " << output_binding->size_in_bytes;
           }
           os << ")";
-          auto it_graph_output = graph_output_to_index.find(output_binding);
-          if (it_graph_output != graph_output_to_index.end()) {
-            os << " -> Graph Output Index: " << it_graph_output->second;
+          OutputEdge maybe_output_edge{static_cast<UINT>(i),
+                                       static_cast<UINT>(j)};
+
+          auto it_graph_output =
+              std::find(outputs.begin(), outputs.end(), maybe_output_edge);
+          if (it_graph_output != outputs.end()) {
+            os << " -> Graph Output Index: "
+               << static_cast<UINT>(
+                      std::distance(outputs.begin(), it_graph_output));
           }
         }
         os << "\n";
@@ -372,129 +354,36 @@ class SubGraph {
       }
     }
   }
+
+  // To execute a subgraph without creating a
+  // fused DML graph. This executes operators one by one.
+  void EvaluateSubGraphWithoutFusedGraph() const {
+    // Now execute the graph operator by operator.
+    for (const auto& op_node : op_nodes) {
+      // Prepare DmlBindingArrayBundle for inputs
+      std::vector<utils::DmlBufferBindingBundle> inputs_bundles;
+      inputs_bundles.reserve(op_node->inputs.size());
+      for (const BindingNode* binding_node : op_node->inputs) {
+        inputs_bundles.emplace_back(binding_node->resource,
+                                    binding_node->offset,
+                                    binding_node->size_in_bytes);
+      }
+      utils::DmlBindingArrayBundle current_inputs(std::move(inputs_bundles));
+
+      // Prepare DmlBindingArrayBundle for outputs
+      std::vector<utils::DmlBufferBindingBundle> outputs_bundles;
+      outputs_bundles.reserve(op_node->outputs.size());
+      for (const BindingNode* binding_node : op_node->outputs) {
+        outputs_bundles.emplace_back(binding_node->resource,
+                                     binding_node->offset,
+                                     binding_node->size_in_bytes);
+      }
+      utils::DmlBindingArrayBundle current_outputs(std::move(outputs_bundles));
+
+      op_node->op->Execute(current_inputs, current_outputs);
+    }
+  }
 };
-
-// Analyzes a subgraph to find a suitable point to split it. A split is
-// necessary if certain data dependency rules are violated, such as an
-// operation's output overlapping with a graph input.
-std::optional<size_t> FindSplitPoint(
-    const SubGraph& subgraph,
-    const std::vector<BindingNode*>& original_graph_inputs) {
-  // std::unordered_map<ID3D12Resource*, const BindingNode*>
-  // committed_outputs;
-  for (size_t op_idx = 0; op_idx < subgraph.op_nodes.size(); ++op_idx) {
-    const auto* op_node = subgraph.op_nodes[op_idx];
-
-// Rule 2 is disabled for it renders wrong result.
-#if 0
-    // Rule 2: An operator's input must not overlap with the output of a
-    // previous operator, unless it's the exact same resource. This prevents
-    // read-after-write hazards.
-    for (const auto* input_node : op_node->inputs) {
-      if (!input_node || !input_node->resource)
-        continue;
-      for (const auto& pair : committed_outputs) {
-        const auto* prev_output = pair.second;
-        if (input_node != prev_output &&
-            bindings_overlap(input_node, prev_output)) {
-          SPDLOG_DEBUG(
-              "Splitting graph: Operator input overlaps with a "
-              "previous output with different binding. Op: '{}', "
-              "Resource: {}",
-              OperatorUtils::DML_OPERATOR_TYPE_toString(op_node->op->GetType()),
-              (void*)input_node->resource);
-          return op_idx;
-        }
-      }
-    }
-#endif
-
-    for (const auto* output_node : op_node->outputs) {
-      if (!output_node || !output_node->resource)
-        continue;
-
-      // Rule 1: An operator's output must not overlap with any of the
-      // subgraph's inputs. This prevents write-after-read hazards within the
-      // subgraph.
-      for (const auto* subgraph_input : subgraph.inputs) {
-        if (subgraph_input->resource &&
-            bindings_overlap(output_node, subgraph_input)) {
-          SPDLOG_DEBUG(
-              "Splitting graph: Operator output overlaps with a "
-              "subgraph input. Op: '{}', Resource: {}",
-              OperatorUtils::DML_OPERATOR_TYPE_toString(op_node->op->GetType()),
-              (void*)output_node->resource);
-          return op_idx;
-        }
-      }
-
-#if 0
-      // Rule 3: An operator's output must not overlap with any of the original
-      // graph's inputs. This is a broader check to ensure integrity across the
-      // entire computation.
-      for (const auto* original_graph_input : original_graph_inputs) {
-        if (original_graph_input->resource &&
-            bindings_overlap(output_node, original_graph_input)) {
-          SPDLOG_DEBUG(
-              "Splitting graph: Operator output overlaps with a graph input. "
-              "Op: '{}', Resource: {}",
-              OperatorUtils::DML_OPERATOR_TYPE_toString(op_node->op->GetType()),
-              (void*)output_node->resource);
-          return op_idx;
-        }
-      }
-
-      // Rule 4: An operator's outputs should not overlap its inputs.
-      for (const auto* input_node : op_node->inputs) {
-        if (bindings_overlap(output_node, input_node)) {
-          SPDLOG_DEBUG(
-              "Splitting graph: Operator output overlaps with its input. "
-              "Op: '{}', Resource: {}",
-              OperatorUtils::DML_OPERATOR_TYPE_toString(op_node->op->GetType()),
-              (void*)output_node->resource);
-          return op_idx;
-        }
-      }
-#endif
-    }
-
-    // Disabled for Rule 2 is disabled
-    // The outputs of the current operator are added to the set of committed
-    // outputs for checking against subsequent operators.
-    // for (auto* output_node : op_node->outputs) {
-    //   if (output_node && output_node->resource) {
-    //     committed_outputs[output_node->resource] = output_node;
-    //   }
-    // }
-  }
-  return std::nullopt;
-}
-// A debug/testing function to execute a subgraph without creating a
-// fused DML graph. This executes operators one by one.
-void EvaluateSubGraphWithoutFusedGraph(const SubGraph& subgraph) {
-  // Now execute the graph operator by operator.
-  for (const auto& op_node : subgraph.op_nodes) {
-    // Prepare DmlBindingArrayBundle for inputs
-    std::vector<utils::DmlBufferBindingBundle> inputs_bundles;
-    inputs_bundles.reserve(op_node->inputs.size());
-    for (const BindingNode* binding_node : op_node->inputs) {
-      inputs_bundles.emplace_back(binding_node->resource, binding_node->offset,
-                                  binding_node->size_in_bytes);
-    }
-    utils::DmlBindingArrayBundle current_inputs(std::move(inputs_bundles));
-
-    // Prepare DmlBindingArrayBundle for outputs
-    std::vector<utils::DmlBufferBindingBundle> outputs_bundles;
-    outputs_bundles.reserve(op_node->outputs.size());
-    for (const BindingNode* binding_node : op_node->outputs) {
-      outputs_bundles.emplace_back(binding_node->resource, binding_node->offset,
-                                   binding_node->size_in_bytes);
-    }
-    utils::DmlBindingArrayBundle current_outputs(std::move(outputs_bundles));
-
-    op_node->op->Execute(current_inputs, current_outputs);
-  }
-}
 
 // Compares the output of a fused graph execution with a sequential, unfused
 // execution. This function is intended for debugging and verifying the
@@ -517,7 +406,9 @@ std::vector<std::vector<std::byte>> DownloadSubgraphOutputs(
   std::vector<std::vector<std::byte>> results;
   results.reserve(subgraph.outputs.size());
 
-  for (const auto& binding_node : subgraph.outputs) {
+  for (const auto& output_edge : subgraph.outputs) {
+    BindingNode* binding_node = subgraph.op_nodes[output_edge.node_index]
+                                    ->outputs[output_edge.output_index];
     if (!binding_node->resource) {
       results.emplace_back();
       continue;
@@ -549,7 +440,7 @@ void CompareAndVerify(const SubGraph& subgraph) {
   const auto fused_results = DownloadSubgraphOutputs(subgraph, "fused");
 
   // 2. Execute unfused graph. This will modify output buffers.
-  EvaluateSubGraphWithoutFusedGraph(subgraph);
+  subgraph.EvaluateSubGraphWithoutFusedGraph();
 
   // 3. Download results from unfused graph execution.
   const auto unfused_results = DownloadSubgraphOutputs(subgraph, "unfused");
@@ -687,8 +578,8 @@ void GraphRecorder::EvaluateGraphWithoutFusedGraph() {
     m_graph_outputs.push_back(output_node);
   }
 
-  SubGraph whole_graph(m_operator_nodes, m_graph_inputs, m_graph_outputs);
-  EvaluateSubGraphWithoutFusedGraph(whole_graph);
+  SubGraph whole_graph(m_operator_nodes, m_graph_inputs);
+  whole_graph.EvaluateSubGraphWithoutFusedGraph();
   Reset();
 }
 
@@ -709,66 +600,6 @@ void GraphRecorder::End() {
     return;
   }
 
-#if 0
-  // Begin with a single subgraph containing the entire recorded graph.
-  std::list<SubGraph> processing_list;
-  processing_list.emplace_back(m_operator_nodes, m_graph_inputs);
-  SubGraph initial_subgraph;
-  if (kDumpSubGraphAfterCacheHit) {
-    initial_subgraph = processing_list.front();
-  }
-  if (kDumpSubGraphs) {
-    std::cout << "Initial SubGraph:\n";
-    processing_list.front().Dump(std::cout);
-    std::cout << "End of Initial SubGraph\n";
-  }
-  std::vector<SubGraph> final_subgraphs;
-
-  // Iteratively process subgraphs, splitting them as necessary until all
-  // subgraphs are simple enough to be compiled and executed.
-  while (!processing_list.empty()) {
-    SubGraph current_subgraph = std::move(processing_list.front());
-    processing_list.pop_front();
-
-    if (current_subgraph.op_nodes.empty()) {
-      continue;
-    }
-
-    // Check if the current subgraph needs to be split.
-    std::optional<size_t> split_idx =
-        FindSplitPoint(current_subgraph, m_graph_inputs);
-
-    if (split_idx.has_value()) {
-      size_t split_at = split_idx.value();
-      if (split_at > 0) {
-        // If a valid split point is found, split the subgraph and add the
-        // two new subgraphs back to the processing list.
-        auto [first, second] = current_subgraph.Split(split_at);
-        if (!second.op_nodes.empty()) {
-          processing_list.push_front(std::move(second));
-        }
-        if (!first.op_nodes.empty()) {
-          processing_list.push_front(std::move(first));
-        }
-      } else {  // split_at == 0
-        // Handle the case where the split is at the very beginning of the
-        // subgraph.
-        if (current_subgraph.op_nodes.size() > 1) {
-          auto [first, second] = current_subgraph.Split(1);
-          final_subgraphs.push_back(std::move(first));
-          if (!second.op_nodes.empty()) {
-            processing_list.push_front(std::move(second));
-          }
-        } else {
-          final_subgraphs.push_back(std::move(current_subgraph));
-        }
-      }
-    } else {
-      // If no split is needed, the subgraph is considered final.
-      final_subgraphs.push_back(std::move(current_subgraph));
-    }
-  }
-#else
   std::vector<SubGraph> final_subgraphs{{m_operator_nodes, m_graph_inputs}};
   SubGraph& final_subgraph = final_subgraphs.back();
   std::vector<std::pair<BindingNode*, BindingNode*>> overlapping_pairs;
@@ -851,7 +682,6 @@ void GraphRecorder::End() {
       }
     }
   }
-#endif
 
   // Execute the finalized subgraphs.
   if (kDumpSubGraphs) {
@@ -865,12 +695,12 @@ void GraphRecorder::End() {
       continue;
     }
     if (kAlwaysEvaluateSubgraphs) {
-      EvaluateSubGraphWithoutFusedGraph(subgraph);
+      subgraph.EvaluateSubGraphWithoutFusedGraph();
       continue;
     }
 
     if (subgraph.IsSuitableForEvaluation()) {
-      EvaluateSubGraphWithoutFusedGraph(subgraph);
+      subgraph.EvaluateSubGraphWithoutFusedGraph();
       continue;
     }
 
@@ -883,7 +713,11 @@ void GraphRecorder::End() {
 
     if (kAlwaysRecompileSubgraphs || !graph_op) {
       // If the compiled graph is not in the cache, build it.
-      std::vector<BindingNode*> sorted_outputs = subgraph.outputs;
+      std::vector<BindingNode*> sorted_outputs;
+      for (const auto output_edge : subgraph.outputs) {
+        sorted_outputs.push_back(subgraph.op_nodes[output_edge.node_index]
+                                     ->outputs[output_edge.output_index]);
+      }
       std::sort(sorted_outputs.begin(), sorted_outputs.end(),
                 [](const BindingNode* a, const BindingNode* b) {
                   if (a->resource != b->resource)
@@ -950,7 +784,9 @@ void GraphRecorder::End() {
 
     std::vector<utils::DmlBufferBindingBundle> output_binding_bundles;
     output_binding_bundles.reserve(subgraph.outputs.size());
-    for (const auto& binding_node : subgraph.outputs) {
+    for (const auto& output_edge : subgraph.outputs) {
+      BindingNode* binding_node = subgraph.op_nodes[output_edge.node_index]
+                                      ->outputs[output_edge.output_index];
       output_binding_bundles.emplace_back(binding_node->resource,
                                           binding_node->offset,
                                           binding_node->size_in_bytes);

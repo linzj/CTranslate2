@@ -13,6 +13,7 @@ namespace dml {
 
 struct OperatorNode;
 struct BindingNode;
+struct OutputEdge;
 
 class GraphBuilder {
  public:
@@ -20,7 +21,7 @@ class GraphBuilder {
   static Microsoft::WRL::ComPtr<IDMLCompiledOperator> Build(
       const std::vector<OperatorNode*>& operator_nodes,
       const std::vector<BindingNode*>& graph_inputs,
-      const std::vector<BindingNode*>& graph_outputs,
+      const std::vector<OutputEdge>& graph_outputs,
       DML_EXECUTION_FLAGS flags,
       const std::string& key);
 };
