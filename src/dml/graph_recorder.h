@@ -37,6 +37,8 @@ struct OperatorNode {
   std::vector<BindingNode*> outputs;  // Pointers to the output BindingNodes.
 };
 
+// Represents a connection from an operator's output to a subsequent part of
+// the graph. It identifies a specific output from a specific operator node.
 struct OutputEdge {
   UINT32 node_index;    // Index of the operator node producing this output.
   UINT32 output_index;  // Index of the output binding within the operator.
@@ -89,6 +91,8 @@ class GraphRecorder {
                                       UINT64 size,
                                       bool& created);
 
+  // Flushes the current set of recorded operators into a new subgraph. This is
+  // typically called when a data dependency requires a break in the graph.
   void Flush();
 
   std::unique_ptr<BucketizedBufferAllocator> m_allocator;
@@ -106,6 +110,8 @@ class GraphRecorder {
   // execution sequence.
   std::vector<std::unique_ptr<OperatorNode>> m_operator_nodes;
 
+  // The current sequence of operator nodes being recorded. This list is flushed
+  // into a subgraph when `Flush()` is called.
   std::vector<OperatorNode*> m_current_operator_nodes;
   // A list of all binding nodes that are inputs to the entire recorded graph.
   std::vector<BindingNode*> m_graph_inputs;
@@ -116,6 +122,10 @@ class GraphRecorder {
   // A list of subgraphs created from the recorded operators. Each subgraph
   // contains a set of operator nodes and their inputs.
   std::vector<SubGraph> m_subgraphs;
+
+  // Tracks the current binding for each D3D12 resource to detect redundant
+  // bindings or potential conflicts within the current recording scope.
+  std::unordered_map<ID3D12Resource*, BindingNode*> m_current_resource_bindings;
 
   // A placeholder binding node used for operators that have no inputs or
   // outputs.

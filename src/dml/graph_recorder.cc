@@ -246,6 +246,10 @@ class SubGraph {
     return false;
   }
 
+  // Finds pairs of output and input bindings that overlap in memory. This is
+  // used to detect cases where an operation's output writes to the same memory
+  // region that is read by one of the subgraph's inputs, which can lead to
+  // data corruption if not handled properly.
   bool FindOutputsOverlapInputs(
       std::vector<std::pair<BindingNode*, BindingNode*>>& overlapping_pairs) {
     for (const auto& output_edge : outputs) {
@@ -382,20 +386,11 @@ class SubGraph {
   }
 };
 
-// Compares the output of a fused graph execution with a sequential, unfused
-// execution. This function is intended for debugging and verifying the
-// correctness of the graph fusion process. It works by:
-// 1. Downloading the results from the output buffers, which are assumed to
-// have
-//    been just populated by a fused graph execution.
-// 2. Re-executing the subgraph operator by operator using
-//    EvaluateSubGraphWithoutFusedGraph. This overwrites the output buffers.
-// 3. Downloading the new results from the output buffers.
-// 4. Comparing the two sets of results and throwing an exception if they
-// don't
-//    match.
 // Anonymous namespace for helper functions used in correctness verification.
 namespace {
+// Downloads the content of all output buffers for a given subgraph.
+// This is a helper function for verification, allowing comparison of graph
+// execution results.
 std::vector<std::vector<std::byte>> DownloadSubgraphOutputs(
     const SubGraph& subgraph,
     const char* context) {
@@ -432,6 +427,16 @@ std::vector<std::vector<std::byte>> DownloadSubgraphOutputs(
   return results;
 }
 
+// Compares the output of a fused graph execution with a sequential, unfused
+// execution. This function is intended for debugging and verifying the
+// correctness of the graph fusion process. It works by:
+// 1. Downloading the results from the output buffers, which are assumed to
+//    have been just populated by a fused graph execution.
+// 2. Re-executing the subgraph operator by operator using
+//    EvaluateSubGraphWithoutFusedGraph. This overwrites the output buffers.
+// 3. Downloading the new results from the output buffers.
+// 4. Comparing the two sets of results and logging an error if they don't
+//    match.
 void CompareAndVerify(const SubGraph& subgraph) {
   // 1. Download results from fused graph execution (which just ran).
   const auto fused_results = DownloadSubgraphOutputs(subgraph, "fused");
@@ -469,10 +474,11 @@ void CompareAndVerify(const SubGraph& subgraph) {
           "subgraph:\n{}",
           i, ++failed_times, success_times, oss.str());
       // TODO: print more details about the mismatch.
-      // For now, just throw.
+      // For now, we only log the error. An exception was previously thrown
+      // but has been commented out.
       // throw std::runtime_error(
-      //     "Fused and unfused graph execution results do not match for
-      //     output " + std::to_string(i));
+      //     "Fused and unfused graph execution results do not match for output
+      //     " + std::to_string(i));
     } else {
       success_times++;
     }
@@ -793,12 +799,17 @@ void GraphRecorder::End() {
   Reset();
 }
 
+// Flushes the currently recorded operators into a new subgraph. This function
+// is called to finalize a segment of the graph, typically when a data
+// dependency forces a split. It moves the current operator nodes and graph
+// inputs into a new SubGraph object and clears the current resource bindings.
 void GraphRecorder::Flush() {
   if (m_operator_nodes.empty()) {
     return;
   }
   m_subgraphs.emplace_back(std::move(m_current_operator_nodes),
                            std::move(m_graph_inputs));
+  m_current_resource_bindings.clear();
 }
 
 // Retrieves an existing binding node or creates a new one if it doesn't exist.
@@ -811,6 +822,14 @@ BindingNode* GraphRecorder::GetOrCreateBindingNode(ID3D12Resource* resource,
   std::tuple<ID3D12Resource*, UINT64, UINT64> key =
       std::make_tuple(resource, offset, size);
 
+  auto found = m_current_resource_bindings.find(resource);
+  if (found != m_current_resource_bindings.end()) {
+    if (found->second->offset != offset &&
+        found->second->size_in_bytes != size) {
+      throw std::runtime_error(
+          "Resource already exists with different offset or size.");
+    }
+  }
   // For inputs, we first check if a node for this resource already exists.
   auto it = m_binding_lookup.find(key);
   if (it != m_binding_lookup.end()) {
@@ -825,9 +844,13 @@ BindingNode* GraphRecorder::GetOrCreateBindingNode(ID3D12Resource* resource,
   new_node->size_in_bytes = size;
 
   BindingNode* raw_ptr = new_node.get();
-  m_all_binding_nodes.push_back(std::move(new_node));  // Store ownership
-  m_binding_lookup[key] = raw_ptr;  // Add to lookup map for future access
-  created = true;                   // Node was created
+  m_all_binding_nodes.push_back(std::move(new_node));
+  // Add to lookup map for future access
+  m_binding_lookup[key] = raw_ptr;
+  // Track current resource
+  m_current_resource_bindings[resource] = raw_ptr;
+  // Node was created
+  created = true;
 
   return raw_ptr;
 }
