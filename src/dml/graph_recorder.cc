@@ -394,7 +394,7 @@ namespace {
 std::vector<std::vector<std::byte>> DownloadSubgraphOutputs(
     const SubGraph& subgraph,
     const char* context) {
-  Device* device = get_device();
+  auto device = get_device();
   std::vector<std::vector<std::byte>> results;
   results.reserve(subgraph.outputs.size());
 
@@ -493,7 +493,7 @@ void CompareAndVerify(const SubGraph& subgraph) {
 // for operators that have no input or output.
 GraphRecorder::GraphRecorder() : m_empty_binding_node({nullptr, 0, 0}) {
   auto allocate_function = [](uint64_t size, D3D12_RESOURCE_FLAGS) {
-    Device* device = get_device();
+    auto device = get_device();
     return device->CreatePreferredDeviceMemoryBufferWithoutPooling(size);
   };
   m_allocator.reset(new BucketizedBufferAllocator(allocate_function));
@@ -600,7 +600,7 @@ void GraphRecorder::End() {
     std::vector<std::pair<BindingNode*, BindingNode*>> overlapping_pairs;
     std::vector<Microsoft::WRL::ComPtr<IResourceWrapper>> overridden_inputs;
     if (subgraph.FindOutputsOverlapInputs(overlapping_pairs)) {
-      Device* device = get_device();
+      auto device = get_device();
       for (const auto& pair : overlapping_pairs) {
         std::cerr << "Overlapping output: " << pair.first->resource
                   << " with input: " << pair.second->resource << "\n";
@@ -745,12 +745,13 @@ void GraphRecorder::End() {
           subgraph.op_nodes, subgraph.inputs, subgraph.outputs,
           DML_EXECUTION_FLAG_NONE, key_accumulator);
 
+      auto device = get_device();
       new_graph_op_comptr = Microsoft::WRL::Make<Operator>(
-          get_device(), utils::DmlOperatorDescBundle(), nullptr,
+          device.Get(), utils::DmlOperatorDescBundle(), nullptr,
           std::move(compiled_graph), key_accumulator);
 
       graph_op = new_graph_op_comptr.Get();
-      get_device()->KeepAliveUntilNextCommandListDispatch(new_graph_op_comptr);
+      device->KeepAliveUntilNextCommandListDispatch(new_graph_op_comptr);
       cache.AddOperator(std::move(key_accumulator),
                         std::move(new_graph_op_comptr));
       if (kDumpSubGraphAfterCacheHit) {

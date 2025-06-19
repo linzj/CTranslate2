@@ -83,12 +83,13 @@ class AdapterSelectionPolicy {
     return !arch.UMA;
   }
 };
-}  // namespace
 
 // Global Device object and Modules
-static std::unique_ptr<Device> g_device;
-static std::shared_ptr<D3d12Module> g_d3d12_module;
-static std::shared_ptr<DmlModule> g_dml_module;
+std::unique_ptr<Device> g_device;
+std::shared_ptr<D3d12Module> g_d3d12_module;
+std::shared_ptr<DmlModule> g_dml_module;
+std::recursive_mutex g_device_mutex;
+}  // namespace
 
 // For DXGI functions loaded dynamically
 static HMODULE g_h_dxgi_dll = nullptr;
@@ -272,11 +273,11 @@ void release_directml() {
   SPDLOG_INFO("DirectML backend released.");
 }
 
-Device* get_device() {
+GuardedPtr<Device> get_device() {
   if (!g_device) {  // Attempt to initialize if not already
     has_directml_device();
   }
-  return g_device.get();
+  return GuardedPtr<Device>(g_device.get(), g_device_mutex);
 }
 
 }  // namespace dml

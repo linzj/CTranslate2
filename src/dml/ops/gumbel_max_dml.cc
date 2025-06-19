@@ -40,8 +40,7 @@ void GumbelMax::add_gumbel_noise(const StorageView& x, StorageView& y) const {
                    "Input and output tensor data types must match.");
   GUMBEL_MAX_CHECK(x.size() > 0, "Input tensor cannot be empty.");
 
-  dml::Device* device =
-      dml::get_device();  // Get the ctranslate2 DML device wrapper
+  auto device = dml::get_device();
 
   y.resize(x.shape());  // Ensure output is allocated
 

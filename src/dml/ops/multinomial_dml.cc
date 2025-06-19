@@ -19,12 +19,12 @@ namespace ops {
 namespace dml_internal {
 
 // Helper function containing the core DML logic for multinomial.
-void multinomial_impl(dml::Device* device,  // ctranslate2::dml::Device
-                      const StorageView& probs_input,
+void multinomial_impl(const StorageView& probs_input,
                       StorageView& output_indices,
                       const Multinomial& op_params) {
   const dim_t depth = probs_input.dim(-1);  // class_size
   const dim_t batch_size = probs_input.size() / depth;
+  auto device = dml::get_device();
 
   output_indices.resize({batch_size});
 
@@ -416,9 +416,7 @@ void Multinomial::compute(const StorageView& probs,
 
   PROFILE("MultinomialDML");
 
-  dml::Device* device = dml::get_device();
-
-  dml_internal::multinomial_impl(device, probs, output_indices, *this);
+  dml_internal::multinomial_impl(probs, output_indices, *this);
 }
 
 // Explicit instantiations
