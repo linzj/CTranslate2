@@ -15,7 +15,24 @@ namespace dml {
 
 namespace {
 
-constexpr const bool kDumpGraphForDebug = false;
+constexpr const bool kDumpGraphForDebug = true;
+
+enum class ValueType {
+  GRAPH_INPUT,
+  INTERMEDIATE_OUTPUT,
+};
+
+struct Value {
+  ValueType type;
+  union {
+    uint32_t graph_input_index;
+    struct {
+      uint32_t node_index;
+      uint32_t node_output_index;
+    } producer;
+  };
+};
+
 void check_for_graph_binding_overlaps(
     std::ostream& os,
     const std::vector<BindingNode*>& graph_inputs,
@@ -62,10 +79,8 @@ void dump_graph_for_debug(
     const DML_GRAPH_DESC& graph_desc,
     const std::vector<DML_GRAPH_NODE_DESC>& graph_nodes,
     const std::vector<OperatorNode*>& operator_nodes,
-    const std::map<const BindingNode*, std::pair<uint32_t, uint32_t>>&
-        intermediate_producers,
-    const std::map<const BindingNode*, uint32_t>& graph_input_to_index,
-    const std::map<const BindingNode*, uint32_t>& graph_output_to_index,
+    const std::map<const ID3D12Resource*, Value>& value_producers,
+    const std::map<const ID3D12Resource*, uint32_t>& graph_output_to_index,
     const std::vector<BindingNode*>& graph_inputs,
     const std::vector<BindingNode*>& graph_outputs) {
   os << "Dumping DML Graph State for Debugging:\n";
@@ -98,16 +113,20 @@ void dump_graph_for_debug(
              << ", size: " << input_binding->size_in_bytes;
         }
         os << ")";
-        auto it_graph_input = graph_input_to_index.find(input_binding);
-        if (it_graph_input != graph_input_to_index.end()) {
-          os << " -> Graph Input Index: " << it_graph_input->second;
-        } else {
-          auto it = intermediate_producers.find(input_binding);
-          if (it != intermediate_producers.end()) {
-            os << " -> Produced by Node[" << it->second.first << "], Output["
-               << it->second.second << "]";
-          } else if (input_binding->resource) {
-            os << " -> ERROR: Intermediate producer not found!";
+        if (input_binding->resource) {
+          auto it = value_producers.find(input_binding->resource);
+          if (it != value_producers.end()) {
+            const auto& producer_info = it->second;
+            if (producer_info.type == ValueType::GRAPH_INPUT) {
+              os << " -> Graph Input Index: "
+                 << producer_info.graph_input_index;
+            } else {  // INTERMEDIATE_OUTPUT
+              os << " -> Produced by Node[" << producer_info.producer.node_index
+                 << "], Output[" << producer_info.producer.node_output_index
+                 << "]";
+            }
+          } else {
+            os << " -> ERROR: Producer not found!";
           }
         }
       }
@@ -125,9 +144,12 @@ void dump_graph_for_debug(
              << ", size: " << output_binding->size_in_bytes;
         }
         os << ")";
-        auto it_graph_output = graph_output_to_index.find(output_binding);
-        if (it_graph_output != graph_output_to_index.end()) {
-          os << " -> Graph Output Index: " << it_graph_output->second;
+        if (output_binding->resource) {
+          auto it_graph_output =
+              graph_output_to_index.find(output_binding->resource);
+          if (it_graph_output != graph_output_to_index.end()) {
+            os << " -> Graph Output Index: " << it_graph_output->second;
+          }
         }
       }
       os << "\n";
@@ -203,136 +225,94 @@ Microsoft::WRL::ComPtr<IDMLCompiledOperator> GraphBuilder::Build(
   node_descs.reserve(operator_nodes.size());
   graph_nodes.reserve(operator_nodes.size());
 
-  // Map each operator to its index in the graph_nodes vector for later
-  // reference.
-  std::map<const Operator*, uint32_t> operator_to_node_index;
-
   for (size_t i = 0; i < operator_nodes.size(); ++i) {
     const auto& op_node = operator_nodes[i];
     node_descs.push_back({op_node->op->GetDMLOperator(), nullptr});
     graph_nodes.push_back({DML_GRAPH_NODE_TYPE_OPERATOR, &node_descs.back()});
-    operator_to_node_index[op_node->op] = i;
   }
   graph_desc.Nodes = graph_nodes.data();
 
-  // Prepare data structures for input edges.
-  // `graph_input_to_index` maps each graph input binding node to its index in
-  // the graph's input list.
+  // Map to track the origin of each tensor value in the graph.
+  std::map<const ID3D12Resource*, Value> value_producers;
+
+  // Initialize with graph inputs.
+  for (size_t i = 0; i < graph_inputs.size(); ++i) {
+    const auto& input_binding = graph_inputs[i];
+    if (input_binding && input_binding->resource) {
+      Value val;
+      val.type = ValueType::GRAPH_INPUT;
+      val.graph_input_index = static_cast<uint32_t>(i);
+      value_producers[input_binding->resource] = val;
+    }
+  }
+
+  // Map graph output resources to their index in the graph's output list.
+  std::map<const ID3D12Resource*, uint32_t> graph_output_to_index;
+  for (size_t i = 0; i < graph_outputs.size(); ++i) {
+    if (graph_outputs[i] && graph_outputs[i]->resource) {
+      graph_output_to_index[graph_outputs[i]->resource] = i;
+    }
+  }
+
   std::vector<DML_INPUT_GRAPH_EDGE_DESC> input_edge_descs;
   std::vector<DML_GRAPH_EDGE_DESC> input_edges;
-  std::map<const BindingNode*, uint32_t> graph_input_to_index;
-
-  for (size_t i = 0; i < graph_inputs.size(); ++i) {
-    graph_input_to_index[graph_inputs[i]] = i;
-  }
-
-  // Prepare data structures for output edges.
-  // `graph_output_to_index` maps each graph output binding node to its index in
-  // the graph's output list.
   std::vector<DML_OUTPUT_GRAPH_EDGE_DESC> output_edge_descs;
   std::vector<DML_GRAPH_EDGE_DESC> output_edges;
-  std::map<const BindingNode*, uint32_t> graph_output_to_index;
-  for (size_t i = 0; i < graph_outputs.size(); ++i) {
-    graph_output_to_index[graph_outputs[i]] = i;
-  }
-
-  // Prepare data structures for intermediate edges, which connect nodes within
-  // the graph.
   std::vector<DML_INTERMEDIATE_GRAPH_EDGE_DESC> intermediate_edge_descs;
   std::vector<DML_GRAPH_EDGE_DESC> intermediate_edges;
 
-  // Identify which node and output index produces each intermediate tensor.
-  // This map will be used to connect operator inputs to the outputs of other
-  // operators.
-  std::map<const BindingNode*, std::pair<uint32_t, uint32_t>>
-      intermediate_producers;
-  for (size_t i = 0; i < operator_nodes.size(); ++i) {
-    const auto& op_node = operator_nodes[i];
-    for (size_t j = 0; j < op_node->outputs.size(); ++j) {
-      auto output = op_node->outputs[j];
-      if (output && output->resource) {
-        if (intermediate_producers.find(output) !=
-            intermediate_producers.end()) {
-          throw std::invalid_argument(
-              "Intermediate output already has a producer.");
-        }
-        intermediate_producers[op_node->outputs[j]] = {(uint32_t)i,
-                                                       (uint32_t)j};
-      }
-    }
-  }
-
-  // To avoid dangling pointers when vectors are reallocated, we first count
-  // the number of edges to reserve the required capacity.
-  size_t input_edge_count = 0;
-  size_t intermediate_edge_count = 0;
-  size_t output_edge_count = 0;
-  for (const auto& op_node : operator_nodes) {
-    for (const auto& input_binding : op_node->inputs) {
-      if (input_binding && input_binding->resource) {
-        if (graph_input_to_index.count(input_binding)) {
-          input_edge_count++;
-        } else {
-          intermediate_edge_count++;
-        }
-      }
-    }
-    for (const auto& output_binding : op_node->outputs) {
-      if (output_binding && graph_output_to_index.count(output_binding)) {
-        output_edge_count++;
-      }
-    }
-  }
-  input_edge_descs.reserve(input_edge_count);
-  input_edges.reserve(input_edge_count);
-  intermediate_edge_descs.reserve(intermediate_edge_count);
-  intermediate_edges.reserve(intermediate_edge_count);
-  output_edge_descs.reserve(output_edge_count);
-  output_edges.reserve(output_edge_count);
-
-  // Iterate through all operator nodes to define the connections (edges)
-  // between them.
+  // Iterate through all operator nodes to define the connections (edges).
   for (size_t i = 0; i < operator_nodes.size(); ++i) {
     const auto& op_node = operator_nodes[i];
     uint32_t dml_input_idx = 0;
-    for (size_t j = 0; j < op_node->inputs.size(); ++j) {
-      BindingNode* input_binding = op_node->inputs[j];
+    for (const auto& input_binding : op_node->inputs) {
       if (input_binding && input_binding->resource) {
-        auto it_graph_input = graph_input_to_index.find(input_binding);
-        if (it_graph_input != graph_input_to_index.end()) {
-          // This input is a main graph input. Create an input edge.
-          input_edge_descs.push_back(
-              {it_graph_input->second, (UINT)i, dml_input_idx, nullptr});
-          input_edges.push_back(
-              {DML_GRAPH_EDGE_TYPE_INPUT, &input_edge_descs.back()});
-        } else {
-          // This input is produced by another node in the graph. Create an
-          // intermediate edge.
-          auto it = intermediate_producers.find(input_binding);
-          if (it == intermediate_producers.end())
-            THROW_RUNTIME_ERROR("Intermediate input has no producer.");
-          const auto& producer = it->second;
-          intermediate_edge_descs.push_back({producer.first, producer.second,
-                                             (UINT)i, dml_input_idx, nullptr});
-          intermediate_edges.push_back({DML_GRAPH_EDGE_TYPE_INTERMEDIATE,
-                                        &intermediate_edge_descs.back()});
+        auto it = value_producers.find(input_binding->resource);
+        if (it == value_producers.end())
+          THROW_RUNTIME_ERROR("Intermediate input has no producer.");
+
+        const auto& producer_info = it->second;
+        if (producer_info.type == ValueType::GRAPH_INPUT) {
+          input_edge_descs.push_back({producer_info.graph_input_index, (UINT)i,
+                                      dml_input_idx, nullptr});
+        } else {  // INTERMEDIATE_OUTPUT
+          intermediate_edge_descs.push_back(
+              {producer_info.producer.node_index,
+               producer_info.producer.node_output_index, (UINT)i, dml_input_idx,
+               nullptr});
         }
       }
       dml_input_idx++;
     }
 
-    // Check for outputs that are also main graph outputs.
+    // Check for outputs that are also main graph outputs and update producers.
     for (size_t j = 0; j < op_node->outputs.size(); ++j) {
       BindingNode* output_binding = op_node->outputs[j];
-      auto it_graph_output = graph_output_to_index.find(output_binding);
-      if (output_binding && it_graph_output != graph_output_to_index.end()) {
-        // This output is a main graph output. Create an output edge.
-        output_edge_descs.push_back(
-            {(UINT)i, (UINT)j, it_graph_output->second, nullptr});
-        output_edges.push_back(
-            {DML_GRAPH_EDGE_TYPE_OUTPUT, &output_edge_descs.back()});
+      if (output_binding && output_binding->resource) {
+        auto it_graph_output =
+            graph_output_to_index.find(output_binding->resource);
+        if (it_graph_output != graph_output_to_index.end()) {
+          output_edge_descs.push_back(
+              {(UINT)i, (UINT)j, it_graph_output->second, nullptr});
+        }
+        // This output is now a value producer for subsequent nodes.
+        Value val;
+        val.type = ValueType::INTERMEDIATE_OUTPUT;
+        val.producer.node_index = (uint32_t)i;
+        val.producer.node_output_index = (uint32_t)j;
+        value_producers[output_binding->resource] = val;
       }
     }
+  }
+  for (const auto& input_edge_desc : input_edge_descs) {
+    input_edges.push_back({DML_GRAPH_EDGE_TYPE_INPUT, &input_edge_desc});
+  }
+  for (const auto& output_edge_desc : output_edge_descs) {
+    output_edges.push_back({DML_GRAPH_EDGE_TYPE_OUTPUT, &output_edge_desc});
+  }
+  for (const auto& intermediate_edge_desc : intermediate_edge_descs) {
+    intermediate_edges.push_back(
+        {DML_GRAPH_EDGE_TYPE_INTERMEDIATE, &intermediate_edge_desc});
   }
 
   // Finalize the graph description with all the edge information.
@@ -345,8 +325,8 @@ Microsoft::WRL::ComPtr<IDMLCompiledOperator> GraphBuilder::Build(
 
   if (kDumpGraphForDebug) {
     dump_graph_for_debug(std::cerr, graph_desc, graph_nodes, operator_nodes,
-                         intermediate_producers, graph_input_to_index,
-                         graph_output_to_index, graph_inputs, graph_outputs);
+                         value_producers, graph_output_to_index, graph_inputs,
+                         graph_outputs);
   }
 
   check_for_graph_binding_overlaps(std::cerr, graph_inputs, graph_outputs);

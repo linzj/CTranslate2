@@ -281,47 +281,12 @@ void primitives<Device::DirectML>::copy(const T* x, T* y, dim_t size) {
         "DirectML copy operation cannot be "
         "recorded in a graph.");
   }
-  // This call is expected to provide a command list that is ready for
-  // recording. It will be closed and executed by
-  // dxdevice->ExecuteCommandList().
-  auto command_list = dxdevice->GetCommandList();
 
   ID3D12Resource* src_resource = dml::utils::ResourceFromRawBuffer(x);
   ID3D12Resource* dst_resource = dml::utils::ResourceFromRawBuffer(y);
 
-  D3D12_RESOURCE_BARRIER barriers[2];
-
-  // Transition source resource from UNORDERED_ACCESS to COPY_SOURCE
-  barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-  barriers[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-  barriers[0].Transition.pResource = src_resource;
-  barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-  barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-  barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-
-  // Transition destination resource from UNORDERED_ACCESS to COPY_DEST
-  barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-  barriers[1].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-  barriers[1].Transition.pResource = dst_resource;
-  barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-  barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-  barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-
-  command_list->ResourceBarrier(2, barriers);
-
-  // Perform the copy
-  command_list->CopyBufferRegion(dst_resource, 0, src_resource, 0,
-                                 static_cast<UINT64>(size) * sizeof(T));
-
-  // Transition source resource back to UNORDERED_ACCESS
-  barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-  barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-
-  // Transition destination resource back to UNORDERED_ACCESS
-  barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-  barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-
-  command_list->ResourceBarrier(2, barriers);
+  dxdevice->CopyResourceSubRegion(dst_resource, src_resource, 0, 0,
+                                  static_cast<uint64_t>(size) * sizeof(T));
 }
 
 template <>

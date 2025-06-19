@@ -148,6 +148,12 @@ class Device {
 
   void ResetCommandList();
 
+  void CopyResourceSubRegion(ID3D12Resource* dst,
+                             ID3D12Resource* src,
+                             uint64_t dstOffset,
+                             uint64_t srcOffset,
+                             uint64_t sizeInBytes);
+
   // Records the dispatch of an HLSL shader.
   void RecordDispatch(const char* name,
                       uint32_t threadGroupX,

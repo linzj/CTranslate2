@@ -764,6 +764,46 @@ void Device::ResetCommandList() {
   THROW_IF_FAILED(m_commandList->Reset(m_commandAllocator.Get(), nullptr));
 }
 
+void Device::CopyResourceSubRegion(ID3D12Resource* dst_resource,
+                                   ID3D12Resource* src_resource,
+                                   uint64_t dstOffset,
+                                   uint64_t srcOffset,
+                                   uint64_t sizeInBytes) {
+  D3D12_RESOURCE_BARRIER barriers[2];
+
+  // Transition source resource from UNORDERED_ACCESS to COPY_SOURCE
+  barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  barriers[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+  barriers[0].Transition.pResource = src_resource;
+  barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+  barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+
+  // Transition destination resource from UNORDERED_ACCESS to COPY_DEST
+  barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  barriers[1].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+  barriers[1].Transition.pResource = dst_resource;
+  barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+  barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+
+  GetCommandList()->ResourceBarrier(2, barriers);
+
+  // Perform the copy
+  GetCommandList()->CopyBufferRegion(dst_resource, dstOffset, src_resource,
+                                     srcOffset, sizeInBytes);
+
+  // Transition source resource back to UNORDERED_ACCESS
+  barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+  // Transition destination resource back to UNORDERED_ACCESS
+  barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+  barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+  GetCommandList()->ResourceBarrier(2, barriers);
+}
+
 void Device::RecordTimestamp() {
   if (!GpuTimingEnabled()) {
     return;

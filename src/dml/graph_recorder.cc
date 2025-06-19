@@ -3,13 +3,16 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <iostream>
+#include <map>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
 #include "backend_dml.h"
+#include "dml/bucketized_buffer_allocator.h"
 #include "dml/operator_cache.h"
 #include "dml/operator_utils.h"
 #include "dml_utils.h"
@@ -19,9 +22,24 @@ namespace dml {
 
 namespace {  // anonymous
 
+// Checks if two binding nodes have overlapping memory regions. This is
+// essential for detecting potential data hazards, where one operation might
+// overwrite data needed by another.
+static bool bindings_overlap(const BindingNode* a, const BindingNode* b) {
+  if (!a || !b || !a->resource || !b->resource) {
+    return false;
+  }
+  if (a->resource != b->resource) {
+    return false;
+  }
+  const UINT64 a_end = a->offset + a->size_in_bytes;
+  const UINT64 b_end = b->offset + b->size_in_bytes;
+  return a->offset < b_end && b->offset < a_end;
+}
+
 // When true, dumps the initial and final subgraphs to the console for
 // debugging.
-constexpr bool kDumpSubGraphs = false;
+constexpr bool kDumpSubGraphs = true;
 // When true, dumps a subgraph to stderr if it's retrieved from the cache.
 constexpr bool kDumpSubGraphAfterCacheHit = false;
 // When true, forces all subgraphs to be executed operator-by-operator instead
@@ -33,6 +51,8 @@ constexpr bool kCompareWithUnfused = false;
 // When true, forces recompilation of subgraphs even if they are found in the
 // cache.
 constexpr bool kAlwaysRecompileSubgraphs = false;
+
+constexpr bool kDumpSubGraphBeforeBuild = false;
 
 // Represents a portion of a larger computation graph. A SubGraph consists of a
 // set of operator nodes, their inputs, and their outputs. SubGraphs can be
@@ -79,7 +99,7 @@ class SubGraph {
   // used (live) by any subsequent operators in the block. The analysis is done
   // by iterating through the operators in reverse order.
   void CalculateAndSetOutputs() {
-    std::unordered_set<BindingNode*> live_nodes;
+    std::unordered_set<ID3D12Resource*> live_nodes;
     std::unordered_set<BindingNode*> final_outputs_set;
 
     // Iterate backwards from the last operator to the first to determine the
@@ -91,17 +111,17 @@ class SubGraph {
         if (!output_node->resource)
           continue;
 
-        if (live_nodes.find(output_node) == live_nodes.end()) {
+        if (live_nodes.find(output_node->resource) == live_nodes.end()) {
           final_outputs_set.insert(output_node);
         }
 
-        live_nodes.erase(output_node);
+        live_nodes.erase(output_node->resource);
       }
 
       for (auto* input_node : op_node->inputs) {
         if (!input_node->resource)
           continue;
-        live_nodes.insert(input_node);
+        live_nodes.insert(input_node->resource);
       }
     }
 
@@ -123,7 +143,7 @@ class SubGraph {
   // Splits the current SubGraph into two smaller SubGraphs at a specified
   // operator index. This is crucial for breaking down a large graph into
   // manageable parts that can be compiled and executed independently.
-  std::pair<SubGraph, SubGraph> split(size_t split_op_index) const {
+  std::pair<SubGraph, SubGraph> Split(size_t split_op_index) const {
     if (split_op_index == 0 || split_op_index >= op_nodes.size()) {
       throw std::invalid_argument("Invalid split index for SubGraph.");
     }
@@ -230,28 +250,62 @@ class SubGraph {
     return key;
   }
 
+  // Checks if the subgraph is suitable for direct evaluation, meaning it should
+  // not be compiled into a fused graph but rather executed operator by
+  // operator. This is typically true for subgraphs containing operators that
+  // are lightweight, stateful, or not well-supported by the graph compiler.
+  bool IsSuitableForEvaluation() const {
+    if (op_nodes.size() == 1) {
+      return true;
+    }
+
+    for (auto* output_node : outputs) {
+      for (auto* input_node : inputs) {
+        if (bindings_overlap(output_node, input_node)) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  bool FindOutputsOverlapInputs(
+      std::vector<std::pair<BindingNode*, BindingNode*>>& overlapping_pairs) {
+    for (auto* output_node : outputs) {
+      for (auto* input_node : inputs) {
+        if (bindings_overlap(output_node, input_node)) {
+          overlapping_pairs.emplace_back(output_node, input_node);
+        }
+      }
+    }
+    return !overlapping_pairs.empty();
+  }
+
   // Dumps a detailed, human-readable representation of the subgraph to the
   // provided output stream. This is useful for debugging the graph structure.
   void Dump(std::ostream& os) const {
-    std::unordered_map<const BindingNode*, size_t> graph_input_to_index;
+    struct Value {
+      enum class Type { kGraphInput, kIntermediate };
+      Type type;
+      size_t node_index;  // for kGraphInput, it's input index; for
+                          // kIntermediate, it's op index
+      size_t
+          output_index;  // for kIntermediate, it's the output index of the op
+    };
+
+    std::unordered_map<ID3D12Resource*, Value> value_map;
+
+    // Initialize value map with graph inputs
     for (size_t i = 0; i < inputs.size(); ++i) {
-      graph_input_to_index[inputs[i]] = i;
+      if (inputs[i] && inputs[i]->resource) {
+        value_map[inputs[i]->resource] = {Value::Type::kGraphInput, i, 0};
+      }
     }
 
     std::unordered_map<const BindingNode*, size_t> graph_output_to_index;
     for (size_t i = 0; i < outputs.size(); ++i) {
       graph_output_to_index[outputs[i]] = i;
-    }
-
-    std::unordered_map<const BindingNode*, std::pair<size_t, size_t>>
-        intermediate_producers;
-    for (size_t i = 0; i < op_nodes.size(); ++i) {
-      const auto* op_node = op_nodes[i];
-      for (size_t j = 0; j < op_node->outputs.size(); ++j) {
-        if (op_node->outputs[j] && op_node->outputs[j]->resource) {
-          intermediate_producers[op_node->outputs[j]] = {i, j};
-        }
-      }
     }
 
     os << "Nodes (" << op_nodes.size() << "):\n";
@@ -272,15 +326,17 @@ class SubGraph {
                << ", size: " << input_binding->size_in_bytes;
           }
           os << ")";
-          auto it_graph_input = graph_input_to_index.find(input_binding);
-          if (it_graph_input != graph_input_to_index.end()) {
-            os << " -> Graph Input Index: " << it_graph_input->second;
-          } else {
-            auto it = intermediate_producers.find(input_binding);
-            if (it != intermediate_producers.end()) {
-              os << " -> Produced by Node[" << it->second.first << "], Output["
-                 << it->second.second << "]";
-            } else if (input_binding->resource) {
+          if (input_binding->resource) {
+            auto it = value_map.find(input_binding->resource);
+            if (it != value_map.end()) {
+              const auto& value = it->second;
+              if (value.type == Value::Type::kGraphInput) {
+                os << " -> Graph Input Index: " << value.node_index;
+              } else {  // kIntermediate
+                os << " -> Produced by Node[" << value.node_index
+                   << "], Output[" << value.output_index << "]";
+              }
+            } else {
               os << " -> ERROR: Intermediate producer not found!";
             }
           }
@@ -306,42 +362,39 @@ class SubGraph {
         }
         os << "\n";
       }
+
+      // Update value map with outputs of the current operator
+      for (size_t j = 0; j < op_node->outputs.size(); ++j) {
+        if (op_node->outputs[j] && op_node->outputs[j]->resource) {
+          value_map[op_node->outputs[j]->resource] = {
+              Value::Type::kIntermediate, i, j};
+        }
+      }
     }
   }
 };
 
-// Checks if two binding nodes have overlapping memory regions. This is
-// essential for detecting potential data hazards, where one operation might
-// overwrite data needed by another.
-bool bindings_overlap(const BindingNode* a, const BindingNode* b) {
-  if (!a || !b || !a->resource || !b->resource) {
-    return false;
-  }
-  if (a->resource != b->resource) {
-    return false;
-  }
-  const UINT64 a_end = a->offset + a->size_in_bytes;
-  const UINT64 b_end = b->offset + b->size_in_bytes;
-  return a->offset < b_end && b->offset < a_end;
-}
-
 // Analyzes a subgraph to find a suitable point to split it. A split is
 // necessary if certain data dependency rules are violated, such as an
 // operation's output overlapping with a graph input.
-std::optional<size_t> find_split_point(
+std::optional<size_t> FindSplitPoint(
     const SubGraph& subgraph,
     const std::vector<BindingNode*>& original_graph_inputs) {
-  std::unordered_set<const BindingNode*> committed_outputs;
+  // std::unordered_map<ID3D12Resource*, const BindingNode*>
+  // committed_outputs;
   for (size_t op_idx = 0; op_idx < subgraph.op_nodes.size(); ++op_idx) {
     const auto* op_node = subgraph.op_nodes[op_idx];
 
+// Rule 2 is disabled for it renders wrong result.
+#if 0
     // Rule 2: An operator's input must not overlap with the output of a
     // previous operator, unless it's the exact same resource. This prevents
     // read-after-write hazards.
     for (const auto* input_node : op_node->inputs) {
       if (!input_node || !input_node->resource)
         continue;
-      for (const auto* prev_output : committed_outputs) {
+      for (const auto& pair : committed_outputs) {
+        const auto* prev_output = pair.second;
         if (input_node != prev_output &&
             bindings_overlap(input_node, prev_output)) {
           SPDLOG_DEBUG(
@@ -354,6 +407,7 @@ std::optional<size_t> find_split_point(
         }
       }
     }
+#endif
 
     for (const auto* output_node : op_node->outputs) {
       if (!output_node || !output_node->resource)
@@ -374,6 +428,7 @@ std::optional<size_t> find_split_point(
         }
       }
 
+#if 0
       // Rule 3: An operator's output must not overlap with any of the original
       // graph's inputs. This is a broader check to ensure integrity across the
       // entire computation.
@@ -388,15 +443,29 @@ std::optional<size_t> find_split_point(
           return op_idx;
         }
       }
+
+      // Rule 4: An operator's outputs should not overlap its inputs.
+      for (const auto* input_node : op_node->inputs) {
+        if (bindings_overlap(output_node, input_node)) {
+          SPDLOG_DEBUG(
+              "Splitting graph: Operator output overlaps with its input. "
+              "Op: '{}', Resource: {}",
+              OperatorUtils::DML_OPERATOR_TYPE_toString(op_node->op->GetType()),
+              (void*)output_node->resource);
+          return op_idx;
+        }
+      }
+#endif
     }
 
+    // Disabled for Rule 2 is disabled
     // The outputs of the current operator are added to the set of committed
     // outputs for checking against subsequent operators.
-    for (auto* output_node : op_node->outputs) {
-      if (output_node && output_node->resource) {
-        committed_outputs.insert(output_node);
-      }
-    }
+    // for (auto* output_node : op_node->outputs) {
+    //   if (output_node && output_node->resource) {
+    //     committed_outputs[output_node->resource] = output_node;
+    //   }
+    // }
   }
   return std::nullopt;
 }
@@ -430,12 +499,14 @@ void EvaluateSubGraphWithoutFusedGraph(const SubGraph& subgraph) {
 // Compares the output of a fused graph execution with a sequential, unfused
 // execution. This function is intended for debugging and verifying the
 // correctness of the graph fusion process. It works by:
-// 1. Downloading the results from the output buffers, which are assumed to have
+// 1. Downloading the results from the output buffers, which are assumed to
+// have
 //    been just populated by a fused graph execution.
 // 2. Re-executing the subgraph operator by operator using
 //    EvaluateSubGraphWithoutFusedGraph. This overwrites the output buffers.
 // 3. Downloading the new results from the output buffers.
-// 4. Comparing the two sets of results and throwing an exception if they don't
+// 4. Comparing the two sets of results and throwing an exception if they
+// don't
 //    match.
 // Anonymous namespace for helper functions used in correctness verification.
 namespace {
@@ -512,8 +583,8 @@ void CompareAndVerify(const SubGraph& subgraph) {
       // TODO: print more details about the mismatch.
       // For now, just throw.
       // throw std::runtime_error(
-      //     "Fused and unfused graph execution results do not match for output
-      //     " + std::to_string(i));
+      //     "Fused and unfused graph execution results do not match for
+      //     output " + std::to_string(i));
     } else {
       success_times++;
     }
@@ -526,7 +597,13 @@ void CompareAndVerify(const SubGraph& subgraph) {
 
 // Initializes the GraphRecorder, including a special empty binding node used
 // for operators that have no input or output.
-GraphRecorder::GraphRecorder() : m_empty_binding_node({nullptr, 0, 0}) {}
+GraphRecorder::GraphRecorder() : m_empty_binding_node({nullptr, 0, 0}) {
+  auto allocate_function = [](uint64_t size, D3D12_RESOURCE_FLAGS) {
+    Device* device = get_device();
+    return device->CreatePreferredDeviceMemoryBufferWithoutPooling(size);
+  };
+  m_allocator.reset(new BucketizedBufferAllocator(allocate_function));
+}
 
 GraphRecorder::~GraphRecorder() = default;
 
@@ -632,9 +709,14 @@ void GraphRecorder::End() {
     return;
   }
 
+#if 0
   // Begin with a single subgraph containing the entire recorded graph.
   std::list<SubGraph> processing_list;
   processing_list.emplace_back(m_operator_nodes, m_graph_inputs);
+  SubGraph initial_subgraph;
+  if (kDumpSubGraphAfterCacheHit) {
+    initial_subgraph = processing_list.front();
+  }
   if (kDumpSubGraphs) {
     std::cout << "Initial SubGraph:\n";
     processing_list.front().Dump(std::cout);
@@ -654,14 +736,14 @@ void GraphRecorder::End() {
 
     // Check if the current subgraph needs to be split.
     std::optional<size_t> split_idx =
-        find_split_point(current_subgraph, m_graph_inputs);
+        FindSplitPoint(current_subgraph, m_graph_inputs);
 
     if (split_idx.has_value()) {
       size_t split_at = split_idx.value();
       if (split_at > 0) {
         // If a valid split point is found, split the subgraph and add the
         // two new subgraphs back to the processing list.
-        auto [first, second] = current_subgraph.split(split_at);
+        auto [first, second] = current_subgraph.Split(split_at);
         if (!second.op_nodes.empty()) {
           processing_list.push_front(std::move(second));
         }
@@ -672,7 +754,7 @@ void GraphRecorder::End() {
         // Handle the case where the split is at the very beginning of the
         // subgraph.
         if (current_subgraph.op_nodes.size() > 1) {
-          auto [first, second] = current_subgraph.split(1);
+          auto [first, second] = current_subgraph.Split(1);
           final_subgraphs.push_back(std::move(first));
           if (!second.op_nodes.empty()) {
             processing_list.push_front(std::move(second));
@@ -686,6 +768,90 @@ void GraphRecorder::End() {
       final_subgraphs.push_back(std::move(current_subgraph));
     }
   }
+#else
+  std::vector<SubGraph> final_subgraphs{{m_operator_nodes, m_graph_inputs}};
+  SubGraph& final_subgraph = final_subgraphs.back();
+  std::vector<std::pair<BindingNode*, BindingNode*>> overlapping_pairs;
+  std::vector<Microsoft::WRL::ComPtr<IResourceWrapper>> overridden_inputs;
+  if (final_subgraph.FindOutputsOverlapInputs(overlapping_pairs)) {
+    Device* device = get_device();
+    for (const auto& pair : overlapping_pairs) {
+      std::cerr << "Overlapping output: " << pair.first->resource
+                << " with input: " << pair.second->resource << "\n";
+    }
+
+    // Create a set of unique input nodes that overlap with outputs.
+    std::unordered_set<BindingNode*> inputs_to_override;
+    for (const auto& pair : overlapping_pairs) {
+      inputs_to_override.insert(pair.second);
+    }
+
+    std::unordered_map<BindingNode*, BindingNode*> overridden_nodes_map;
+
+    for (BindingNode* old_node : inputs_to_override) {
+      if (!old_node || !old_node->resource) {
+        continue;
+      }
+
+      // Create a new resource and copy the data from the old one.
+      auto new_resource_wrapper =
+          m_allocator->Alloc(old_node->size_in_bytes, D3D12_RESOURCE_FLAG_NONE);
+      overridden_inputs.push_back(new_resource_wrapper);
+      ID3D12Resource* new_resource = new_resource_wrapper->GetD3D12Resource();
+
+      device->CopyResourceSubRegion(new_resource,       /*dst*/
+                                    old_node->resource, /*src*/
+                                    0,                  /*dstOffset*/
+                                    old_node->offset,   /*srcOffset*/
+                                    old_node->size_in_bytes);
+
+      // Create a new binding node for the new resource.
+      bool created;
+      BindingNode* new_node = GetOrCreateBindingNode(
+          new_resource, 0, old_node->size_in_bytes, created);
+      overridden_nodes_map[old_node] = new_node;
+    }
+
+    for (auto& input_node : final_subgraph.inputs) {
+      auto it = overridden_nodes_map.find(input_node);
+      if (it != overridden_nodes_map.end()) {
+        input_node = it->second;
+      }
+    }
+
+    // Replace the old binding nodes with the new ones throughout the subgraph.
+    for (auto* op_node : final_subgraph.op_nodes) {
+      // First, update the inputs of the current operator.
+      for (auto& input_node : op_node->inputs) {
+        auto it = overridden_nodes_map.find(input_node);
+        if (it != overridden_nodes_map.end()) {
+          input_node = it->second;
+        }
+      }
+
+      // Then, check the outputs. If an output redefines an overridden input,
+      // subsequent nodes should use the new value, so we remove it from the
+      // map.
+      for (auto* output_node : op_node->outputs) {
+        std::unordered_map<BindingNode*, BindingNode*>::iterator it;
+        for (it = overridden_nodes_map.begin();
+             it != overridden_nodes_map.end();) {
+          if (it->first->resource == output_node->resource) {
+            // If the output node is an overridden input, remove it from the
+            // map.
+            it = overridden_nodes_map.erase(it);
+          } else {
+            ++it;
+          }
+        }
+      }
+      if (overridden_nodes_map.empty()) {
+        // If all overridden nodes have been killed.
+        break;
+      }
+    }
+  }
+#endif
 
   // Execute the finalized subgraphs.
   if (kDumpSubGraphs) {
@@ -703,7 +869,7 @@ void GraphRecorder::End() {
       continue;
     }
 
-    if (subgraph.op_nodes.size() == 1 || subgraph.op_nodes.size() >= 6) {
+    if (subgraph.IsSuitableForEvaluation()) {
       EvaluateSubGraphWithoutFusedGraph(subgraph);
       continue;
     }
@@ -738,6 +904,11 @@ void GraphRecorder::End() {
             "Multiple subgraph outputs bind to the same resource.");
       }
 
+      if (kDumpSubGraphBeforeBuild) {
+        std::cerr << "Subgraph before build:\n";
+        subgraph.Dump(std::cerr);
+      }
+
       // Build the compiled graph from the subgraph definition.
       // NOTE: The GraphBuilder::Build API expects a vector of unique_ptr, but
       // SubGraph provides raw pointers. This implementation assumes the Build
@@ -755,6 +926,10 @@ void GraphRecorder::End() {
       get_device()->KeepAliveUntilNextCommandListDispatch(new_graph_op_comptr);
       cache.AddOperator(std::move(key_accumulator),
                         std::move(new_graph_op_comptr));
+      if (kDumpSubGraphAfterCacheHit) {
+        std::cerr << "Caching subgraph:\n";
+        subgraph.Dump(std::cerr);
+      }
     } else {
       if (kDumpSubGraphAfterCacheHit) {
         std::cerr << "Get graph op from cache: " << key_accumulator.size()

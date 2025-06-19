@@ -13,6 +13,7 @@ namespace ctranslate2 {
 namespace dml {
 
 class Device;  // Forward declaration for Device
+class BucketizedBufferAllocator;
 
 // Represents a unique DML resource binding within the graph. Each binding is
 // identified by the combination of a D3D12 resource, an offset, and a size.
@@ -81,6 +82,8 @@ class GraphRecorder {
                                       UINT64 offset,
                                       UINT64 size,
                                       bool& created);
+
+  std::unique_ptr<BucketizedBufferAllocator> m_allocator;
 
   // Storage for all unique BindingNodes in the graph. `unique_ptr` ensures
   // proper ownership.
