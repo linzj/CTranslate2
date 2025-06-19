@@ -7,7 +7,6 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
-#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -79,38 +78,37 @@ class SubGraph {
     CalculateAndSetOutputs();
   }
 
-  // Calculates and sets the outputs of the subgraph using liveness analysis.
-  // An output is a resource that is defined (kill) by an operator but is not
-  // used (live) by any subsequent operators in the block. The analysis is done
-  // by iterating through the operators in reverse order.
+  // Calculates and sets the outputs of the subgraph. An output is defined as
+  // the last write to any given resource within the subgraph. This is
+  // determined by iterating through all operators and recording the last time
+  // each resource is written to. The collected outputs are then sorted by their
+  // operator and output index.
   void CalculateAndSetOutputs() {
     outputs.clear();
-    std::unordered_set<ID3D12Resource*> live_nodes;
-    // Iterate backwards from the last operator to the first to determine the
-    // set of final outputs using liveness analysis.
-    using ssize_t = std::make_signed_t<size_t>;
-    for (ssize_t i = static_cast<ssize_t>(op_nodes.size()) - 1; i >= 0; --i) {
-      const auto* op_node = op_nodes[i];
+    std::unordered_map<ID3D12Resource*, OutputEdge> last_kill_of_resource;
 
+    for (size_t i = 0; i < op_nodes.size(); ++i) {
+      const auto* op_node = op_nodes[i];
       for (size_t j = 0; j < op_node->outputs.size(); ++j) {
         BindingNode* output_node = op_node->outputs[j];
-        if (!output_node->resource)
-          continue;
-
-        if (live_nodes.find(output_node->resource) == live_nodes.end()) {
-          outputs.emplace_back(
-              OutputEdge{static_cast<UINT32>(i), static_cast<UINT32>(j)});
+        if (output_node && output_node->resource) {
+          last_kill_of_resource[output_node->resource] =
+              OutputEdge{static_cast<UINT32>(i), static_cast<UINT32>(j)};
         }
-
-        live_nodes.erase(output_node->resource);
-      }
-
-      for (auto* input_node : op_node->inputs) {
-        if (!input_node->resource)
-          continue;
-        live_nodes.insert(input_node->resource);
       }
     }
+
+    for (const auto& pair : last_kill_of_resource) {
+      outputs.push_back(pair.second);
+    }
+
+    std::sort(outputs.begin(), outputs.end(),
+              [](const OutputEdge& a, const OutputEdge& b) {
+                if (a.node_index != b.node_index) {
+                  return a.node_index < b.node_index;
+                }
+                return a.output_index < b.output_index;
+              });
   }
 
   // Splits the current SubGraph into two smaller SubGraphs at a specified
@@ -602,8 +600,9 @@ void GraphRecorder::End() {
     if (subgraph.FindOutputsOverlapInputs(overlapping_pairs)) {
       auto device = get_device();
       for (const auto& pair : overlapping_pairs) {
-        std::cerr << "Overlapping output: " << pair.first->resource
-                  << " with input: " << pair.second->resource << "\n";
+        SPDLOG_TRACE("Overlapping output: {} with input: {}",
+                     static_cast<void*>(pair.first->resource),
+                     static_cast<void*>(pair.second->resource));
       }
 
       // Create a set of unique input nodes that overlap with outputs.
