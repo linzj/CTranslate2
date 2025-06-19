@@ -11,6 +11,9 @@
 
 namespace ctranslate2 {
 namespace dml {
+namespace {
+class SubGraph;
+}
 
 class Device;  // Forward declaration for Device
 class BucketizedBufferAllocator;
@@ -78,11 +81,6 @@ class GraphRecorder {
   // data.
   void Reset();
 
-  // A debugging utility to execute the recorded operators sequentially without
-  // building a fused DML graph. This is useful for isolating issues and
-  // verifying operator behavior.
-  void EvaluateGraphWithoutFusedGraph();
-
   // Retrieves an existing BindingNode for a given resource or creates a new
   // one. This ensures that each unique resource binding is represented by a
   // single node.
@@ -90,6 +88,8 @@ class GraphRecorder {
                                       UINT64 offset,
                                       UINT64 size,
                                       bool& created);
+
+  void Flush();
 
   std::unique_ptr<BucketizedBufferAllocator> m_allocator;
 
@@ -106,12 +106,16 @@ class GraphRecorder {
   // execution sequence.
   std::vector<std::unique_ptr<OperatorNode>> m_operator_nodes;
 
+  std::vector<OperatorNode*> m_current_operator_nodes;
   // A list of all binding nodes that are inputs to the entire recorded graph.
   std::vector<BindingNode*> m_graph_inputs;
 
   // A list of all binding nodes that are outputs of the entire recorded graph.
   // This is populated during the `End()` call.
   std::vector<BindingNode*> m_graph_outputs;
+  // A list of subgraphs created from the recorded operators. Each subgraph
+  // contains a set of operator nodes and their inputs.
+  std::vector<SubGraph> m_subgraphs;
 
   // A placeholder binding node used for operators that have no inputs or
   // outputs.

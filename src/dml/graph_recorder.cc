@@ -40,7 +40,7 @@ static bool bindings_overlap(const BindingNode* a, const BindingNode* b) {
 
 // When true, dumps the initial and final subgraphs to the console for
 // debugging.
-constexpr bool kDumpSubGraphs = true;
+constexpr bool kDumpSubGraphs = false;
 // When true, dumps a subgraph to stderr if it's retrieved from the cache.
 constexpr bool kDumpSubGraphAfterCacheHit = false;
 // When true, forces all subgraphs to be executed operator-by-operator instead
@@ -72,13 +72,10 @@ class SubGraph {
 
   // Constructs a SubGraph from all operator nodes and the initial graph's
   // inputs. The outputs are calculated using liveness analysis.
-  SubGraph(const std::vector<std::unique_ptr<OperatorNode>>& all_op_nodes,
-           const std::vector<BindingNode*>& graph_inputs) {
-    op_nodes.reserve(all_op_nodes.size());
-    for (const auto& node : all_op_nodes) {
-      op_nodes.push_back(node.get());
-    }
-    inputs = graph_inputs;
+  SubGraph(std::vector<OperatorNode*>&& all_op_nodes,
+           std::vector<BindingNode*>&& graph_inputs) {
+    op_nodes = std::move(all_op_nodes);
+    inputs = std::move(graph_inputs);
     CalculateAndSetOutputs();
   }
 
@@ -516,7 +513,8 @@ void GraphRecorder::Execute(Operator* op,
   // Create a new operator node to represent this execution.
   std::unique_ptr<OperatorNode> op_node = std::make_unique<OperatorNode>();
   op_node->op = op;
-
+  std::vector<BindingNode*> input_candidates;
+  std::vector<BindingNode*> output_pushed_nodes;
   // Process input bindings, creating or retrieving existing binding nodes.
   auto input_descs = inputs.get_descs();
   for (size_t i = 0; i < input_descs.size(); ++i) {
@@ -534,7 +532,7 @@ void GraphRecorder::Execute(Operator* op,
       if (node_created) {
         // Only mark as graph input if this is the first operator being recorded
         // and the binding node was not previously encountered as an output
-        m_graph_inputs.push_back(binding_node);
+        input_candidates.push_back(binding_node);
       }
     } else {
       if (input_descs[i].Type != DML_BINDING_TYPE_NONE) {
@@ -555,7 +553,9 @@ void GraphRecorder::Execute(Operator* op,
       BindingNode* binding_node =
           GetOrCreateBindingNode(buffer_binding->Buffer, buffer_binding->Offset,
                                  buffer_binding->SizeInBytes, node_created);
+
       op_node->outputs.push_back(binding_node);
+      output_pushed_nodes.push_back(binding_node);
     } else {
       if (output_descs[i].Type != DML_BINDING_TYPE_NONE) {
         throw std::invalid_argument(
@@ -565,22 +565,11 @@ void GraphRecorder::Execute(Operator* op,
     }
   }
 
+  m_graph_inputs.insert(m_graph_inputs.end(), input_candidates.begin(),
+                        input_candidates.end());
+
   m_operator_nodes.push_back(std::move(op_node));
-}
-
-// A debug/testing function to execute the recorded graph without creating a
-// fused DML graph. This executes operators one by one. This is useful for
-// bypassing the fusion logic to isolate issues.
-void GraphRecorder::EvaluateGraphWithoutFusedGraph() {
-  // Mark the last operator's outputs as graph outputs.
-  OperatorNode* last_op_node = m_operator_nodes.back().get();
-  for (BindingNode* output_node : last_op_node->outputs) {
-    m_graph_outputs.push_back(output_node);
-  }
-
-  SubGraph whole_graph(m_operator_nodes, m_graph_inputs);
-  whole_graph.EvaluateSubGraphWithoutFusedGraph();
-  Reset();
+  m_current_operator_nodes.push_back(m_operator_nodes.back().get());
 }
 
 // Finalizes the graph recording. This involves identifying graph outputs,
@@ -589,108 +578,106 @@ void GraphRecorder::EvaluateGraphWithoutFusedGraph() {
 void GraphRecorder::End() {
   m_has_begun = false;
 
-  // Option to bypass graph fusion for debugging.
-  constexpr bool kEvaluateWithoutFusedGraph = false;
-  if (kEvaluateWithoutFusedGraph) {
-    EvaluateGraphWithoutFusedGraph();
-    return;
-  }
-
+  Flush();
   if (m_operator_nodes.empty()) {
     return;
   }
 
-  std::vector<SubGraph> final_subgraphs{{m_operator_nodes, m_graph_inputs}};
-  SubGraph& final_subgraph = final_subgraphs.back();
-  std::vector<std::pair<BindingNode*, BindingNode*>> overlapping_pairs;
-  std::vector<Microsoft::WRL::ComPtr<IResourceWrapper>> overridden_inputs;
-  if (final_subgraph.FindOutputsOverlapInputs(overlapping_pairs)) {
-    Device* device = get_device();
-    for (const auto& pair : overlapping_pairs) {
-      std::cerr << "Overlapping output: " << pair.first->resource
-                << " with input: " << pair.second->resource << "\n";
-    }
-
-    // Create a set of unique input nodes that overlap with outputs.
-    std::unordered_set<BindingNode*> inputs_to_override;
-    for (const auto& pair : overlapping_pairs) {
-      inputs_to_override.insert(pair.second);
-    }
-
-    std::unordered_map<BindingNode*, BindingNode*> overridden_nodes_map;
-
-    for (BindingNode* old_node : inputs_to_override) {
-      if (!old_node || !old_node->resource) {
-        continue;
-      }
-
-      // Create a new resource and copy the data from the old one.
-      auto new_resource_wrapper =
-          m_allocator->Alloc(old_node->size_in_bytes, D3D12_RESOURCE_FLAG_NONE);
-      overridden_inputs.push_back(new_resource_wrapper);
-      ID3D12Resource* new_resource = new_resource_wrapper->GetD3D12Resource();
-
-      device->CopyResourceSubRegion(new_resource,       /*dst*/
-                                    old_node->resource, /*src*/
-                                    0,                  /*dstOffset*/
-                                    old_node->offset,   /*srcOffset*/
-                                    old_node->size_in_bytes);
-
-      // Create a new binding node for the new resource.
-      bool created;
-      BindingNode* new_node = GetOrCreateBindingNode(
-          new_resource, 0, old_node->size_in_bytes, created);
-      overridden_nodes_map[old_node] = new_node;
-    }
-
-    for (auto& input_node : final_subgraph.inputs) {
-      auto it = overridden_nodes_map.find(input_node);
-      if (it != overridden_nodes_map.end()) {
-        input_node = it->second;
-      }
-    }
-
-    // Replace the old binding nodes with the new ones throughout the subgraph.
-    for (auto* op_node : final_subgraph.op_nodes) {
-      // First, update the inputs of the current operator.
-      for (auto& input_node : op_node->inputs) {
-        auto it = overridden_nodes_map.find(input_node);
-        if (it != overridden_nodes_map.end()) {
-          input_node = it->second;
-        }
-      }
-
-      // Then, check the outputs. If an output redefines an overridden input,
-      // subsequent nodes should use the new value, so we remove it from the
-      // map.
-      for (auto* output_node : op_node->outputs) {
-        std::unordered_map<BindingNode*, BindingNode*>::iterator it;
-        for (it = overridden_nodes_map.begin();
-             it != overridden_nodes_map.end();) {
-          if (it->first->resource == output_node->resource) {
-            // If the output node is an overridden input, remove it from the
-            // map.
-            it = overridden_nodes_map.erase(it);
-          } else {
-            ++it;
-          }
-        }
-      }
-      if (overridden_nodes_map.empty()) {
-        // If all overridden nodes have been killed.
-        break;
-      }
-    }
-  }
-
-  // Execute the finalized subgraphs.
+  std::vector<SubGraph> final_subgraphs = std::move(m_subgraphs);
   if (kDumpSubGraphs) {
     for (const auto& subgraph : final_subgraphs) {
       subgraph.Dump(std::cout);
     }
   }
 
-  for (const auto& subgraph : final_subgraphs) {
+  for (SubGraph& subgraph : final_subgraphs) {
+    std::vector<std::pair<BindingNode*, BindingNode*>> overlapping_pairs;
+    std::vector<Microsoft::WRL::ComPtr<IResourceWrapper>> overridden_inputs;
+    if (subgraph.FindOutputsOverlapInputs(overlapping_pairs)) {
+      Device* device = get_device();
+      for (const auto& pair : overlapping_pairs) {
+        std::cerr << "Overlapping output: " << pair.first->resource
+                  << " with input: " << pair.second->resource << "\n";
+      }
+
+      // Create a set of unique input nodes that overlap with outputs.
+      std::unordered_set<BindingNode*> inputs_to_override;
+      for (const auto& pair : overlapping_pairs) {
+        inputs_to_override.insert(pair.second);
+      }
+
+      std::unordered_map<BindingNode*, BindingNode*> overridden_nodes_map;
+
+      for (BindingNode* old_node : inputs_to_override) {
+        if (!old_node || !old_node->resource) {
+          continue;
+        }
+
+        // Create a new resource and copy the data from the old one.
+        auto new_resource_wrapper = m_allocator->Alloc(
+            old_node->size_in_bytes, D3D12_RESOURCE_FLAG_NONE);
+        overridden_inputs.push_back(new_resource_wrapper);
+        ID3D12Resource* new_resource = new_resource_wrapper->GetD3D12Resource();
+
+        device->CopyResourceSubRegion(new_resource,       /*dst*/
+                                      old_node->resource, /*src*/
+                                      0,                  /*dstOffset*/
+                                      old_node->offset,   /*srcOffset*/
+                                      old_node->size_in_bytes);
+
+        // Create a new binding node for the new resource.
+        bool created;
+        BindingNode* new_node = GetOrCreateBindingNode(
+            new_resource, 0, old_node->size_in_bytes, created);
+        overridden_nodes_map[old_node] = new_node;
+      }
+
+      for (auto& input_node : subgraph.inputs) {
+        auto it = overridden_nodes_map.find(input_node);
+        if (it != overridden_nodes_map.end()) {
+          input_node = it->second;
+        }
+      }
+
+      // Replace the old binding nodes with the new ones throughout the
+      // subgraph.
+      for (auto* op_node : subgraph.op_nodes) {
+        // First, update the inputs of the current operator.
+        for (auto& input_node : op_node->inputs) {
+          auto it = overridden_nodes_map.find(input_node);
+          if (it != overridden_nodes_map.end()) {
+            input_node = it->second;
+          }
+        }
+
+        // Then, check the outputs. If an output redefines an overridden input,
+        // subsequent nodes should use the new value, so we remove it from the
+        // map.
+        for (auto* output_node : op_node->outputs) {
+          std::unordered_map<BindingNode*, BindingNode*>::iterator it;
+          for (it = overridden_nodes_map.begin();
+               it != overridden_nodes_map.end();) {
+            if (it->first->resource == output_node->resource) {
+              // If the output node is an overridden input, remove it from the
+              // map.
+              it = overridden_nodes_map.erase(it);
+            } else {
+              ++it;
+            }
+          }
+        }
+        if (overridden_nodes_map.empty()) {
+          // If all overridden nodes have been killed.
+          break;
+        }
+      }
+    }
+
+    // Execute the finalized subgraphs.
+    if (kDumpSubGraphs) {
+      subgraph.Dump(std::cout);
+    }
+
     if (subgraph.op_nodes.empty()) {
       continue;
     }
@@ -804,6 +791,14 @@ void GraphRecorder::End() {
   }
 
   Reset();
+}
+
+void GraphRecorder::Flush() {
+  if (m_operator_nodes.empty()) {
+    return;
+  }
+  m_subgraphs.emplace_back(std::move(m_current_operator_nodes),
+                           std::move(m_graph_inputs));
 }
 
 // Retrieves an existing binding node or creates a new one if it doesn't exist.

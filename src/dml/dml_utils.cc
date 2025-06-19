@@ -451,13 +451,13 @@ DmlBufferBindingBundle::DmlBufferBindingBundle(ID3D12Resource* resource,
   if (resource == nullptr) {
     type_ = DML_BINDING_TYPE_NONE;
   }
-  if (size_in_bytes == 0 && resource) {
+  if (resource) {
     D3D12_RESOURCE_DESC desc = resource->GetDesc();
     if (desc.Format != DXGI_FORMAT_UNKNOWN) {
       THROW_INVALID_ARGUMENT(
           "DML buffer binding size cannot be 0 for non-buffer resources.");
     }
-    UINT64 size_in_byte = desc.Width;
+    UINT64 size_in_byte = desc.Width - offset;
 
     buffer_binding_.SizeInBytes = size_in_byte;
   }

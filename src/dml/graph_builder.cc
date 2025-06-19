@@ -15,7 +15,7 @@ namespace dml {
 
 namespace {
 
-constexpr const bool kDumpGraphForDebug = true;
+constexpr const bool kDumpGraphForDebug = false;
 
 enum class ValueType {
   GRAPH_INPUT,
