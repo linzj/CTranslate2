@@ -9,6 +9,9 @@ typedef interface IResourceWrapper IResourceWrapper;
 
 namespace ctranslate2 {
 namespace dml {
+namespace {
+class AllocationInfo;
+}
 
 class Device;
 // Implements a memory pooling strategy for D3D12 resources.
@@ -33,12 +36,17 @@ class BucketizedBufferAllocator {
 
  private:
   using Bucket = std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>>;
+  Microsoft::WRL::ComPtr<ID3D12Resource> AllocPrivate(
+      uint32_t bucketIndex,
+      uint64_t requestedSize,
+      D3D12_RESOURCE_FLAGS resourceFlags);
 
   AllocFunction m_allocFunction;
   std::vector<Bucket> m_pool;
 
   bool m_roundingEnabled = true;
   bool m_disablePooling = false;
+  friend class AllocationInfo;
 };
 
 }  // namespace dml

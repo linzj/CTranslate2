@@ -517,6 +517,7 @@ class DmlBufferBindingBundle {
   // Returns a DML_BINDING_DESC.
   // The DML_BUFFER_BINDING is managed by this class instance.
   DML_BINDING_DESC get_desc() const {
+    update_buffer_binding();
     if (type_ == DML_BINDING_TYPE_BUFFER) {
       return {DML_BINDING_TYPE_BUFFER, &buffer_binding_};
     }
@@ -527,7 +528,16 @@ class DmlBufferBindingBundle {
   // Useful if direct access to the DML_BUFFER_BINDING is needed,
   // but get_desc() is preferred for creating DML_BINDING_DESC.
   const DML_BUFFER_BINDING* get_buffer_binding_ptr() const {
-    return (type_ == DML_BINDING_TYPE_BUFFER) ? &buffer_binding_ : nullptr;
+    if (type_ != DML_BINDING_TYPE_BUFFER) {
+      return nullptr;
+    }
+    update_buffer_binding();
+    return &buffer_binding_;
+  }
+
+  const DML_BUFFER_BINDING& get_buffer_binding() const {
+    update_buffer_binding();
+    return buffer_binding_;
   }
 
   // Returns the type of the binding.
@@ -535,10 +545,6 @@ class DmlBufferBindingBundle {
 
   IResourceWrapper* get_resource_wrapper() const {
     return resource_wrapper_.Get();
-  }
-
-  const DML_BUFFER_BINDING& get_buffer_binding() const {
-    return buffer_binding_;
   }
 
   // Allow move construction and assignment
@@ -578,8 +584,18 @@ class DmlBufferBindingBundle {
   }
 
  private:
+  void update_buffer_binding() const {
+    if (type_ != DML_BINDING_TYPE_BUFFER) {
+      return;
+    }
+    if (buffer_binding_.Buffer) {
+      return;
+    }
+    buffer_binding_.Buffer = resource_wrapper_->GetD3D12Resource();
+  }
+
   Microsoft::WRL::ComPtr<IResourceWrapper> resource_wrapper_;
-  DML_BUFFER_BINDING buffer_binding_;
+  mutable DML_BUFFER_BINDING buffer_binding_;
   DML_BINDING_TYPE type_;  // To handle optional/empty bindings gracefully
 };
 

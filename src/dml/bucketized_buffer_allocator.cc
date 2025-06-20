@@ -43,12 +43,13 @@ class AllocationInfo
  public:
   AllocationInfo(BucketizedBufferAllocator* owner,
                  size_t id,
-                 ID3D12Resource* resource,
-                 size_t requestedSize)
+                 size_t requestedSize,
+                 D3D12_RESOURCE_FLAGS resourceFlags)
+
       : m_owner(owner),
         m_bucketId(id),
-        m_resource(resource),
-        m_requestedSize(requestedSize) {}
+        m_requestedSize(requestedSize),
+        m_resourceFlags(resourceFlags) {}
 
   ~AllocationInfo();
 
@@ -62,7 +63,13 @@ class AllocationInfo
 
   size_t GetBucketId() const { return m_bucketId; }
 
-  ID3D12Resource* GetD3D12Resource() const override { return m_resource.Get(); }
+  ID3D12Resource* GetD3D12Resource() const override {
+    if (!m_resource) {
+      m_resource =
+          m_owner->AllocPrivate(m_bucketId, m_requestedSize, m_resourceFlags);
+    }
+    return m_resource.Get();
+  }
 
   UINT32 GetActualSize() const override {
     return static_cast<UINT32>(GetBucketSizeFromIndex(m_bucketId));
@@ -72,11 +79,12 @@ class AllocationInfo
   // The bucketized buffer allocator must outlive the allocation info
   BucketizedBufferAllocator* m_owner;
   size_t m_bucketId;
-  Microsoft::WRL::ComPtr<ID3D12Resource> m_resource;
+  mutable Microsoft::WRL::ComPtr<ID3D12Resource> m_resource;
 
   // The size requested during Alloc(), which may be smaller than the physical
   // resource size
   size_t m_requestedSize;
+  D3D12_RESOURCE_FLAGS m_resourceFlags;
 };
 
 AllocationInfo::~AllocationInfo() {
@@ -100,45 +108,11 @@ Microsoft::WRL::ComPtr<IResourceWrapper> BucketizedBufferAllocator::Alloc(
   size = (size + DML_MINIMUM_BUFFER_TENSOR_ALIGNMENT - 1) & tensor_size_mask;
 
   uint32_t bucketIndex = GetBucketIndexFromSize(size);
-  uint64_t bucketSize = GetBucketSizeFromIndex(bucketIndex);
 
-  bool isPooled = !m_disablePooling &&
-                  (m_roundingEnabled || (size == bucketSize)) &&
-                  !kForceDisablePooling;
-
-  if (isPooled) {
-    if (bucketIndex >= m_pool.size()) {
-      m_pool.resize(bucketIndex + 1);
-    }
-
-    Bucket& bucket = m_pool[bucketIndex];
-
-    if (!bucket.empty()) {
-      Microsoft::WRL::ComPtr<ID3D12Resource> resource =
-          std::move(bucket.back());
-      bucket.pop_back();
-      Microsoft::WRL::ComPtr<IResourceWrapper> resourceWrapper =
-          Microsoft::WRL::Make<AllocationInfo>(this, bucketIndex,
-                                               resource.Detach(), size);
-      return resourceWrapper;
-    }
-
-    Microsoft::WRL::ComPtr<ID3D12Resource> resource =
-        m_allocFunction(bucketSize, resourceFlags);
-
-    Microsoft::WRL::ComPtr<IResourceWrapper> resourceWrapper =
-        Microsoft::WRL::Make<AllocationInfo>(this, bucketIndex,
-                                             resource.Detach(), size);
-
-    return resourceWrapper;
-  } else {
-    Microsoft::WRL::ComPtr<ID3D12Resource> d3d12_resource =
-        m_allocFunction(size, resourceFlags);
-    Microsoft::WRL::ComPtr<IResourceWrapper> resourceWrapper =
-        Microsoft::WRL::Make<AllocationInfo>(this, bucketIndex,
-                                             d3d12_resource.Detach(), size);
-    return resourceWrapper;
-  }
+  Microsoft::WRL::ComPtr<IResourceWrapper> resourceWrapper =
+      Microsoft::WRL::Make<AllocationInfo>(this, bucketIndex, size,
+                                           resourceFlags);
+  return resourceWrapper;
 }
 
 void BucketizedBufferAllocator::FreeResource(
@@ -162,6 +136,39 @@ void BucketizedBufferAllocator::FreeResource(
   Bucket& bucket = m_pool[bucketIndex];
   bucket.push_back(Microsoft::WRL::ComPtr<ID3D12Resource>(
       resourceWrapper->GetD3D12Resource()));
+}
+
+Microsoft::WRL::ComPtr<ID3D12Resource> BucketizedBufferAllocator::AllocPrivate(
+    uint32_t bucketIndex,
+    uint64_t requestedSize,
+    D3D12_RESOURCE_FLAGS resourceFlags) {
+  bool isPooled =
+      !m_disablePooling && (m_roundingEnabled) && !kForceDisablePooling;
+
+  uint64_t bucketSize = GetBucketSizeFromIndex(bucketIndex);
+  if (isPooled) {
+    if (bucketIndex >= m_pool.size()) {
+      m_pool.resize(bucketIndex + 1);
+    }
+
+    Bucket& bucket = m_pool[bucketIndex];
+
+    if (!bucket.empty()) {
+      Microsoft::WRL::ComPtr<ID3D12Resource> resource =
+          std::move(bucket.back());
+      bucket.pop_back();
+      return resource;
+    }
+
+    Microsoft::WRL::ComPtr<ID3D12Resource> resource =
+        m_allocFunction(bucketSize, resourceFlags);
+
+    return resource;
+  } else {
+    Microsoft::WRL::ComPtr<ID3D12Resource> d3d12_resource =
+        m_allocFunction(requestedSize, resourceFlags);
+    return d3d12_resource;
+  }
 }
 
 }  // namespace dml

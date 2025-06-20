@@ -452,9 +452,8 @@ DmlBufferBindingBundle::DmlBufferBindingBundle(IResourceWrapper* resource,
   if (resource == nullptr) {
     type_ = DML_BINDING_TYPE_NONE;
   } else {
-    ID3D12Resource* d3d12_resource = resource->GetD3D12Resource();
     type_ = DML_BINDING_TYPE_BUFFER;
-    buffer_binding_ = {d3d12_resource, offset, size_in_bytes};
+    buffer_binding_ = {nullptr, offset, size_in_bytes};
 
 #if 0
     D3D12_RESOURCE_DESC desc = d3d12_resource->GetDesc();
