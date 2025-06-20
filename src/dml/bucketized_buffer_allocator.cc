@@ -71,6 +71,10 @@ class AllocationInfo
     return m_resource.Get();
   }
 
+  Microsoft::WRL::ComPtr<ID3D12Resource> GetD3D12ResourceDirect() const {
+    return std::move(m_resource);
+  }
+
   UINT32 GetActualSize() const override {
     return static_cast<UINT32>(GetBucketSizeFromIndex(m_bucketId));
   }
@@ -134,8 +138,11 @@ void BucketizedBufferAllocator::FreeResource(
   }
 
   Bucket& bucket = m_pool[bucketIndex];
-  bucket.push_back(Microsoft::WRL::ComPtr<ID3D12Resource>(
-      resourceWrapper->GetD3D12Resource()));
+  Microsoft::WRL::ComPtr<ID3D12Resource> detached_resource(
+      allocationInfo->GetD3D12ResourceDirect());
+  if (detached_resource) {
+    bucket.push_back(std::move(detached_resource));
+  }
 }
 
 Microsoft::WRL::ComPtr<ID3D12Resource> BucketizedBufferAllocator::AllocPrivate(

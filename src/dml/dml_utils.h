@@ -535,6 +535,13 @@ class DmlBufferBindingBundle {
     return &buffer_binding_;
   }
 
+  const DML_BUFFER_BINDING* get_buffer_binding_ptr_without_update() const {
+    if (type_ != DML_BINDING_TYPE_BUFFER) {
+      return nullptr;
+    }
+    return &buffer_binding_;
+  }
+
   const DML_BUFFER_BINDING& get_buffer_binding() const {
     update_buffer_binding();
     return buffer_binding_;

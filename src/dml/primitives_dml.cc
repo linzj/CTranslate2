@@ -1527,30 +1527,9 @@ float primitives<Device::DirectML>::logsumexp(const T* x,
     IResourceWrapper* dst_resource =
         dml::utils::ResourceFromStorageView(temp_buffer_storage);
 
-    D3D12_RESOURCE_BARRIER barriers[2];
-    barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barriers[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    barriers[0].Transition.pResource = src_resource->GetD3D12Resource();
-    barriers[0].Transition.Subresource =
-        D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-    barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-    barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barriers[1].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    barriers[1].Transition.pResource = dst_resource->GetD3D12Resource();
-    barriers[1].Transition.Subresource =
-        D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-    barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-    command_list->ResourceBarrier(2, barriers);
-    command_list->CopyBufferRegion(dst_resource->GetD3D12Resource(), 0,
-                                   src_resource->GetD3D12Resource(),
-                                   byte_offset, buffer_size);
-    std::swap(barriers[0].Transition.StateBefore,
-              barriers[0].Transition.StateAfter);
-    std::swap(barriers[1].Transition.StateBefore,
-              barriers[1].Transition.StateAfter);
-    command_list->ResourceBarrier(2, barriers);
+    dxdevice->CopyResourceSubRegion(dst_resource->GetD3D12Resource(),
+                                    src_resource->GetD3D12Resource(), 0,
+                                    byte_offset, buffer_size);
     input_resource = dml::utils::ResourceFromStorageView(temp_buffer_storage);
     byte_offset = 0;
   }

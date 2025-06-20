@@ -526,7 +526,8 @@ void GraphRecorder::Execute(Operator* op,
   const auto& input_descs = inputs.get_buffer_binding_bundles();
   for (size_t i = 0; i < input_descs.size(); ++i) {
     if (input_descs[i].get_type() == DML_BINDING_TYPE_BUFFER) {
-      auto buffer_binding = input_descs[i].get_buffer_binding_ptr();
+      auto buffer_binding =
+          input_descs[i].get_buffer_binding_ptr_without_update();
       bool node_created;  // Track if a new node was created
       BindingNode* binding_node = GetOrCreateBindingNode(
           input_descs[i].get_resource_wrapper(), buffer_binding->Offset,
@@ -553,7 +554,8 @@ void GraphRecorder::Execute(Operator* op,
   const auto& output_descs = outputs.get_buffer_binding_bundles();
   for (size_t i = 0; i < output_descs.size(); ++i) {
     if (output_descs[i].get_type() == DML_BINDING_TYPE_BUFFER) {
-      auto buffer_binding = output_descs[i].get_buffer_binding_ptr();
+      auto buffer_binding =
+          output_descs[i].get_buffer_binding_ptr_without_update();
       bool node_created;
       BindingNode* binding_node = GetOrCreateBindingNode(
           output_descs[i].get_resource_wrapper(), buffer_binding->Offset,
