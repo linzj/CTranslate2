@@ -22,12 +22,12 @@ class GuardedPtr {
       throw std::invalid_argument(
           "Resource is currently locked by another thread.");
     }
-    // If we get here, the lock was successful
   }
 
   // Destructor: Releases the lock
   ~GuardedPtr() {
-    if (m_ptr) {  // Only unlock if we successfully hold a lock
+    // Only unlock if we successfully hold a lock
+    if (m_ptr) {
       m_mutex.unlock();
     }
   }
@@ -65,11 +65,16 @@ GuardedPtr<Device> get_device();
 
 class ScopedGraphRecording {
  public:
+  constexpr static bool kEnabled = false;
   ScopedGraphRecording() {
-    // dml::get_device()->BeginGraphRecording();
+    if (kEnabled) {
+      dml::get_device()->BeginGraphRecording();
+    }
   }
   ~ScopedGraphRecording() {
-    // dml::get_device()->EndGraphRecording();
+    if (kEnabled) {
+      dml::get_device()->EndGraphRecording();
+    }
   }
 };
 
