@@ -91,8 +91,11 @@ class SubGraph {
       for (size_t j = 0; j < op_node->outputs.size(); ++j) {
         BindingNode* output_node = op_node->outputs[j];
         if (output_node && output_node->resource) {
-          last_kill_of_resource[output_node->resource.Get()] =
-              OutputEdge{static_cast<UINT32>(i), static_cast<UINT32>(j)};
+          if (output_node->resource->AddRef() >= 3) {
+            last_kill_of_resource[output_node->resource.Get()] =
+                OutputEdge{static_cast<UINT32>(i), static_cast<UINT32>(j)};
+          }
+          output_node->resource->Release();
         }
       }
     }
