@@ -335,8 +335,9 @@ Microsoft::WRL::ComPtr<IDMLCompiledOperator> GraphBuilder::Build(
 
   // Compile the graph description into a runnable, optimized operator.
   Microsoft::WRL::ComPtr<IDMLCompiledOperator> compiled_graph;
-  THROW_IF_FAILED(
-      device1->CompileGraph(&graph_desc, flags, IID_PPV_ARGS(&compiled_graph)));
+  THROW_IF_FAILED(device1->CompileGraph(
+      &graph_desc, flags | DML_EXECUTION_FLAG_DISABLE_META_COMMANDS,
+      IID_PPV_ARGS(&compiled_graph)));
 
   // Return the compiled graph object.
   return compiled_graph;

@@ -2,6 +2,10 @@
 
 #include "dispatch.h"
 
+#if defined(CT2_WITH_DIRECTML)
+#include "dml/backend_dml.h"
+#endif
+
 namespace ctranslate2 {
   namespace ops {
 
@@ -27,6 +31,9 @@ namespace ctranslate2 {
 
     void SoftMax::operator()(const StorageView& x, const StorageView* lengths, StorageView& y) const {
       PROFILE(_log ? "LogSoftMax" : "SoftMax");
+#if defined(CT2_WITH_DIRECTML)
+      dml::ScopedGraphRecording recording;
+#endif
       y.resize_as(x);
 
       const dim_t depth = x.dim(-1);

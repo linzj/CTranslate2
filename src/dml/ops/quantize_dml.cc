@@ -21,6 +21,7 @@ void Quantize::quantize(const StorageView& input,
   static_assert(std::is_same_v<OutT, int8_t>,
                 "Output type must be int8_t for this DML quantization.");
 
+  dml::ScopedGraphRecording recording;
   if (_shift_to_uint8) {
     THROW_INVALID_ARGUMENT(
         "DML Quantize (float->int8_t) currently only supports symmetric "
@@ -197,65 +198,69 @@ void Quantize::quantize(const StorageView& input,
           static_cast<UINT64>(0), static_cast<UINT64>(0)}});
   }
 
-  // Condition for IF operator: is_amax_zero = (abs_max == 0)
-  StorageView condition_storage(
-      computed_scale_shape_ct,
-      DataType::INT8,  // Store as INT8, DML EQUALS outputs UINT8
-      Device::DirectML);
-  {
-    dml::utils::DmlOperatorDescBundle op_desc;
-    auto& abs_max_desc = op_desc.AddInput(abs_max_storage);
-    auto& const_0_desc =
-        op_desc.AddInput(dml_scalar_dtype, target_dml_dims, &broadcast_strides,
-                         single_scalar_size_bytes);
-    auto& condition_desc = op_desc.AddOutput(condition_storage);
-    condition_desc.set_data_type(DML_TENSOR_DATA_TYPE_UINT8);
-    auto& equals_op_def =
-        op_desc
-            .GetOperatorDesc<DML_ELEMENT_WISE_LOGICAL_EQUALS_OPERATOR_DESC>();
-    equals_op_def.ATensor = &abs_max_desc.get_tensor_desc();
-    equals_op_def.BTensor = &const_0_desc.get_tensor_desc();
-    equals_op_def.OutputTensor = &condition_desc.get_tensor_desc();
-    dml::Operator* compiled_equals_op = dml::GetOrCreateCompiledOperatorApi(
-        std::move(op_desc), DML_EXECUTION_FLAG_NONE, L"Quantize_IsAmaxZero");
-    compiled_equals_op->Execute(
-        {{dml::utils::ResourceFromStorageView(abs_max_storage),
-          static_cast<UINT64>(0), static_cast<UINT64>(0)},
-         {dml::utils::ResourceFromStorageView(const_0_storage),
-          static_cast<UINT64>(0), static_cast<UINT64>(0)}},
-        {{dml::utils::ResourceFromStorageView(condition_storage),
-          static_cast<UINT64>(0), static_cast<UINT64>(0)}});
-  }
+  if (false) {
+    // Condition for IF operator: is_amax_zero = (abs_max == 0)
+    StorageView condition_storage(
+        computed_scale_shape_ct,
+        DataType::INT8,  // Store as INT8, DML EQUALS outputs UINT8
+        Device::DirectML);
+    {
+      dml::utils::DmlOperatorDescBundle op_desc;
+      auto& abs_max_desc = op_desc.AddInput(abs_max_storage);
+      auto& const_0_desc =
+          op_desc.AddInput(dml_scalar_dtype, target_dml_dims,
+                           &broadcast_strides, single_scalar_size_bytes);
+      auto& condition_desc = op_desc.AddOutput(condition_storage);
+      condition_desc.set_data_type(DML_TENSOR_DATA_TYPE_UINT8);
+      auto& equals_op_def =
+          op_desc
+              .GetOperatorDesc<DML_ELEMENT_WISE_LOGICAL_EQUALS_OPERATOR_DESC>();
+      equals_op_def.ATensor = &abs_max_desc.get_tensor_desc();
+      equals_op_def.BTensor = &const_0_desc.get_tensor_desc();
+      equals_op_def.OutputTensor = &condition_desc.get_tensor_desc();
+      dml::Operator* compiled_equals_op = dml::GetOrCreateCompiledOperatorApi(
+          std::move(op_desc), DML_EXECUTION_FLAG_NONE, L"Quantize_IsAmaxZero");
+      compiled_equals_op->Execute(
+          {{dml::utils::ResourceFromStorageView(abs_max_storage),
+            static_cast<UINT64>(0), static_cast<UINT64>(0)},
+           {dml::utils::ResourceFromStorageView(const_0_storage),
+            static_cast<UINT64>(0), static_cast<UINT64>(0)}},
+          {{dml::utils::ResourceFromStorageView(condition_storage),
+            static_cast<UINT64>(0), static_cast<UINT64>(0)}});
+    }
 
-  // IF Operator: scale = is_amax_zero ? 1.0f : (abs_max / 127.0f)
-  // Output of IF goes directly into the 'scale' StorageView.
-  {
-    dml::utils::DmlOperatorDescBundle op_desc;
-    auto& condition_desc = op_desc.AddInput(condition_storage);
-    condition_desc.set_data_type(DML_TENSOR_DATA_TYPE_UINT8);
-    auto& const_1_desc =
-        op_desc.AddInput(dml_scalar_dtype, target_dml_dims, &broadcast_strides,
-                         single_scalar_size_bytes);
-    auto& scale_if_amax_not_zero_desc =
-        op_desc.AddInput(scale_if_amax_not_zero_storage);
-    auto& scale_desc = op_desc.AddOutput(scale);
-    auto& if_op_def =
-        op_desc.GetOperatorDesc<DML_ELEMENT_WISE_IF_OPERATOR_DESC>();
-    if_op_def.ConditionTensor = &condition_desc.get_tensor_desc();
-    if_op_def.ATensor = &const_1_desc.get_tensor_desc();
-    if_op_def.BTensor = &scale_if_amax_not_zero_desc.get_tensor_desc();
-    if_op_def.OutputTensor = &scale_desc.get_tensor_desc();
-    dml::Operator* compiled_if_op = dml::GetOrCreateCompiledOperatorApi(
-        std::move(op_desc), DML_EXECUTION_FLAG_NONE, L"Quantize_SelectScale");
-    compiled_if_op->Execute(
-        {{dml::utils::ResourceFromStorageView(condition_storage),
-          static_cast<UINT64>(0), static_cast<UINT64>(0)},
-         {dml::utils::ResourceFromStorageView(const_1_storage),
-          static_cast<UINT64>(0), static_cast<UINT64>(0)},
-         {dml::utils::ResourceFromStorageView(scale_if_amax_not_zero_storage),
-          static_cast<UINT64>(0), static_cast<UINT64>(0)}},
-        {{dml::utils::ResourceFromStorageView(scale), static_cast<UINT64>(0),
-          static_cast<UINT64>(0)}});
+    // IF Operator: scale = is_amax_zero ? 1.0f : (abs_max / 127.0f)
+    // Output of IF goes directly into the 'scale' StorageView.
+    {
+      dml::utils::DmlOperatorDescBundle op_desc;
+      auto& condition_desc = op_desc.AddInput(condition_storage);
+      condition_desc.set_data_type(DML_TENSOR_DATA_TYPE_UINT8);
+      auto& const_1_desc =
+          op_desc.AddInput(dml_scalar_dtype, target_dml_dims,
+                           &broadcast_strides, single_scalar_size_bytes);
+      auto& scale_if_amax_not_zero_desc =
+          op_desc.AddInput(scale_if_amax_not_zero_storage);
+      auto& scale_desc = op_desc.AddOutput(scale);
+      auto& if_op_def =
+          op_desc.GetOperatorDesc<DML_ELEMENT_WISE_IF_OPERATOR_DESC>();
+      if_op_def.ConditionTensor = &condition_desc.get_tensor_desc();
+      if_op_def.ATensor = &const_1_desc.get_tensor_desc();
+      if_op_def.BTensor = &scale_if_amax_not_zero_desc.get_tensor_desc();
+      if_op_def.OutputTensor = &scale_desc.get_tensor_desc();
+      dml::Operator* compiled_if_op = dml::GetOrCreateCompiledOperatorApi(
+          std::move(op_desc), DML_EXECUTION_FLAG_NONE, L"Quantize_SelectScale");
+      compiled_if_op->Execute(
+          {{dml::utils::ResourceFromStorageView(condition_storage),
+            static_cast<UINT64>(0), static_cast<UINT64>(0)},
+           {dml::utils::ResourceFromStorageView(const_1_storage),
+            static_cast<UINT64>(0), static_cast<UINT64>(0)},
+           {dml::utils::ResourceFromStorageView(scale_if_amax_not_zero_storage),
+            static_cast<UINT64>(0), static_cast<UINT64>(0)}},
+          {{dml::utils::ResourceFromStorageView(scale), static_cast<UINT64>(0),
+            static_cast<UINT64>(0)}});
+    }
+  } else {
+    scale = std::move(scale_if_amax_not_zero_storage);
   }
 
   // --- Quantize Operation using Broadcasted Scale ---
@@ -303,6 +308,7 @@ void Quantize::quantize(const StorageView& input,
         {{dml::utils::ResourceFromStorageView(output), static_cast<UINT64>(0),
           static_cast<UINT64>(0)}});
   }
+  recording.BailOut();
   // --- Correct the 'scale' to be its reciprocal for the output parameter ---
   // The 'scale' StorageView (output parameter) currently holds S_calc (abs_max
   // / 127.0f or 1.0f). The request is for its final value to be 1/S_calc. The

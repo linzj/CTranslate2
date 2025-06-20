@@ -1,6 +1,9 @@
 #include "ctranslate2/ops/dequantize.h"
 
 #include "dispatch.h"
+#if defined(CT2_WITH_DIRECTML)
+#include "dml/backend_dml.h"
+#endif
 
 namespace ctranslate2 {
   namespace ops {
@@ -14,6 +17,9 @@ namespace ctranslate2 {
                                 const StorageView& scale,
                                 StorageView& output) const {
       PROFILE("Dequantize");
+#if defined(CT2_WITH_DIRECTML)
+      dml::ScopedGraphRecording recording;
+#endif
       output.resize_as(input);
 
       switch (input.dtype()) {

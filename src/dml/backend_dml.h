@@ -71,11 +71,22 @@ class ScopedGraphRecording {
       dml::get_device()->BeginGraphRecording();
     }
   }
-  ~ScopedGraphRecording() {
-    if (kEnabled) {
+
+  void BailOut() {
+    if (kEnabled && !m_bailed_out) {
+      m_bailed_out = true;
       dml::get_device()->EndGraphRecording();
     }
   }
+
+  ~ScopedGraphRecording() {
+    if (kEnabled && !m_bailed_out) {
+      dml::get_device()->EndGraphRecording();
+    }
+  }
+
+ private:
+  bool m_bailed_out = false;
 };
 
 }  // namespace dml
