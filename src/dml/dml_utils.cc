@@ -443,26 +443,32 @@ DmlTensorDescBundle DmlTensorDescBundle::broadcastFromSeach(
       physical_shape, static_cast<int32_t>(target_dims.size()), 0, 0, 0, 0);
 }
 
-DmlBufferBindingBundle::DmlBufferBindingBundle(ID3D12Resource* resource,
+DmlBufferBindingBundle::DmlBufferBindingBundle(IResourceWrapper* resource,
                                                UINT64 offset,
                                                UINT64 size_in_bytes)
-    : buffer_binding_{resource, offset, size_in_bytes},
-      type_(DML_BINDING_TYPE_BUFFER) {
+    : resource_wrapper_(resource)
+
+{
   if (resource == nullptr) {
     type_ = DML_BINDING_TYPE_NONE;
-  }
-  if (resource) {
-    D3D12_RESOURCE_DESC desc = resource->GetDesc();
+  } else {
+    ID3D12Resource* d3d12_resource = resource->GetD3D12Resource();
+    type_ = DML_BINDING_TYPE_BUFFER;
+    buffer_binding_ = {d3d12_resource, offset, size_in_bytes};
+
+#if 0
+    D3D12_RESOURCE_DESC desc = d3d12_resource->GetDesc();
     if (desc.Format != DXGI_FORMAT_UNKNOWN) {
       THROW_INVALID_ARGUMENT(
           "DML buffer binding size cannot be 0 for non-buffer resources.");
     }
     UINT64 size_in_byte = desc.Width - offset;
+#else
+    UINT64 size_in_byte = resource->GetActualSize() - offset;
+#endif
 
     buffer_binding_.SizeInBytes = size_in_byte;
   }
-  // Ensure the resource is kept alive until the next dispatch
-  dml::get_device()->KeepAliveUntilNextCommandListDispatch(resource);
 }
 
 }  // namespace utils

@@ -35,7 +35,7 @@ void multinomial_impl(const StorageView& probs_input,
           device->GetCommandListType() == D3D12_COMMAND_LIST_TYPE_COPY
               ? Device::CPU
               : Device::DirectML);
-  ID3D12Resource* current_probs_resource_ptr;
+  IResourceWrapper* current_probs_resource_ptr;
   const StorageView* probs_sv_for_ops_ptr;
 
   // Hold all operator bundles to manage tensor descriptor lifetimes.

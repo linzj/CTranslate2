@@ -82,7 +82,7 @@ void dump_graph_for_debug(
     const DML_GRAPH_DESC& graph_desc,
     const std::vector<DML_GRAPH_NODE_DESC>& graph_nodes,
     const std::vector<OperatorNode*>& operator_nodes,
-    const std::unordered_map<const ID3D12Resource*, Value>& value_producers,
+    const std::unordered_map<const IResourceWrapper*, Value>& value_producers,
     const std::vector<BindingNode*>& graph_inputs,
     const std::vector<OutputEdge>& graph_outputs) {
   os << "Dumping DML Graph State for Debugging:\n";
@@ -110,13 +110,13 @@ void dump_graph_for_debug(
       os << "      Input[" << j << "]: " << input_binding;
       if (input_binding) {
         if (input_binding->resource) {
-          os << ", resource: " << input_binding->resource
+          os << ", resource: " << input_binding->resource.Get()
              << ", offset: " << input_binding->offset
              << ", size: " << input_binding->size_in_bytes;
         }
         os << ")";
         if (input_binding->resource) {
-          auto it = value_producers.find(input_binding->resource);
+          auto it = value_producers.find(input_binding->resource.Get());
           if (it != value_producers.end()) {
             const auto& producer_info = it->second;
             if (producer_info.type == ValueType::GRAPH_INPUT) {
@@ -141,7 +141,7 @@ void dump_graph_for_debug(
       os << "      Output[" << j << "]: " << output_binding;
       if (output_binding) {
         if (output_binding->resource) {
-          os << ", resource: " << output_binding->resource
+          os << ", resource: " << output_binding->resource.Get()
              << ", offset: " << output_binding->offset
              << ", size: " << output_binding->size_in_bytes;
         }
@@ -238,7 +238,7 @@ Microsoft::WRL::ComPtr<IDMLCompiledOperator> GraphBuilder::Build(
   graph_desc.Nodes = graph_nodes.data();
 
   // Map to track the origin of each tensor value in the graph.
-  std::unordered_map<const ID3D12Resource*, Value> value_producers;
+  std::unordered_map<const IResourceWrapper*, Value> value_producers;
 
   // Initialize with graph inputs.
   for (size_t i = 0; i < graph_inputs.size(); ++i) {
@@ -247,7 +247,7 @@ Microsoft::WRL::ComPtr<IDMLCompiledOperator> GraphBuilder::Build(
       Value val;
       val.type = ValueType::GRAPH_INPUT;
       val.graph_input_index = static_cast<uint32_t>(i);
-      value_producers[input_binding->resource] = val;
+      value_producers[input_binding->resource.Get()] = val;
     }
   }
 
@@ -264,7 +264,7 @@ Microsoft::WRL::ComPtr<IDMLCompiledOperator> GraphBuilder::Build(
     uint32_t dml_input_idx = 0;
     for (const auto& input_binding : op_node->inputs) {
       if (input_binding && input_binding->resource) {
-        auto it = value_producers.find(input_binding->resource);
+        auto it = value_producers.find(input_binding->resource.Get());
         if (it == value_producers.end())
           THROW_RUNTIME_ERROR("Intermediate input has no producer.");
 
@@ -302,7 +302,7 @@ Microsoft::WRL::ComPtr<IDMLCompiledOperator> GraphBuilder::Build(
         val.type = ValueType::INTERMEDIATE_OUTPUT;
         val.producer.node_index = (uint32_t)i;
         val.producer.node_output_index = (uint32_t)j;
-        value_producers[output_binding->resource] = val;
+        value_producers[output_binding->resource.Get()] = val;
       }
     }
   }

@@ -9,4 +9,6 @@ interface __declspec(uuid(
     : public IUnknown {
  public:
   virtual ID3D12Resource* GetD3D12Resource() const = 0;
+  virtual UINT32 GetRequestedSize() const = 0;
+  virtual UINT32 GetActualSize() const = 0;
 };

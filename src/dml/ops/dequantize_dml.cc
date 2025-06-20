@@ -80,7 +80,7 @@ void Dequantize::dequantize<Device::DirectML, int8_t, float>(
        input.size() * sizeof(int8_t)},
       {dml::utils::ResourceFromStorageView(reciprocal_scale), 0,
        reciprocal_scale.size() * sizeof(float)},
-      {static_cast<ID3D12Resource*>(nullptr), 0, 0}
+      {static_cast<IResourceWrapper*>(nullptr), 0, 0}
       // explicit nullptr for ZeroPointTensor
   };
 
@@ -252,20 +252,20 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
       {dml::utils::ResourceFromStorageView(reciprocal_scale), 0, 0}};
   recip_op->Execute(recip_inputs, recip_outputs);
 
-  ID3D12Resource* dequantize_output_resource =
+  IResourceWrapper* dequantize_output_resource =
       (bias || _activation_type)
           ? dml::utils::ResourceFromStorageView(dequantize_output_buffer)
           : dml::utils::ResourceFromStorageView(y);
   dml::utils::DmlBindingArrayBundle dequantize_inputs_combined{
       {dml::utils::ResourceFromStorageView(c), 0, 0},
       {dml::utils::ResourceFromStorageView(reciprocal_scale), 0, 0},
-      {static_cast<ID3D12Resource*>(nullptr), 0, 0}};  // ZeroPointTensor
+      {static_cast<IResourceWrapper*>(nullptr), 0, 0}};  // ZeroPointTensor
   dml::utils::DmlBindingArrayBundle dequantize_outputs_combined{
       {dequantize_output_resource, 0, 0}};
   dequantize_op->Execute(dequantize_inputs_combined,
                          dequantize_outputs_combined);
 
-  ID3D12Resource* current_buffer_resource = dequantize_output_resource;
+  IResourceWrapper* current_buffer_resource = dequantize_output_resource;
 
   if (bias_add_op) {
     dml::utils::DmlBindingArrayBundle bias_add_inputs{

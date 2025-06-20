@@ -23,7 +23,7 @@ class BucketizedBufferAllocator;
 // This struct tracks the binding's properties and its role within the larger
 // graph.
 struct BindingNode {
-  ID3D12Resource* resource;
+  Microsoft::WRL::ComPtr<IResourceWrapper> resource;
   UINT64 offset;
   UINT64 size_in_bytes;
 };
@@ -86,7 +86,7 @@ class GraphRecorder {
   // Retrieves an existing BindingNode for a given resource or creates a new
   // one. This ensures that each unique resource binding is represented by a
   // single node.
-  BindingNode* GetOrCreateBindingNode(ID3D12Resource* resource,
+  BindingNode* GetOrCreateBindingNode(IResourceWrapper* resource,
                                       UINT64 offset,
                                       UINT64 size,
                                       bool& created);
@@ -103,7 +103,7 @@ class GraphRecorder {
 
   // A lookup map for quick access to existing BindingNodes, keyed by a tuple of
   // (resource, offset, size). This avoids redundant node creation.
-  std::map<std::tuple<ID3D12Resource*, UINT64, UINT64>, BindingNode*>
+  std::map<std::tuple<IResourceWrapper*, UINT64, UINT64>, BindingNode*>
       m_binding_lookup;
 
   // An ordered list of all recorded operator nodes, representing the intended
@@ -125,7 +125,8 @@ class GraphRecorder {
 
   // Tracks the current binding for each D3D12 resource to detect redundant
   // bindings or potential conflicts within the current recording scope.
-  std::unordered_map<ID3D12Resource*, BindingNode*> m_current_resource_bindings;
+  std::unordered_map<IResourceWrapper*, BindingNode*>
+      m_current_resource_bindings;
 
   // A placeholder binding node used for operators that have no inputs or
   // outputs.

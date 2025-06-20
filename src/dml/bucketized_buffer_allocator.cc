@@ -9,6 +9,33 @@ namespace ctranslate2 {
 namespace dml {
 namespace {
 constexpr bool kForceDisablePooling = false;
+static constexpr uint32_t kResourceSizeExponent = 4;  // 2^4 = 16
+
+uint32_t GetBucketIndexFromSize(uint64_t size) {
+  if (size == 0) {
+    return 0;
+  }
+  uint64_t minBucketSize = 1ull << kResourceSizeExponent;
+  if (size <= minBucketSize) {
+    return 0;
+  }
+
+  // std::log2 returns the base-2 logarithm.
+  // The smallest power of 2 greater than or equal to a value is
+  // 2^(ceil(log2(value))). Example: size=90KB. log2(90KB)=16.49. ceil=17.
+  // 2^17=128KB.
+  uint32_t power =
+      static_cast<uint32_t>(std::ceil(std::log2(static_cast<double>(size))));
+
+  // The bucket index is the delta from the minimum resource size exponent.
+  // Example: min_exp=16. power=17. 17-16=1. Index=1.
+  return power - kResourceSizeExponent;
+}
+
+uint64_t GetBucketSizeFromIndex(uint32_t index) {
+  return 1ull << (static_cast<uint64_t>(index) + kResourceSizeExponent);
+}
+
 class AllocationInfo
     : public Microsoft::WRL::RuntimeClass<
           Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
@@ -31,11 +58,15 @@ class AllocationInfo
     return std::move(m_resource);
   }
 
-  size_t GetRequestedSize() const { return m_requestedSize; }
+  UINT32 GetRequestedSize() const override { return m_requestedSize; }
 
   size_t GetBucketId() const { return m_bucketId; }
 
   ID3D12Resource* GetD3D12Resource() const override { return m_resource.Get(); }
+
+  UINT32 GetActualSize() const override {
+    return static_cast<UINT32>(GetBucketSizeFromIndex(m_bucketId));
+  }
 
  private:
   // The bucketized buffer allocator must outlive the allocation info
@@ -131,33 +162,6 @@ void BucketizedBufferAllocator::FreeResource(
   Bucket& bucket = m_pool[bucketIndex];
   bucket.push_back(Microsoft::WRL::ComPtr<ID3D12Resource>(
       resourceWrapper->GetD3D12Resource()));
-}
-
-uint32_t BucketizedBufferAllocator::GetBucketIndexFromSize(
-    uint64_t size) const {
-  if (size == 0) {
-    return 0;
-  }
-  uint64_t minBucketSize = 1ull << c_minResourceSizeExponent;
-  if (size <= minBucketSize) {
-    return 0;
-  }
-
-  // std::log2 returns the base-2 logarithm.
-  // The smallest power of 2 greater than or equal to a value is
-  // 2^(ceil(log2(value))). Example: size=90KB. log2(90KB)=16.49. ceil=17.
-  // 2^17=128KB.
-  uint32_t power =
-      static_cast<uint32_t>(std::ceil(std::log2(static_cast<double>(size))));
-
-  // The bucket index is the delta from the minimum resource size exponent.
-  // Example: min_exp=16. power=17. 17-16=1. Index=1.
-  return power - c_minResourceSizeExponent;
-}
-
-uint64_t BucketizedBufferAllocator::GetBucketSizeFromIndex(
-    uint32_t index) const {
-  return 1ull << (static_cast<uint64_t>(index) + c_minResourceSizeExponent);
 }
 
 }  // namespace dml

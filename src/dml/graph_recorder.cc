@@ -21,22 +21,6 @@ namespace ctranslate2 {
 namespace dml {
 
 namespace {  // anonymous
-
-// Checks if two binding nodes have overlapping memory regions. This is
-// essential for detecting potential data hazards, where one operation might
-// overwrite data needed by another.
-static bool bindings_overlap(const BindingNode* a, const BindingNode* b) {
-  if (!a || !b || !a->resource || !b->resource) {
-    return false;
-  }
-  if (a->resource != b->resource) {
-    return false;
-  }
-  const UINT64 a_end = a->offset + a->size_in_bytes;
-  const UINT64 b_end = b->offset + b->size_in_bytes;
-  return a->offset < b_end && b->offset < a_end;
-}
-
 // When true, dumps the initial and final subgraphs to the console for
 // debugging.
 constexpr bool kDumpSubGraphs = false;
@@ -53,6 +37,21 @@ constexpr bool kCompareWithUnfused = false;
 constexpr bool kAlwaysRecompileSubgraphs = false;
 
 constexpr bool kDumpSubGraphBeforeBuild = false;
+
+// Checks if two binding nodes have overlapping memory regions. This is
+// essential for detecting potential data hazards, where one operation might
+// overwrite data needed by another.
+static bool bindings_overlap(const BindingNode* a, const BindingNode* b) {
+  if (!a || !b || !a->resource || !b->resource) {
+    return false;
+  }
+  if (a->resource != b->resource) {
+    return false;
+  }
+  const UINT64 a_end = a->offset + a->size_in_bytes;
+  const UINT64 b_end = b->offset + b->size_in_bytes;
+  return a->offset < b_end && b->offset < a_end;
+}
 
 // Represents a portion of a larger computation graph. A SubGraph consists of a
 // set of operator nodes, their inputs, and their outputs. SubGraphs can be
@@ -85,14 +84,14 @@ class SubGraph {
   // operator and output index.
   void CalculateAndSetOutputs() {
     outputs.clear();
-    std::unordered_map<ID3D12Resource*, OutputEdge> last_kill_of_resource;
+    std::unordered_map<IResourceWrapper*, OutputEdge> last_kill_of_resource;
 
     for (size_t i = 0; i < op_nodes.size(); ++i) {
       const auto* op_node = op_nodes[i];
       for (size_t j = 0; j < op_node->outputs.size(); ++j) {
         BindingNode* output_node = op_node->outputs[j];
         if (output_node && output_node->resource) {
-          last_kill_of_resource[output_node->resource] =
+          last_kill_of_resource[output_node->resource.Get()] =
               OutputEdge{static_cast<UINT32>(i), static_cast<UINT32>(j)};
         }
       }
@@ -274,12 +273,12 @@ class SubGraph {
           output_index;  // for kIntermediate, it's the output index of the op
     };
 
-    std::unordered_map<ID3D12Resource*, Value> value_map;
+    std::unordered_map<IResourceWrapper*, Value> value_map;
 
     // Initialize value map with graph inputs
     for (size_t i = 0; i < inputs.size(); ++i) {
       if (inputs[i] && inputs[i]->resource) {
-        value_map[inputs[i]->resource] = {Value::Type::kGraphInput, i, 0};
+        value_map[inputs[i]->resource.Get()] = {Value::Type::kGraphInput, i, 0};
       }
     }
 
@@ -296,13 +295,13 @@ class SubGraph {
         os << "      Input[" << j << "]: " << input_binding;
         if (input_binding) {
           if (input_binding->resource) {
-            os << ", resource: " << input_binding->resource
+            os << ", resource: " << input_binding->resource.Get()
                << ", offset: " << input_binding->offset
                << ", size: " << input_binding->size_in_bytes;
           }
           os << ")";
           if (input_binding->resource) {
-            auto it = value_map.find(input_binding->resource);
+            auto it = value_map.find(input_binding->resource.Get());
             if (it != value_map.end()) {
               const auto& value = it->second;
               if (value.type == Value::Type::kGraphInput) {
@@ -325,7 +324,7 @@ class SubGraph {
         os << "      Output[" << j << "]: " << output_binding;
         if (output_binding) {
           if (output_binding->resource) {
-            os << ", resource: " << output_binding->resource
+            os << ", resource: " << output_binding->resource.Get()
                << ", offset: " << output_binding->offset
                << ", size: " << output_binding->size_in_bytes;
           }
@@ -347,7 +346,7 @@ class SubGraph {
       // Update value map with outputs of the current operator
       for (size_t j = 0; j < op_node->outputs.size(); ++j) {
         if (op_node->outputs[j] && op_node->outputs[j]->resource) {
-          value_map[op_node->outputs[j]->resource] = {
+          value_map[op_node->outputs[j]->resource.Get()] = {
               Value::Type::kIntermediate, i, j};
         }
       }
@@ -363,7 +362,7 @@ class SubGraph {
       std::vector<utils::DmlBufferBindingBundle> inputs_bundles;
       inputs_bundles.reserve(op_node->inputs.size());
       for (const BindingNode* binding_node : op_node->inputs) {
-        inputs_bundles.emplace_back(binding_node->resource,
+        inputs_bundles.emplace_back(binding_node->resource.Get(),
                                     binding_node->offset,
                                     binding_node->size_in_bytes);
       }
@@ -373,7 +372,7 @@ class SubGraph {
       std::vector<utils::DmlBufferBindingBundle> outputs_bundles;
       outputs_bundles.reserve(op_node->outputs.size());
       for (const BindingNode* binding_node : op_node->outputs) {
-        outputs_bundles.emplace_back(binding_node->resource,
+        outputs_bundles.emplace_back(binding_node->resource.Get(),
                                      binding_node->offset,
                                      binding_node->size_in_bytes);
       }
@@ -403,8 +402,9 @@ std::vector<std::vector<std::byte>> DownloadSubgraphOutputs(
       results.emplace_back();
       continue;
     }
-    Microsoft::WRL::ComPtr<ID3D12Resource> resource(binding_node->resource);
-    std::vector<std::byte> full_resource_data = device->Download(resource);
+    Microsoft::WRL::ComPtr<IResourceWrapper> resource(binding_node->resource);
+    std::vector<std::byte> full_resource_data =
+        device->Download(resource->GetD3D12Resource());
 
     std::vector<std::byte> buffer(binding_node->size_in_bytes);
     if (binding_node->offset + binding_node->size_in_bytes <=
@@ -520,15 +520,14 @@ void GraphRecorder::Execute(Operator* op,
   std::vector<BindingNode*> input_candidates;
   std::vector<BindingNode*> output_pushed_nodes;
   // Process input bindings, creating or retrieving existing binding nodes.
-  auto input_descs = inputs.get_descs();
+  const auto& input_descs = inputs.get_buffer_binding_bundles();
   for (size_t i = 0; i < input_descs.size(); ++i) {
-    if (input_descs[i].Type == DML_BINDING_TYPE_BUFFER) {
-      auto buffer_binding =
-          static_cast<const DML_BUFFER_BINDING*>(input_descs[i].Desc);
+    if (input_descs[i].get_type() == DML_BINDING_TYPE_BUFFER) {
+      auto buffer_binding = input_descs[i].get_buffer_binding_ptr();
       bool node_created;  // Track if a new node was created
-      BindingNode* binding_node =
-          GetOrCreateBindingNode(buffer_binding->Buffer, buffer_binding->Offset,
-                                 buffer_binding->SizeInBytes, node_created);
+      BindingNode* binding_node = GetOrCreateBindingNode(
+          input_descs[i].get_resource_wrapper(), buffer_binding->Offset,
+          buffer_binding->SizeInBytes, node_created);
       op_node->inputs.push_back(binding_node);
 
       // If an input binding node is newly created, it's considered an input to
@@ -539,7 +538,7 @@ void GraphRecorder::Execute(Operator* op,
         input_candidates.push_back(binding_node);
       }
     } else {
-      if (input_descs[i].Type != DML_BINDING_TYPE_NONE) {
+      if (input_descs[i].get_type() != DML_BINDING_TYPE_NONE) {
         throw std::invalid_argument(
             "Unsupported input binding type in Execute.");
       }
@@ -548,20 +547,19 @@ void GraphRecorder::Execute(Operator* op,
   }
 
   // Process output bindings similarly.
-  auto output_descs = outputs.get_descs();
+  const auto& output_descs = outputs.get_buffer_binding_bundles();
   for (size_t i = 0; i < output_descs.size(); ++i) {
-    if (output_descs[i].Type == DML_BINDING_TYPE_BUFFER) {
-      auto buffer_binding =
-          static_cast<const DML_BUFFER_BINDING*>(output_descs[i].Desc);
+    if (output_descs[i].get_type() == DML_BINDING_TYPE_BUFFER) {
+      auto buffer_binding = output_descs[i].get_buffer_binding_ptr();
       bool node_created;
-      BindingNode* binding_node =
-          GetOrCreateBindingNode(buffer_binding->Buffer, buffer_binding->Offset,
-                                 buffer_binding->SizeInBytes, node_created);
+      BindingNode* binding_node = GetOrCreateBindingNode(
+          output_descs[i].get_resource_wrapper(), buffer_binding->Offset,
+          buffer_binding->SizeInBytes, node_created);
 
       op_node->outputs.push_back(binding_node);
       output_pushed_nodes.push_back(binding_node);
     } else {
-      if (output_descs[i].Type != DML_BINDING_TYPE_NONE) {
+      if (output_descs[i].get_type() != DML_BINDING_TYPE_NONE) {
         throw std::invalid_argument(
             "Unsupported output binding type in Execute.");
       }
@@ -624,16 +622,17 @@ void GraphRecorder::End() {
         overridden_inputs.push_back(new_resource_wrapper);
         ID3D12Resource* new_resource = new_resource_wrapper->GetD3D12Resource();
 
-        device->CopyResourceSubRegion(new_resource,       /*dst*/
-                                      old_node->resource, /*src*/
-                                      0,                  /*dstOffset*/
-                                      old_node->offset,   /*srcOffset*/
-                                      old_node->size_in_bytes);
+        device->CopyResourceSubRegion(
+            new_resource,                           /*dst*/
+            old_node->resource->GetD3D12Resource(), /*src*/
+            0,                                      /*dstOffset*/
+            old_node->offset,                       /*srcOffset*/
+            old_node->size_in_bytes);
 
         // Create a new binding node for the new resource.
         bool created;
         BindingNode* new_node = GetOrCreateBindingNode(
-            new_resource, 0, old_node->size_in_bytes, created);
+            new_resource_wrapper.Get(), 0, old_node->size_in_bytes, created);
         overridden_nodes_map[old_node] = new_node;
       }
 
@@ -770,7 +769,7 @@ void GraphRecorder::End() {
     std::vector<utils::DmlBufferBindingBundle> input_binding_bundles;
     input_binding_bundles.reserve(subgraph.inputs.size());
     for (const auto& binding_node : subgraph.inputs) {
-      input_binding_bundles.emplace_back(binding_node->resource,
+      input_binding_bundles.emplace_back(binding_node->resource.Get(),
                                          binding_node->offset,
                                          binding_node->size_in_bytes);
     }
@@ -780,7 +779,7 @@ void GraphRecorder::End() {
     for (const auto& output_edge : subgraph.outputs) {
       BindingNode* binding_node = subgraph.op_nodes[output_edge.node_index]
                                       ->outputs[output_edge.output_index];
-      output_binding_bundles.emplace_back(binding_node->resource,
+      output_binding_bundles.emplace_back(binding_node->resource.Get(),
                                           binding_node->offset,
                                           binding_node->size_in_bytes);
     }
@@ -815,11 +814,11 @@ void GraphRecorder::Flush() {
 // Retrieves an existing binding node or creates a new one if it doesn't exist.
 // This ensures that each unique resource (buffer, offset, size) is represented
 // by a single node.
-BindingNode* GraphRecorder::GetOrCreateBindingNode(ID3D12Resource* resource,
+BindingNode* GraphRecorder::GetOrCreateBindingNode(IResourceWrapper* resource,
                                                    UINT64 offset,
                                                    UINT64 size,
                                                    bool& created) {
-  std::tuple<ID3D12Resource*, UINT64, UINT64> key =
+  std::tuple<IResourceWrapper*, UINT64, UINT64> key =
       std::make_tuple(resource, offset, size);
 
   auto found = m_current_resource_bindings.find(resource);

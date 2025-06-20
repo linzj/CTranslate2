@@ -201,8 +201,8 @@ void primitives<Device::DirectML>::indexed_fill(T* x,
                                                 dim_t num_indices) {
   // For indexed fill, we need to use scatter operation
   // Create a tensor of values to scatter (all set to 'a')
-  ID3D12Resource* x_resource = dml::utils::ResourceFromRawBuffer(x);
-  const D3D12_RESOURCE_DESC x_desc = x_resource->GetDesc();
+  IResourceWrapper* x_resource = dml::utils::ResourceFromRawBuffer(x);
+  const D3D12_RESOURCE_DESC x_desc = x_resource->GetD3D12Resource()->GetDesc();
   const dim_t x_total_elements = x_desc.Width / sizeof(T);
   StorageView values({1, 1, 1, static_cast<dim_t>(num_indices)},
                      ctranslate2::type_to_dtype<T>::value, Device::DirectML);
@@ -252,12 +252,13 @@ void primitives<Device::DirectML>::indexed_fill(T* x,
                          Device::DirectML);
   x_view.copy_from(x_view_src);
 
-  std::vector<ID3D12Resource*> inputs = {
+  std::vector<IResourceWrapper*> inputs = {
       dml::utils::ResourceFromStorageView(x_view),  // Current data
       dml::utils::ResourceFromRawBuffer(indices),   // Indices
       dml::utils::ResourceFromStorageView(values)   // Values to scatter
   };
-  std::vector<ID3D12Resource*> outputs = {dml::utils::ResourceFromRawBuffer(x)};
+  std::vector<IResourceWrapper*> outputs = {
+      dml::utils::ResourceFromRawBuffer(x)};
   compiled_op->Execute({{dml::utils::ResourceFromStorageView(x_view), 0,
                          static_cast<UINT64>(x_total_elements * sizeof(T))},
                         {dml::utils::ResourceFromRawBuffer(indices), 0,
@@ -282,8 +283,10 @@ void primitives<Device::DirectML>::copy(const T* x, T* y, dim_t size) {
         "recorded in a graph.");
   }
 
-  ID3D12Resource* src_resource = dml::utils::ResourceFromRawBuffer(x);
-  ID3D12Resource* dst_resource = dml::utils::ResourceFromRawBuffer(y);
+  IResourceWrapper* src_resource_wrapper = dml::utils::ResourceFromRawBuffer(x);
+  IResourceWrapper* dst_resource_wrapper = dml::utils::ResourceFromRawBuffer(y);
+  ID3D12Resource* src_resource = src_resource_wrapper->GetD3D12Resource();
+  ID3D12Resource* dst_resource = dst_resource_wrapper->GetD3D12Resource();
 
   dxdevice->CopyResourceSubRegion(dst_resource, src_resource, 0, 0,
                                   static_cast<uint64_t>(size) * sizeof(T));
@@ -1510,7 +1513,7 @@ float primitives<Device::DirectML>::logsumexp(const T* x,
   const auto buffer_size = static_cast<UINT64>(size) * element_size;
   auto byte_offset = static_cast<UINT64>(offset) * element_size;
 
-  ID3D12Resource* input_resource = dml::utils::ResourceFromRawBuffer(x);
+  IResourceWrapper* input_resource = dml::utils::ResourceFromRawBuffer(x);
   StorageView temp_buffer_storage;
 
   if (byte_offset % DML_MINIMUM_BUFFER_TENSOR_ALIGNMENT != 0) {
@@ -1520,28 +1523,29 @@ float primitives<Device::DirectML>::logsumexp(const T* x,
                     ctranslate2::type_to_dtype<T>::value, Device::DirectML);
 
     auto command_list = dxdevice->GetCommandList();
-    ID3D12Resource* src_resource = input_resource;
-    ID3D12Resource* dst_resource =
+    IResourceWrapper* src_resource = input_resource;
+    IResourceWrapper* dst_resource =
         dml::utils::ResourceFromStorageView(temp_buffer_storage);
 
     D3D12_RESOURCE_BARRIER barriers[2];
     barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barriers[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    barriers[0].Transition.pResource = src_resource;
+    barriers[0].Transition.pResource = src_resource->GetD3D12Resource();
     barriers[0].Transition.Subresource =
         D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
     barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barriers[1].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    barriers[1].Transition.pResource = dst_resource;
+    barriers[1].Transition.pResource = dst_resource->GetD3D12Resource();
     barriers[1].Transition.Subresource =
         D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
     command_list->ResourceBarrier(2, barriers);
-    command_list->CopyBufferRegion(dst_resource, 0, src_resource, byte_offset,
-                                   buffer_size);
+    command_list->CopyBufferRegion(dst_resource->GetD3D12Resource(), 0,
+                                   src_resource->GetD3D12Resource(),
+                                   byte_offset, buffer_size);
     std::swap(barriers[0].Transition.StateBefore,
               barriers[0].Transition.StateAfter);
     std::swap(barriers[1].Transition.StateBefore,
@@ -1877,7 +1881,7 @@ void primitives<Device::DirectML>::transpose_4d(const T* a,
   dml::Operator* compiled_op = dml::GetOrCreateCompiledOperatorApi(
       std::move(op_bundle), DML_EXECUTION_FLAG_NONE, L"transpose_4d");
 
-  ID3D12Resource* input_resource = dml::utils::ResourceFromRawBuffer(a);
+  IResourceWrapper* input_resource = dml::utils::ResourceFromRawBuffer(a);
 
   compiled_op->Execute(
       {{input_resource, 0, static_cast<UINT64>(total_elements * sizeof(T))}},
@@ -2189,7 +2193,8 @@ void cross_device_primitives<Device::CPU, Device::DirectML>::copy(const T* x,
                                                                   dim_t size) {
   auto device = dml::get_device();
   std::string_view data(reinterpret_cast<const char*>(x), size * sizeof(T));
-  device->Upload(data.size(), data, dml::utils::ResourceFromRawBuffer(y));
+  device->Upload(data.size(), data,
+                 dml::utils::ResourceFromRawBuffer(y)->GetD3D12Resource());
 }
 
 template <>
@@ -2198,7 +2203,7 @@ void cross_device_primitives<Device::DirectML, Device::CPU>::copy(const T* x,
                                                                   T* y,
                                                                   dim_t size) {
   auto device = dml::get_device();
-  device->Download(dml::utils::ResourceFromRawBuffer(x),
+  device->Download(dml::utils::ResourceFromRawBuffer(x)->GetD3D12Resource(),
                    reinterpret_cast<void*>(y), size * sizeof(T));
 }
 

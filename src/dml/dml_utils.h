@@ -509,7 +509,7 @@ class DmlBufferBindingBundle {
 
   // Constructor for a valid buffer binding
   DmlBufferBindingBundle(
-      ID3D12Resource* resource,
+      IResourceWrapper* resource_wrapper,
       UINT64 offset = 0,
       UINT64 size_in_bytes = 0  // if 0, we will deduce from tensor desc
   );
@@ -533,9 +533,19 @@ class DmlBufferBindingBundle {
   // Returns the type of the binding.
   DML_BINDING_TYPE get_type() const { return type_; }
 
+  IResourceWrapper* get_resource_wrapper() const {
+    return resource_wrapper_.Get();
+  }
+
+  const DML_BUFFER_BINDING& get_buffer_binding() const {
+    return buffer_binding_;
+  }
+
   // Allow move construction and assignment
   DmlBufferBindingBundle(DmlBufferBindingBundle&& other) noexcept
-      : buffer_binding_(other.buffer_binding_), type_(other.type_) {
+      : resource_wrapper_(std::move(other.resource_wrapper_)),
+        buffer_binding_(other.buffer_binding_),
+        type_(other.type_) {
     // Reset the other to a safe state (optional, but good practice)
     other.type_ = DML_BINDING_TYPE_NONE;
     other.buffer_binding_ = {};
@@ -545,6 +555,7 @@ class DmlBufferBindingBundle {
     if (this != &other) {
       buffer_binding_ = other.buffer_binding_;
       type_ = other.type_;
+      resource_wrapper_ = std::move(other.resource_wrapper_);
       // Reset the other to a safe state
       other.type_ = DML_BINDING_TYPE_NONE;
       other.buffer_binding_ = {};
@@ -553,10 +564,13 @@ class DmlBufferBindingBundle {
   }
 
   DmlBufferBindingBundle(const DmlBufferBindingBundle& other) noexcept
-      : buffer_binding_(other.buffer_binding_), type_(other.type_) {}
+      : resource_wrapper_(other.get_resource_wrapper()),
+        buffer_binding_(other.buffer_binding_),
+        type_(other.type_) {}
 
   DmlBufferBindingBundle& operator=(const DmlBufferBindingBundle& other) {
     if (this != &other) {
+      resource_wrapper_ = other.resource_wrapper_;
       buffer_binding_ = other.buffer_binding_;
       type_ = other.type_;
     }
@@ -564,6 +578,7 @@ class DmlBufferBindingBundle {
   }
 
  private:
+  Microsoft::WRL::ComPtr<IResourceWrapper> resource_wrapper_;
   DML_BUFFER_BINDING buffer_binding_;
   DML_BINDING_TYPE type_;  // To handle optional/empty bindings gracefully
 };
@@ -578,13 +593,13 @@ class DmlBindingArrayBundle {
 
   // Constructor from a vector of D3D12 resources
   explicit DmlBindingArrayBundle(
-      const std::vector<ID3D12Resource*>& resources) {
-    buffer_binding_bundles_.reserve(resources.size());
-    for (ID3D12Resource* resource : resources) {
+      const std::vector<IResourceWrapper*>& resource_wrappers) {
+    buffer_binding_bundles_.reserve(resource_wrappers.size());
+    for (IResourceWrapper* resource_wrapper : resource_wrappers) {
       // Assuming default offset (0) and size (0, to be deduced by DML)
       // for each resource. If specific offsets/sizes are needed per resource,
       // a more complex input structure would be required for this constructor.
-      buffer_binding_bundles_.emplace_back(resource);
+      buffer_binding_bundles_.emplace_back(resource_wrapper);
     }
   }
 
@@ -598,7 +613,7 @@ class DmlBindingArrayBundle {
   // DmlBufferBindingBundle. This constructor perfectly forwards arguments to
   // DmlBufferBindingBundle's constructor, avoiding copies.
   DmlBindingArrayBundle(
-      std::initializer_list<std::tuple<ID3D12Resource*, UINT64, UINT64>>
+      std::initializer_list<std::tuple<IResourceWrapper*, UINT64, UINT64>>
           init_list) {
     buffer_binding_bundles_.reserve(init_list.size());
     for (const auto& args_tuple : init_list) {
@@ -611,7 +626,7 @@ class DmlBindingArrayBundle {
     }
   }
 
-  void AddBinding(ID3D12Resource* resource, UINT64 offset, UINT64 size) {
+  void AddBinding(IResourceWrapper* resource, UINT64 offset, UINT64 size) {
     buffer_binding_bundles_.emplace_back(resource, offset, size);
   }
 
@@ -625,6 +640,11 @@ class DmlBindingArrayBundle {
       descs.push_back(bundle.get_desc());
     }
     return descs;
+  }
+
+  const std::vector<DmlBufferBindingBundle>& get_buffer_binding_bundles()
+      const {
+    return buffer_binding_bundles_;
   }
 
   // Returns the number of bindings in the array.
@@ -651,22 +671,15 @@ class DmlBindingArrayBundle {
 
 // --- DML Operator & Resource Creation Utilities ---
 
-inline ID3D12Resource* ResourceFromStorageView(
+inline IResourceWrapper* ResourceFromStorageView(
     const StorageView& storage_view) {
   return static_cast<IResourceWrapper*>(
-             const_cast<void*>(storage_view.buffer()))
-      ->GetD3D12Resource();
+      const_cast<void*>(storage_view.buffer()));
 }
 
 template <typename T>
-inline ID3D12Resource* ResourceFromRawBuffer(const T* buffer) {
-  return reinterpret_cast<IResourceWrapper*>(const_cast<T*>(buffer))
-      ->GetD3D12Resource();
-}
-
-template <typename T>
-inline T* ResourceToBuffer(ID3D12Resource* resource) {
-  return reinterpret_cast<T*>(resource);
+inline IResourceWrapper* ResourceFromRawBuffer(const T* buffer) {
+  return reinterpret_cast<IResourceWrapper*>(const_cast<T*>(buffer));
 }
 
 template <typename T>

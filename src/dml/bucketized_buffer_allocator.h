@@ -34,13 +34,8 @@ class BucketizedBufferAllocator {
  private:
   using Bucket = std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>>;
 
-  uint32_t GetBucketIndexFromSize(uint64_t size) const;
-  uint64_t GetBucketSizeFromIndex(uint32_t index) const;
-
   AllocFunction m_allocFunction;
   std::vector<Bucket> m_pool;
-
-  static constexpr uint32_t c_minResourceSizeExponent = 4;  // 2^4 = 16
 
   bool m_roundingEnabled = true;
   bool m_disablePooling = false;

@@ -20,7 +20,7 @@ void SoftMax::compute(const StorageView& input,
                                     static_cast<UINT>(depth)};
 
   StorageView input_storage;
-  ID3D12Resource* input_resource = dml::utils::ResourceFromStorageView(input);
+  IResourceWrapper* input_resource = dml::utils::ResourceFromStorageView(input);
   if (input.buffer() == output.buffer()) {
     input_storage = std::move(output);
     StorageView new_output(input_storage.shape(), input_storage.dtype(),
