@@ -89,7 +89,6 @@ class Device {
     return m_commandListType;
   }
   ID3D12GraphicsCommandList* GetCommandList() { return m_commandList.Get(); }
-  DML_FEATURE_LEVEL GetDmlFeatureLevel() const { return m_dmlFeatureLevel; }
 
 #ifndef DXCOMPILER_NONE
   IDxcUtils* GetDxcUtils();
@@ -237,7 +236,6 @@ class Device {
 #endif
   Microsoft::WRL::ComPtr<IDMLDevice1> m_dml;
   Microsoft::WRL::ComPtr<IDMLCommandRecorder> m_commandRecorder;
-  DML_FEATURE_LEVEL m_dmlFeatureLevel;
   Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_timestampHeap;
   ID3D12DescriptorHeap* m_currentDescriptorHeap = nullptr;
   uint32_t m_timestampCapacity = 0;

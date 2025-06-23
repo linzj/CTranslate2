@@ -2,11 +2,6 @@
 #include "ctranslate2/ops/split.h"
 #include "ctranslate2/utils.h"
 
-#ifdef CT2_WITH_DIRECTML
-#include <utility>
-#include "ctranslate2/ops/multi_head_attention.h"
-#include "dml/backend_dml.h"
-#endif
 
 #include <algorithm>
 #include <cmath>
@@ -354,20 +349,6 @@ namespace ctranslate2 {
                                         dim_t offset) const {
       PROFILE("MultiHeadAttention");
       const Device device = queries.device();
-#ifdef CT2_WITH_DIRECTML
-      if (device == Device::DirectML && cached_keys && cached_values &&
-          !cached_keys->empty() && !cached_values->empty()) {
-        const auto& dml_device = ctranslate2::dml::get_device();
-        if (dml_device->GetDmlFeatureLevel() >= DML_FEATURE_LEVEL_6_1) {
-          const ops::MultiHeadAttention attn_op(_queries_scale, -10000.0f,
-                                                _num_heads, _is_decoder);
-          attn_op(queries, *cached_keys, *cached_values,
-                  _relative_attention_bias, nullptr, _relative_position_keys,
-                  output, cached_keys, cached_values);
-          return;
-        }
-      }
-#endif
       const DataType dtype = queries.dtype();
       StorageView fused_proj(dtype, device);
       StorageView queries_proj(dtype, device);

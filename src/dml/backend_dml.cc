@@ -205,7 +205,7 @@ bool has_directml_device() {
     // 5. Create the main Device object
     // Sensible defaults for Device constructor parameters.
     D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_11_0;
-    DML_FEATURE_LEVEL dmlFeatureLevel = DML_FEATURE_LEVEL_6_1;
+    DML_FEATURE_LEVEL dmlFeatureLevel = DML_FEATURE_LEVEL_5_0;
 
     g_device = std::make_unique<Device>(
         selected_adapter.Get(),  // The chosen hardware adapter
