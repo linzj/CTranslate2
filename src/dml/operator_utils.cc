@@ -733,6 +733,31 @@ void OperatorUtils::GenerateCacheKeyForDesc(std::ostringstream& key_stream,
       SerializeScaleBias(key_stream, desc->ScaleBias);
       break;
     }
+#if DML_TARGET_VERSION >= 0x6100
+    case DML_OPERATOR_MULTIHEAD_ATTENTION: {
+      auto desc = static_cast<const DML_MULTIHEAD_ATTENTION_OPERATOR_DESC*>(
+          op_desc->Desc);
+      SerializeTensorDesc(key_stream, desc->QueryTensor);
+      SerializeTensorDesc(key_stream, desc->KeyTensor);
+      SerializeTensorDesc(key_stream, desc->ValueTensor);
+      SerializeTensorDesc(key_stream, desc->StackedQueryKeyTensor);
+      SerializeTensorDesc(key_stream, desc->StackedKeyValueTensor);
+      SerializeTensorDesc(key_stream, desc->StackedQueryKeyValueTensor);
+      SerializeTensorDesc(key_stream, desc->BiasTensor);
+      SerializeTensorDesc(key_stream, desc->MaskTensor);
+      SerializeTensorDesc(key_stream, desc->RelativePositionBiasTensor);
+      SerializeTensorDesc(key_stream, desc->PastKeyTensor);
+      SerializeTensorDesc(key_stream, desc->PastValueTensor);
+      SerializeTensorDesc(key_stream, desc->OutputTensor);
+      SerializeTensorDesc(key_stream, desc->OutputPresentKeyTensor);
+      SerializeTensorDesc(key_stream, desc->OutputPresentValueTensor);
+      append_bytes(key_stream, desc->Scale);
+      append_bytes(key_stream, desc->MaskFilterValue);
+      append_bytes(key_stream, desc->HeadCount);
+      append_bytes(key_stream, desc->MaskType);
+      break;
+    }
+#endif
     default:
       throw std::runtime_error(
           "DMLOperatorCache: Unhandled DML_OPERATOR_TYPE in "
@@ -863,6 +888,10 @@ const char* OperatorUtils::DML_OPERATOR_TYPE_toString(DML_OPERATOR_TYPE type) {
       return "DML_OPERATOR_MATRIX_MULTIPLY_INTEGER";
     case DML_OPERATOR_ELEMENT_WISE_DEQUANTIZE_LINEAR:
       return "DML_OPERATOR_ELEMENT_WISE_DEQUANTIZE_LINEAR";
+#if DML_TARGET_VERSION >= 0x6100
+    case DML_OPERATOR_MULTIHEAD_ATTENTION:
+      return "DML_OPERATOR_MULTIHEAD_ATTENTION";
+#endif
     default:
       return "Unknown DML Operator Type";
   }

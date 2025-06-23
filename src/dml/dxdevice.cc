@@ -4,7 +4,6 @@
 #include "common.h"
 #include "descriptor_pool.h"
 #include "dml/constant_pool.h"
-#include "dml/dml_utils.h"
 #include "dml/graph_recorder.h"
 #include "dml/operator_cache.h"
 
@@ -92,6 +91,7 @@ Device::Device(IAdapter* adapter,
                std::shared_ptr<DmlModule> dmlModule)
     : m_d3dModule(d3dModule),
       m_dmlModule(dmlModule),
+      m_dmlFeatureLevel(dmlFeatureLevel),
       m_dispatchRepeat(dispatchRepeat),
       m_restoreBackgroundProcessing(disableBackgroundProcessing),
       m_restoreStablePowerState(setStablePowerState),
@@ -324,6 +324,7 @@ Device::Device(ID3D12Device* d3ddevice,
                std::shared_ptr<DmlModule> dmlModule)
     : m_d3dModule(d3dModule),
       m_dmlModule(dmlModule),
+      m_dmlFeatureLevel(dmlFeatureLevel),
       m_dispatchRepeat(dispatchRepeat),
       m_queue(std::make_unique<CommandQueue>(command_queue, false)),
       m_restoreBackgroundProcessing(false),
