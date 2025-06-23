@@ -116,7 +116,8 @@ Operator::Operator(Device* device,
 Operator::~Operator() = default;
 
 void Operator::Execute(const utils::DmlBindingArrayBundle& inputs,
-                       const utils::DmlBindingArrayBundle& outputs) {
+                       const utils::DmlBindingArrayBundle& outputs,
+                       bool now) {
   auto device = dml::get_device();
   GraphRecorder* graph_recorder = device->GetGraphRecorder();
   if (graph_recorder && graph_recorder->has_begun()) {
@@ -133,7 +134,8 @@ void Operator::Execute(const utils::DmlBindingArrayBundle& inputs,
     persistentBindingDesc.Desc = &*m_persistentResourceBinding;
   }
   device->ExecuteOperator(m_compiledOperator.Get(), persistentBindingDesc,
-                          std::move(inputBindings), std::move(outputBindings));
+                          std::move(inputBindings), std::move(outputBindings),
+                          now);
 }
 
 }  // namespace dml

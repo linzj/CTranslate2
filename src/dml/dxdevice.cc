@@ -1100,7 +1100,8 @@ void Device::InitializeOperator(
 void Device::ExecuteOperator(IDMLCompiledOperator* op,
                              const DML_BINDING_DESC& persistentResourceBinding,
                              std::vector<DML_BINDING_DESC> inputBindings,
-                             std::vector<DML_BINDING_DESC> outputBindings) {
+                             std::vector<DML_BINDING_DESC> outputBindings,
+                             bool now) {
   DML_BINDING_PROPERTIES execBindingProps = op->GetBindingProperties();
 
   const uint32_t numDescriptors = execBindingProps.RequiredDescriptorCount;
@@ -1146,17 +1147,9 @@ void Device::ExecuteOperator(IDMLCompiledOperator* op,
                                     bindingTable.Get());
   auto uav = CD3DX12_RESOURCE_BARRIER::UAV(nullptr);
   m_commandList->ResourceBarrier(1, &uav);
-  if (++m_recordCommands > kMaxRecordCommands) {
+  if (now || ++m_recordCommands > kMaxRecordCommands) {
     ExecuteCommandList();
   }
-}
-
-void Device::ExecuteOperator(IDMLCompiledOperator* op,
-                             std::vector<DML_BINDING_DESC> inputBindings,
-                             std::vector<DML_BINDING_DESC> outputBindings) {
-  DML_BINDING_DESC persistentBindingDesc = {};
-  ExecuteOperator(op, persistentBindingDesc, std::move(inputBindings),
-                  std::move(outputBindings));
 }
 
 void Device::SetDescriptorHeap(ID3D12DescriptorHeap* descriptorHeap) {

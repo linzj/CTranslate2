@@ -203,11 +203,8 @@ class Device {
   void ExecuteOperator(IDMLCompiledOperator* op,
                        const DML_BINDING_DESC& persistentResourceBinding,
                        std::vector<DML_BINDING_DESC> inputBindings,
-                       std::vector<DML_BINDING_DESC> outputBindings);
-
-  void ExecuteOperator(IDMLCompiledOperator* op,
-                       std::vector<DML_BINDING_DESC> inputBindings,
-                       std::vector<DML_BINDING_DESC> outputBindings);
+                       std::vector<DML_BINDING_DESC> outputBindings,
+                       bool now);
 
   void DummyPresent();
 

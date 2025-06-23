@@ -22,7 +22,8 @@ class Operator
   ~Operator();
 
   void Execute(const utils::DmlBindingArrayBundle& inputs,
-               const utils::DmlBindingArrayBundle& outputs);
+               const utils::DmlBindingArrayBundle& outputs,
+               bool now = false);
 
   DML_OPERATOR_TYPE GetType() const { return m_op_desc.get_desc().Type; }
 

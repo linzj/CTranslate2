@@ -793,7 +793,7 @@ void GraphRecorder::End() {
     utils::DmlBindingArrayBundle outputs(std::move(output_binding_bundles));
 
     // Execute the compiled graph.
-    graph_op->Execute(inputs, outputs);
+    graph_op->Execute(inputs, outputs, true);
 
     if (kCompareWithUnfused) {
       CompareAndVerify(subgraph);
