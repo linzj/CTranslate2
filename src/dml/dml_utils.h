@@ -469,6 +469,9 @@ class DmlOperatorDescBundle {
     } else if constexpr (std::is_same_v<T,
                                         DML_ELEMENT_WISE_SQRT_OPERATOR_DESC>) {
       type = DML_OPERATOR_ELEMENT_WISE_SQRT;
+    } else if constexpr (std::is_same_v<
+                             T, DML_MULTIHEAD_ATTENTION_OPERATOR_DESC>) {
+      type = DML_OPERATOR_MULTIHEAD_ATTENTION;
     } else {
       static_assert(false,
                     "Unsupported operator type for DmlOperatorDescBundle");

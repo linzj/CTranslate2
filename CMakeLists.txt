@@ -182,6 +182,7 @@ set(SOURCES
   src/ops/mul.cc
   src/ops/multinomial.cc
   src/ops/multinomial_cpu.cc
+  src/ops/multi_head_attention.cc
   src/ops/quantize.cc
   src/ops/quantize_cpu.cc
   src/ops/relu.cc
@@ -281,6 +282,7 @@ if(WITH_DIRECTML)
     src/dml/ops/flash_attention_dml.cc
     src/dml/ops/multinomial_dml.cc
     src/dml/ops/gumbel_max_dml.cc
+    src/dml/ops/multi_head_attention_dml.cc
     src/dml/ops/awq/dequantize_dml.cc
     src/dml/ops/awq/gemv_dml.cc
     src/dml/ops/awq/gemm_dml.cc
