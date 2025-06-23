@@ -19,8 +19,9 @@
 
 using Microsoft::WRL::ComPtr;
 
+namespace {
 constexpr const int kDescriptorCount = 1024;
-constexpr const int kMaxRecordCommands = 64;
+constexpr const int kMaxRecordCommands = 32;
 
 static void __stdcall DebugMessageCallback(D3D12_MESSAGE_CATEGORY cat,
                                            D3D12_MESSAGE_SEVERITY sev,
@@ -45,6 +46,30 @@ static void __stdcall DebugMessageCallback(D3D12_MESSAGE_CATEGORY cat,
   }
 }
 
+static D3D12_COMMAND_LIST_TYPE CalculateCommandListType(
+    ID3D12Device* d3d12_device) {
+  D3D12_FEATURE_DATA_FEATURE_LEVELS feature_levels = {};
+
+  D3D_FEATURE_LEVEL feature_levels_list[] = {
+      D3D_FEATURE_LEVEL_1_0_CORE, D3D_FEATURE_LEVEL_11_0,
+      D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_12_0, D3D_FEATURE_LEVEL_12_1};
+
+  feature_levels.NumFeatureLevels = ARRAYSIZE(feature_levels_list);
+  feature_levels.pFeatureLevelsRequested = feature_levels_list;
+  THROW_IF_FAILED(d3d12_device->CheckFeatureSupport(
+      D3D12_FEATURE_FEATURE_LEVELS, &feature_levels, sizeof(feature_levels)));
+
+  auto use_compute_command_list =
+      (feature_levels.MaxSupportedFeatureLevel <= D3D_FEATURE_LEVEL_1_0_CORE);
+
+  if (use_compute_command_list) {
+    return D3D12_COMMAND_LIST_TYPE_COMPUTE;
+  }
+
+  return D3D12_COMMAND_LIST_TYPE_DIRECT;
+}
+}  // namespace
+
 namespace ctranslate2 {
 namespace dml {
 
@@ -52,7 +77,6 @@ Device::Device(IAdapter* adapter,
                D3D_FEATURE_LEVEL featureLevel,
                DML_FEATURE_LEVEL dmlFeatureLevel,
                bool debugLayersEnabled,
-               D3D12_COMMAND_LIST_TYPE commandListType,
                uint32_t dispatchRepeat,
                bool uavBarrierAfterDispatch,
                bool aliasingBarrierAfterDispatch,
@@ -203,11 +227,12 @@ Device::Device(IAdapter* adapter,
   }
 #endif
 
+  m_commandListType = CalculateCommandListType(m_d3d.Get());
   D3D12_COMMAND_QUEUE_DESC queueDesc = {};
   queueDesc.Flags = disableGpuTimeout
                         ? D3D12_COMMAND_QUEUE_FLAG_DISABLE_GPU_TIMEOUT
                         : D3D12_COMMAND_QUEUE_FLAG_NONE;
-  queueDesc.Type = commandListType;
+  queueDesc.Type = m_commandListType;
   ComPtr<ID3D12CommandQueue> queue;
   THROW_IF_FAILED(m_d3d->CreateCommandQueue(
       &queueDesc, IID_GRAPHICS_PPV_ARGS(queue.ReleaseAndGetAddressOf())));
@@ -287,7 +312,6 @@ Device::Device(IAdapter* adapter,
 Device::Device(ID3D12Device* d3ddevice,
                ID3D12CommandQueue* command_queue,
                DML_FEATURE_LEVEL dmlFeatureLevel,
-               D3D12_COMMAND_LIST_TYPE commandListType,
                uint32_t dispatchRepeat,
                bool uavBarrierAfterDispatch,
                bool aliasingBarrierAfterDispatch,
@@ -300,7 +324,6 @@ Device::Device(ID3D12Device* d3ddevice,
                std::shared_ptr<DmlModule> dmlModule)
     : m_d3dModule(d3dModule),
       m_dmlModule(dmlModule),
-      m_commandListType(commandListType),
       m_dispatchRepeat(dispatchRepeat),
       m_queue(std::make_unique<CommandQueue>(command_queue, false)),
       m_restoreBackgroundProcessing(false),
@@ -377,6 +400,7 @@ Device::Device(ID3D12Device* d3ddevice,
       m_dmlModule->CreateDevice1(m_d3d.Get(), DML_CREATE_DEVICE_FLAG_NONE,
                                  dmlFeatureLevel, IID_PPV_ARGS(&m_dml)));
 
+  m_commandListType = CalculateCommandListType(m_d3d.Get());
   THROW_IF_FAILED(m_d3d->CreateCommandAllocator(
       m_commandListType,
       IID_GRAPHICS_PPV_ARGS(m_commandAllocator.ReleaseAndGetAddressOf())));

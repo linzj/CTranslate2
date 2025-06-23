@@ -50,7 +50,6 @@ class Device {
          D3D_FEATURE_LEVEL featureLevel,
          DML_FEATURE_LEVEL dmlFeatureLevel,
          bool debugLayersEnabled,
-         D3D12_COMMAND_LIST_TYPE commandListType,
          uint32_t dispatchRepeat,
          bool uavBarrierAfterDispatch,
          bool aliasingBarrierAfterDispatch,
@@ -68,7 +67,6 @@ class Device {
   Device(ID3D12Device* d3ddevice,
          ID3D12CommandQueue* command_queue,
          DML_FEATURE_LEVEL dmlFeatureLevel,
-         D3D12_COMMAND_LIST_TYPE commandListType,
          uint32_t dispatchRepeat,
          bool uavBarrierAfterDispatch,
          bool aliasingBarrierAfterDispatch,
@@ -246,7 +244,7 @@ class Device {
   uint32_t m_timestampCapacity = 0;
   uint32_t m_timestampHeadIndex = 0;
   uint32_t m_timestampCount = 0;
-  D3D12_COMMAND_LIST_TYPE m_commandListType = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+  D3D12_COMMAND_LIST_TYPE m_commandListType;
   Microsoft::WRL::ComPtr<ID3D12CommandAllocator> m_commandAllocator;
   Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> m_commandList;
 
