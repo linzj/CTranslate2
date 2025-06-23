@@ -1072,13 +1072,19 @@ void primitives<Device::DirectML>::add_batch_broadcast(const T* a,
 
   const dim_t batch_size = b_size / a_size;
 
-  const std::vector<UINT> a_dims = {1, 1, 1, static_cast<UINT>(a_size)};
   const std::vector<UINT> b_dims = {1, 1, static_cast<UINT>(batch_size),
                                     static_cast<UINT>(a_size)};
+  const std::vector<UINT> a_dims = b_dims;
+  const std::vector<UINT> a_strides_broadcast = {
+      static_cast<UINT>(a_size),  // Batch stride (not used)
+      static_cast<UINT>(a_size),  // Batch stride (not used)
+      0,                          // Row stride
+      1                           // Column stride
+  };
 
   ::ctranslate2::dml::utils::DmlOperatorDescBundle op_bundle;
-  auto& a_bundle =
-      op_bundle.AddInput(dml::get_dml_data_type<T>(), a_dims, nullptr);
+  auto& a_bundle = op_bundle.AddInput(dml::get_dml_data_type<T>(), a_dims,
+                                      &a_strides_broadcast);
   auto& b_bundle =
       op_bundle.AddInput(dml::get_dml_data_type<T>(), b_dims, nullptr);
   auto& c_bundle =
