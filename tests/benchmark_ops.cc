@@ -689,63 +689,96 @@ void benchmark_gemm(Device device, DataType dtype) {
   }
 }
 
-void benchmark_gemm_integer_20_1_1_64(Device device) {
+void benchmark_gemm_float_20_1_1_64(Device device) {
+  const dim_t batch_size = 20;
+  const dim_t m = 1;
+  const dim_t k = 64;
+  const dim_t n = 1;
+  const float alpha = 0.125f;
+  const float beta = 0.0f;
+  const bool transpose_a = false;
+  const bool transpose_b = true;
+
+  auto run_gemm = [&](StorageView& a, StorageView& b, StorageView& c,
+                      Device d) {
+    const dim_t lda = k;
+    const dim_t ldb = k;
+    const dim_t ldc = n;
+    const dim_t stridea = 1 * m * k;
+    const dim_t strideb = 1 * n * k;
+    const dim_t stridec = 1 * m * n;
+    if (d == Device::CPU) {
+      primitives<Device::CPU>::gemm_batch_strided<float, float>(
+          transpose_a, transpose_b, m, n, k, alpha, a.data<float>(), lda,
+          stridea, b.data<float>(), ldb, strideb, beta, c.data<float>(), ldc,
+          stridec, batch_size);
+    }
+#if defined(CT2_WITH_CUDA)
+    else if (d == Device::CUDA) {
+      primitives<Device::CUDA>::gemm_batch_strided<float, float>(
+          transpose_a, transpose_b, m, n, k, alpha, a.data<float>(), lda,
+          stridea, b.data<float>(), ldb, strideb, beta, c.data<float>(), ldc,
+          stridec, batch_size);
+    }
+#endif
+#if defined(CT2_WITH_DIRECTML)
+    else if (d == Device::DirectML) {
+      primitives<Device::DirectML>::gemm_batch_strided<float, float>(
+          transpose_a, transpose_b, m, n, k, alpha, a.data<float>(), lda,
+          stridea, b.data<float>(), ldb, strideb, beta, c.data<float>(), ldc,
+          stridec, batch_size);
+    }
+#endif
+  };
+
   if (!kCheckCorrectness) {
-    const Shape a_shape = {20, 1, 1, 64};
-    const Shape b_shape = {64, 256};
-    StorageView a(a_shape, DataType::INT8, device);
-    StorageView b(b_shape, DataType::INT8, device);
-    StorageView c(DataType::INT32, device);
-    const ops::Gemm gemm_op(1.0f, 0.0f, false, false);
-    BENCHMARK(gemm_op(a, b, c), 1000);
+    const Shape a_shape = {batch_size, 1, m, k};
+    const Shape b_shape = {batch_size, 1, n, k};
+    StorageView a(a_shape, DataType::FLOAT32, device);
+    StorageView b(b_shape, DataType::FLOAT32, device);
+    StorageView c(DataType::FLOAT32, device);
+    c.resize({batch_size, 1, m, n});
+
+    auto fn = [&]() { run_gemm(a, b, c, device); };
+    BENCHMARK(fn(), 1000);
+
   } else {
-    const DataType dtype = DataType::INT8;
-    const DataType output_dtype_check = DataType::INT32;
+    const DataType dtype = DataType::FLOAT32;
+    const DataType output_dtype = DataType::FLOAT32;
 
-    const Shape a_shape = {20, 1, 1, 64};
-    const dim_t K = 64;
-    const dim_t N = 256;  // A reasonable value for N.
+    const Shape a_shape = {batch_size, 1, m, k};
+    const Shape b_shape = {batch_size, 1, n, k};
+    const Shape c_shape = {batch_size, 1, m, n};
 
-    const Shape b_shape = {K, N};
+    std::vector<float> a_data = rand_vector(batch_size * 1 * m * k);
+    std::vector<float> b_data = rand_vector(batch_size * 1 * n * k);
 
-    // transA=false, transB=false
-    const ops::Gemm gemm_op(1.0f, 0.0f, false, false);
+    StorageView a_device(a_shape, a_data, device);
+    StorageView b_device(b_shape, b_data, device);
+    StorageView c_device(output_dtype, device);
+    c_device.resize(c_shape);
 
-    const dim_t a_total_size =
-        std::accumulate(a_shape.begin(), a_shape.end(), static_cast<dim_t>(1),
-                        std::multiplies<dim_t>());
-    std::vector<int8_t> a_data_i8(a_total_size);
-    std::iota(a_data_i8.begin(), a_data_i8.end(), static_cast<int8_t>(0));
+    StorageView a_cpu(a_shape, a_data, Device::CPU);
+    StorageView b_cpu(b_shape, b_data, Device::CPU);
+    StorageView c_cpu(output_dtype, Device::CPU);
+    c_cpu.resize(c_shape);
 
-    const dim_t b_total_size = b_shape[0] * b_shape[1];
-    std::vector<int8_t> b_data_i8(b_total_size);
-    std::iota(b_data_i8.begin(), b_data_i8.end(), static_cast<int8_t>(1));
+    run_gemm(a_device, b_device, c_device, device);
+    run_gemm(a_cpu, b_cpu, c_cpu, Device::CPU);
 
-    StorageView a_device(a_shape, a_data_i8, device);
-    StorageView b_device(b_shape, b_data_i8, device);
-    StorageView c_device(output_dtype_check, device);
-
-    StorageView a_cpu(a_shape, a_data_i8, Device::CPU);
-    StorageView b_cpu(b_shape, b_data_i8, Device::CPU);
-    StorageView c_cpu(output_dtype_check, Device::CPU);
-
-    gemm_op(a_device, b_device, c_device);
-    gemm_op(a_cpu, b_cpu, c_cpu);
-
-    StorageView c_device_cpu_copy(output_dtype_check, Device::CPU);
+    StorageView c_device_cpu_copy(output_dtype, Device::CPU);
     c_device_cpu_copy.copy_from(c_device, true);
 
     std::ostringstream error_log;
     int total_mismatches = dispatch_compare_views(
-        c_device_cpu_copy, c_cpu, "GEMM Integer (20,1,1,64) Output", error_log);
+        c_device_cpu_copy, c_cpu, "GEMM Float (20,1,1,64) Output", error_log);
 
     if (total_mismatches > 0) {
       std::cerr << error_log.str() << std::endl;
       throw std::runtime_error(
           "GEMM output mismatch for input shape (20,1,1,64) with dtype " +
           dtype_str_local(dtype) + " (output dtype " +
-          dtype_str_local(output_dtype_check) + ") details:\n" +
-          error_log.str());
+          dtype_str_local(output_dtype) + ") details:\n" + error_log.str());
     }
   }
 }
@@ -1205,8 +1238,8 @@ int main(int argc, char* argv[]) {
     benchmark_gemm(device, dtype);
   else if (op == "gemm_integer")
     benchmark_gemm_integer(device);
-  else if (op == "gemm_integer_specific")
-    benchmark_gemm_integer_20_1_1_64(device);
+  else if (op == "gemm_float_specific")
+    benchmark_gemm_float_20_1_1_64(device);
   else if (op == "quantize")
     benchmark_quantize(device, dtype);
   else if (op == "dequantize")
