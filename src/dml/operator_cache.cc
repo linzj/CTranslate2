@@ -104,7 +104,8 @@ Operator* GetOrCreateCompiledOperatorApi(utils::DmlOperatorDescBundle&& op_desc,
   // Assumes get_dml_device() is available in ctranslate2::dml namespace
   // and returns the current IDMLDevice*.
   return DMLOperatorCache::instance().GetOrCreateCompiledOperator(
-      std::move(op_desc), flags, name);
+      std::move(op_desc),
+      flags | DML_EXECUTION_FLAG_ALLOW_HALF_PRECISION_COMPUTATION, name);
 }
 
 }  // namespace dml
