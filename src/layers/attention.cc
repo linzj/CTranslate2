@@ -2,11 +2,6 @@
 #include "ctranslate2/ops/split.h"
 #include "ctranslate2/utils.h"
 
-#ifdef CT2_WITH_DIRECTML
-#include <utility>
-#include "ctranslate2/ops/multi_head_attention.h"
-#include "dml/backend_dml.h"
-#endif
 
 #include <algorithm>
 #include <cmath>
@@ -468,56 +463,34 @@ namespace ctranslate2 {
         }
       }
 
+      if (cached_keys) {
+        keys_proj.shallow_copy(*cached_keys);
+        values_proj.shallow_copy(*cached_values);
+      }
+
       StorageView& context = fused_proj;  // Reuse storage.
-#ifdef CT2_WITH_DIRECTML
-      bool fallback = true;
-      const auto& dml_device = ctranslate2::dml::get_device();
-      if (device == Device::DirectML &&
-          dml_device->GetDmlFeatureLevel() >= DML_FEATURE_LEVEL_6_1 &&
-          !_relative_position_keys && !_relative_asymmetric_position_keys &&
-          !_relative_position_values && !_alibi && false) {
-        const ops::MultiHeadAttention attn_op(_queries_scale, -10000.0f,
-                                              _num_heads, _is_decoder);
+      dot_product_attention(queries_proj,
+                            keys_proj,
+                            values_proj,
+                            values_lengths,
+                            _relative_position_keys,
+                            _relative_asymmetric_position_keys,
+                            _relative_position_values,
+                            _relative_attention_bias,
+                            _relative_left_max_position,
+                            _relative_right_max_position,
+                            _maximum_relative_position,
+                            context,
+                            attention,
+                            return_normalized_attention,
+                            _queries_scale,
+                            _is_decoder,
+                            bool(cached_keys),
+                            beam_size,
+                            _alibi,
+                            position_bias);
 
-        const StorageView* past_keys_ptr =
-            (cached_keys && !cached_keys->empty()) ? cached_keys : nullptr;
-        const StorageView* past_values_ptr =
-            (cached_values && !cached_values->empty()) ? cached_values
-                                                       : nullptr;
-
-        if (cached_keys) {
-          keys_proj.shallow_copy(*cached_keys);
-          values_proj.shallow_copy(*cached_values);
-        }
-
-        try {
-          attn_op(queries_proj, keys_proj, values_proj, nullptr, values_lengths,
-                  _relative_attention_bias, nullptr, nullptr, context, nullptr,
-                  nullptr);
-          fallback = false;
-        } catch (...) {
-        }
-      }
-      if (fallback)
-#endif
-      {
-        if (cached_keys) {
-          keys_proj.shallow_copy(*cached_keys);
-          values_proj.shallow_copy(*cached_values);
-        }
-
-        dot_product_attention(
-            queries_proj, keys_proj, values_proj, values_lengths,
-            _relative_position_keys, _relative_asymmetric_position_keys,
-            _relative_position_values, _relative_attention_bias,
-            _relative_left_max_position, _relative_right_max_position,
-            _maximum_relative_position, context, attention,
-            return_normalized_attention, _queries_scale, _is_decoder,
-            bool(cached_keys), beam_size, _alibi, position_bias);
-      }
-
-      if (prefilling && cached_keys &&
-          cached_keys->shape()[2] > _sliding_window) {
+      if (prefilling && cached_keys && cached_keys->shape()[2] > _sliding_window) {
         // set only last sliding_window tokens to cached_keys and cached_values after computing attention
         const ops::Slide slide_op(2, cached_keys->shape()[2] - _sliding_window, _sliding_window);
         StorageView tmp(dtype, device);
