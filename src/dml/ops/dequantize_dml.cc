@@ -116,28 +116,17 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
       scale_mult_op_bundle.AddOutput(combined_scale);
   auto& scale_mult_desc =
       scale_mult_op_bundle
-          .GetOperatorDesc<DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC>();
+          .GetOperatorDesc<DML_ELEMENT_WISE_DIVIDE_OPERATOR_DESC>();
   scale_mult_desc.ATensor = &a_scale_desc_bundle.get_tensor_desc();
   scale_mult_desc.BTensor = &b_scale_desc_bundle.get_tensor_desc();
   scale_mult_desc.OutputTensor = &intermediate_fp_desc_bundle.get_tensor_desc();
   auto scale_mult_op =
       dml::GetOrCreateCompiledOperatorApi(std::move(scale_mult_op_bundle));
 
-  StorageView reciprocal_scale(y.shape(), y.dtype(), y.device());
-  dml::utils::DmlOperatorDescBundle recip_op_bundle;
-  auto& recip_input_desc = recip_op_bundle.AddInput(combined_scale);
-  auto& recip_output_desc = recip_op_bundle.AddOutput(reciprocal_scale);
-  auto& recip_desc =
-      recip_op_bundle.GetOperatorDesc<DML_ELEMENT_WISE_RECIP_OPERATOR_DESC>();
-  recip_desc.InputTensor = &recip_input_desc.get_tensor_desc();
-  recip_desc.OutputTensor = &recip_output_desc.get_tensor_desc();
-  auto recip_op =
-      dml::GetOrCreateCompiledOperatorApi(std::move(recip_op_bundle));
-
   StorageView dequantize_output_buffer;
   dml::utils::DmlOperatorDescBundle dequantize_op_bundle;
   auto& c_desc = dequantize_op_bundle.AddInput(c);
-  auto& scale_desc = dequantize_op_bundle.AddInput(reciprocal_scale);
+  auto& scale_desc = dequantize_op_bundle.AddInput(combined_scale);
   const DML_TENSOR_DESC* dequantize_output_desc_ptr;
   if (bias || _activation_type) {
     dequantize_output_buffer = StorageView(y.shape(), y.dtype(), y.device());
@@ -246,19 +235,13 @@ void Dequantize::dequantize_gemm_output<Device::DirectML, float>(
       {dml::utils::ResourceFromStorageView(combined_scale), 0, 0}};
   scale_mult_op->Execute(scale_mult_inputs, scale_mult_outputs);
 
-  dml::utils::DmlBindingArrayBundle recip_inputs{
-      {dml::utils::ResourceFromStorageView(combined_scale), 0, 0}};
-  dml::utils::DmlBindingArrayBundle recip_outputs{
-      {dml::utils::ResourceFromStorageView(reciprocal_scale), 0, 0}};
-  recip_op->Execute(recip_inputs, recip_outputs);
-
   IResourceWrapper* dequantize_output_resource =
       (bias || _activation_type)
           ? dml::utils::ResourceFromStorageView(dequantize_output_buffer)
           : dml::utils::ResourceFromStorageView(y);
   dml::utils::DmlBindingArrayBundle dequantize_inputs_combined{
       {dml::utils::ResourceFromStorageView(c), 0, 0},
-      {dml::utils::ResourceFromStorageView(reciprocal_scale), 0, 0},
+      {dml::utils::ResourceFromStorageView(combined_scale), 0, 0},
       {static_cast<IResourceWrapper*>(nullptr), 0, 0}};  // ZeroPointTensor
   dml::utils::DmlBindingArrayBundle dequantize_outputs_combined{
       {dequantize_output_resource, 0, 0}};

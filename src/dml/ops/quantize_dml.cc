@@ -309,39 +309,6 @@ void Quantize::quantize(const StorageView& input,
           static_cast<UINT64>(0)}});
   }
   recording.BailOut();
-  // --- Correct the 'scale' to be its reciprocal for the output parameter ---
-  // The 'scale' StorageView (output parameter) currently holds S_calc (abs_max
-  // / 127.0f or 1.0f). The request is for its final value to be 1/S_calc. The
-  // 'scale' StorageView is used as both input and output for an in-place
-  // modification.
-  {
-    dml::utils::DmlOperatorDescBundle op_desc;
-    auto& scale_desc = op_desc.AddInput(scale);
-    auto& output_scale_desc = op_desc.AddOutput(scale);
-    auto& recip_op_def =
-        op_desc.GetOperatorDesc<DML_ELEMENT_WISE_RECIP_OPERATOR_DESC>();
-    recip_op_def.InputTensor = &scale_desc.get_tensor_desc();
-    recip_op_def.OutputTensor = &output_scale_desc.get_tensor_desc();
-    recip_op_def.ScaleBias = nullptr;
-    dml::Operator* compiled_recip_op = dml::GetOrCreateCompiledOperatorApi(
-        std::move(op_desc), DML_EXECUTION_FLAG_NONE,
-        L"Quantize_FinalReciprocalScale");
-    // Avoid input overlaps output if graph recording is enabled.
-    StorageView scale_storage;
-    StorageView* scale_input = &scale;
-    if (dml::get_device()->HasGraphRecordingBegun()) {
-      scale_storage = std::move(scale);
-      scale_input = &scale_storage;
-      StorageView output(scale_storage.shape(), scale_storage.dtype(),
-                         Device::DirectML);
-      scale = std::move(output);
-    }
-    compiled_recip_op->Execute(
-        {{dml::utils::ResourceFromStorageView(*scale_input),
-          static_cast<UINT64>(0), static_cast<UINT64>(0)}},
-        {{dml::utils::ResourceFromStorageView(scale), static_cast<UINT64>(0),
-          static_cast<UINT64>(0)}});
-  }
 }
 
 // Explicit template instantiation
