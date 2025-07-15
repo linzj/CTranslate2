@@ -83,6 +83,7 @@ endif()
 if (onnxruntime_USE_VCPKG)
   find_package(directx-headers CONFIG REQUIRED)
 else()
+  include(FetchContent)
   FetchContent_Declare(
     directx_headers
     URL https://github.com/microsoft/DirectX-Headers/archive/refs/tags/v1.613.1.zip

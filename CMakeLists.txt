@@ -33,7 +33,7 @@ if(WITH_DIRECTML)
   message(STATUS "Compiling with DirectML backend")
   include("cmake/dml.cmake")
   add_definitions(-DCT2_WITH_DIRECTML)
-  add_compile_definitions(DML_TARGET_VERSION_USE_LATEST)
+  add_compile_definitions(DML_TARGET_VERSION_USE_LATEST NOMINMAX)
 endif()
 
 if(DEFINED ENV{INTELROOT})
